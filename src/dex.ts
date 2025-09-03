@@ -15,7 +15,7 @@ const V2_ROUTER_ABI = [
 
 // V3 Quoter & Router (UniswapV3-style)
 const V3_QUOTER_ABI = [
-  'function quoteExactInputSingle(address tokenIn,address tokenOut,uint24 fee,uint256 amountIn,uint160 sqrtPriceLimitX96) returns (uint256 amountOut)'
+  'function quoteExactInputSingle(address tokenIn,address tokenOut,uint24 fee,uint256 amountIn,uint160 sqrtPriceLimitX96) returns (uint256 amountOut)',
 ];
 const V3_ROUTER_ABI = [
   'function exactInputSingle(tuple(address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 deadline,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)',
@@ -92,35 +92,17 @@ function v3(key: string, router?: string, quoter?: string, fee?: number): RouteV
   return { key, kind: 'v3', router, quoter, fee };
 }
 
-/** Human label for a route (useful in UI). */
-export function routeLabel(r: Route): string {
-  if (r.kind === 'v2') {
-    if (r.key === 'PULSEX_V1') return 'PulseX v1';
-    if (r.key === 'LEGACY')     return 'PulseX v2';
-    if (r.key === '9MM_V2')     return '9mm v2';
-    if (r.key === '9INCH_V2')   return '9inch v2';
-    return r.key;
-  } else {
-    const pct = r.fee === 500 ? '0.05%' : r.fee === 3000 ? '0.3%' : r.fee === 10000 ? '1%' : `${r.fee/100}%`;
-    if (r.key.startsWith('9MM_V3'))   return `9mm v3 (${pct})`;
-    if (r.key.startsWith('9INCH_V3')) return `9inch v3 (${pct})`;
-    return `v3 (${pct})`;
-  }
-}
-
 /** Build the list of candidate routes (skip undefined). */
 function candidateRoutes(): Route[] {
   const routes: (Route | null)[] = [];
 
-  // V2
-  routes.push(v2('PULSEX_V1', process.env.PULSEX_V1_ROUTER));     // <- add this env in Railway for v1 pools
-  routes.push(v2('9MM_V2', process.env.NINEMM_V2_ROUTER));
-  routes.push(v2('9INCH_V2', process.env.NINEINCH_V2_ROUTER));
+  // V2 DEXes
+  routes.push(v2('PULSEX_V1', process.env.PULSEX_V1_ROUTER));         // 0x98bf...Acc02
+  routes.push(v2('PULSEX_V2', process.env.ROUTER_ADDRESS));            // 0x165c...52d9  (your existing V2)
+  routes.push(v2('9MM_V2', process.env.NINEMM_V2_ROUTER));             // optional
+  routes.push(v2('9INCH_V2', process.env.NINEINCH_V2_ROUTER));         // optional
 
-  // Back-compat: your original v2 router env
-  if (process.env.ROUTER_ADDRESS) routes.push({ key: 'LEGACY', kind: 'v2', router: process.env.ROUTER_ADDRESS } as RouteV2);
-
-  // V3 (only if router+quoter provided)
+  // V3 (only if both router+quoter are provided)
   const v3Fees = [500, 3000, 10000]; // 0.05%, 0.3%, 1%
   if (process.env.NINEMM_V3_ROUTER && process.env.NINEMM_V3_QUOTER) {
     for (const fee of v3Fees) routes.push(v3('9MM_V3', process.env.NINEMM_V3_ROUTER, process.env.NINEMM_V3_QUOTER, fee));
@@ -138,7 +120,7 @@ async function quoteV2(amountIn: bigint, tokenIn: string, tokenOut: string, rout
   try {
     const router = new ethers.Contract(routerAddr, V2_ROUTER_ABI, provider);
     const path = [tokenIn, tokenOut];
-    const amounts = await router.getAmountsOut(amountIn, path) as unknown as bigint[];
+    const amounts = (await router.getAmountsOut(amountIn, path)) as unknown as bigint[];
     return amounts?.[amounts.length - 1] ?? null;
   } catch {
     return null;
@@ -148,7 +130,7 @@ async function quoteV2(amountIn: bigint, tokenIn: string, tokenOut: string, rout
 async function quoteV3(amountIn: bigint, tokenIn: string, tokenOut: string, fee: number, quoterAddr: string): Promise<bigint | null> {
   try {
     const quoter = new ethers.Contract(quoterAddr, V3_QUOTER_ABI, provider);
-    const out = await quoter.quoteExactInputSingle(tokenIn, tokenOut, fee, amountIn, 0) as unknown as bigint;
+    const out = (await quoter.quoteExactInputSingle(tokenIn, tokenOut, fee, amountIn, 0)) as unknown as bigint;
     return out ?? null;
   } catch {
     return null;
@@ -202,6 +184,23 @@ export async function bestQuoteSell(amountInWei: bigint, tokenIn: string): Promi
   if (!valid.length) return null;
   valid.sort((a, b) => (a.amountOut > b.amountOut ? -1 : 1));
   return valid[0]!;
+}
+
+/** Debug helper (you can wire this to a /route_debug command if you like). */
+export async function debugQuotesBuy(amountInWei: bigint, tokenOut: string) {
+  const W = process.env.WPLS_ADDRESS!;
+  const routes = candidateRoutes();
+  const out: Array<{ route: string; amountOut?: string }> = [];
+  for (const r of routes) {
+    let amt: bigint | null = null;
+    try {
+      amt = r.kind === 'v2'
+        ? await quoteV2(amountInWei, W, tokenOut, r.router)
+        : await quoteV3(amountInWei, W, tokenOut, r.fee, (r as RouteV3).quoter);
+    } catch { /* ignore */ }
+    out.push({ route: r.key, amountOut: amt ? amt.toString() : undefined });
+  }
+  return out;
 }
 
 /* ---------------- Swaps (auto-route) ---------------- */
@@ -297,12 +296,12 @@ export async function approveAllRouters(
   const results: string[] = [];
 
   for (const r of routes) {
-    const spender = r.kind === 'v2' ? r.router : r.router; // both use router as spender
+    const spender = r.router;
     const current = await t.allowance(me, spender);
-    if (current >= amount / 2n) { results.push(`skipped ${routeLabel(r)}`); continue; }
+    if (current >= amount / 2n) { results.push(`skipped ${r.key}`); continue; }
     const tx = await t.approve(spender, amount, ov(gas));
     const rc = await tx.wait();
-    results.push(`${routeLabel(r)}: ${rc.hash}`);
+    results.push(`${r.key}: ${rc.hash}`);
   }
   return results;
 }
