@@ -1,3 +1,4 @@
+// src/bot.ts
 import { Telegraf, Markup } from 'telegraf';
 import { getConfig } from './config.js';
 import { mainMenu, buyMenu } from './keyboards.js';
@@ -30,11 +31,11 @@ import {
 const cfg = getConfig();
 export const bot = new Telegraf(cfg.BOT_TOKEN, { handlerTimeout: 60_000 });
 
-// --- small helpers ---
-const short = (a: string) => a.slice(0, 6) + '…' + a.slice(-4);
+// --- helpers ---
+const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
 const fmt = (num: bigint) => ethers.formatEther(num);
 
-// Pending prompt state for DM replies
+// Pending prompt state
 type Pending =
   | { type: 'set_amount' }
   | { type: 'set_token' }
@@ -122,7 +123,7 @@ bot.action(/^wallet_set_active:(\d+)$/, async (ctx: any) => {
   return renderWalletsList(ctx);
 });
 
-// Show PK (with confirm)
+// Show PK (mask + confirm)
 bot.action(/^wallet_pk:(\d+)$/, async (ctx: any) => {
   const id = Number(ctx.match[1]);
   const w = getWalletById(ctx.from.id, id);
@@ -143,7 +144,7 @@ bot.action(/^wallet_pk_reveal:(\d+)$/, async (ctx: any) => {
   return renderWalletManage(ctx, id);
 });
 
-// Clear pending
+// Clear pending (use slightly higher gas than current defaults)
 bot.action(/^wallet_clear:(\d+)$/, async (ctx: any) => {
   const id = Number(ctx.match[1]);
   const w = getWalletById(ctx.from.id, id);
@@ -153,7 +154,7 @@ bot.action(/^wallet_clear:(\d+)$/, async (ctx: any) => {
     const res = await clearPendingTransactions(getPrivateKey(w), {
       maxPriorityFeePerGas: ethers.parseUnits(String((u?.max_priority_fee_gwei ?? 0.1) + 0.1), 'gwei'),
       maxFeePerGas: ethers.parseUnits(String((u?.max_fee_gwei ?? 0.2) + 0.2), 'gwei'),
-      gasLimit: BigInt((u?.gas_limit ?? 250000)),
+      gasLimit: BigInt(u?.gas_limit ?? 250000),
     });
     await ctx.reply(`Cleared ${res.cleared} pending transactions.`);
   } catch (e: any) {
@@ -178,7 +179,7 @@ bot.action(/^wallet_remove:(\d+)$/, async (ctx: any) => {
     [Markup.button.callback('❌ Confirm Remove', `wallet_remove_confirm:${id}`)],
     [Markup.button.callback('⬅️ Back', `wallet_manage:${id}`)],
   ]);
-  await ctx.reply(`Remove wallet ID ${id}? This does NOT revoke keys on chain.`, kb);
+  await ctx.reply(`Remove wallet ID ${id}? This does NOT revoke keys on-chain.`, kb);
 });
 
 bot.action(/^wallet_remove_confirm:(\d+)$/, async (ctx: any) => {
@@ -268,7 +269,7 @@ bot.on('text', async (ctx, next) => {
     }
     const u = getUserSettings(ctx.from.id);
     try {
-      const r = await withdrawPls(
+      const receipt = await withdrawPls(
         getPrivateKey(w),
         to,
         ethers.parseEther(String(amount)),
@@ -278,7 +279,8 @@ bot.on('text', async (ctx, next) => {
           gasLimit: 21000n,
         }
       );
-      await ctx.reply(`Withdraw tx: ${r.transactionHash}`);
+      const txHash = receipt?.hash ?? '(pending)';
+      await ctx.reply(`Withdraw tx: ${txHash}`);
     } catch (e: any) {
       await ctx.reply('Withdraw failed: ' + e.message);
     }
@@ -350,7 +352,8 @@ bot.action('approve_now', async (ctx) => {
         gasLimit: BigInt(u.gas_limit ?? 250000),
       },
     );
-    await ctx.reply('Approve tx: ' + receipt.transactionHash);
+    const txHash = receipt?.hash ?? '(pending)';
+    await ctx.reply('Approve tx: ' + txHash);
   } catch (e: any) {
     await ctx.reply('Approve failed: ' + e.message);
   }
@@ -395,7 +398,8 @@ bot.action('buy_exec', async (ctx) => {
         gasLimit: BigInt(u.gas_limit ?? 250000),
       },
     );
-    await ctx.reply('Buy tx: ' + receipt.transactionHash);
+    const txHash = receipt?.hash ?? '(pending)';
+    await ctx.reply('Buy tx: ' + txHash);
   } catch (e: any) {
     await ctx.reply('Buy failed: ' + e.message);
   }
@@ -422,7 +426,8 @@ bot.action('buy_exec_all', async (ctx) => {
           gasLimit: BigInt(u.gas_limit ?? 250000),
         },
       );
-      results.push(`✅ ${short(row.address)} -> ${receipt.transactionHash}`);
+      const txHash = receipt?.hash ?? '(pending)';
+      results.push(`✅ ${short(row.address)} -> ${txHash}`);
     } catch (e: any) {
       results.push(`❌ ${short(row.address)} -> ${e.message}`);
     }
@@ -431,7 +436,7 @@ bot.action('buy_exec_all', async (ctx) => {
   return renderBuyMenu(ctx);
 });
 
-// ===== Commands (still available) =====
+// ===== Commands kept =====
 bot.command('wallets', async (ctx) => renderWalletsList(ctx));
 
 bot.command('wallet_new', async (ctx) => {
@@ -536,7 +541,8 @@ bot.command('sell', async (ctx) => {
         gasLimit: BigInt(u.gas_limit ?? 250000),
       },
     );
-    return ctx.reply('Sell tx: ' + receipt.transactionHash);
+    const txHash = receipt?.hash ?? '(pending)';
+    return ctx.reply('Sell tx: ' + txHash);
   } catch (e: any) {
     return ctx.reply('Sell failed: ' + e.message);
   }
