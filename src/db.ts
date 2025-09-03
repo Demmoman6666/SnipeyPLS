@@ -28,7 +28,6 @@ export async function initDb() {
       gas_limit INTEGER DEFAULT 250000
       -- buy_amount_pls will be added via migration below
     );
-
     CREATE TABLE IF NOT EXISTS wallets (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       telegram_id INTEGER NOT NULL,
@@ -38,8 +37,7 @@ export async function initDb() {
     );
   `);
 
-  // ---- Lightweight migrations ----
-  // Add per-user default buy amount (PLS) if it doesn't exist.
+  // Migrations
   const cols = db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>;
   const hasBuyAmt = cols.some(c => c.name === 'buy_amount_pls');
   if (!hasBuyAmt) {
