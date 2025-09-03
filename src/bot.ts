@@ -287,138 +287,83 @@ bot.action('wallet_add', async (ctx) => {
   return sendOrEdit(ctx, 'Reply: `name privkey` (e.g., `hot1 0x...`)', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]) });
 });
 
-/* ===== token meta helper (robust for string/bytes32) ===== */
-type TokenMeta = { name: string; symbol: string; decimals: number };
-
-function decodeBytes32Loose(b: string): string {
-  try { return ethers.decodeBytes32String(b); }
-  catch {
-    const hex = b.replace(/(00)+$/i, '');
-    try { return ethers.toUtf8String(hex as any); } catch { return ''; }
-  }
-}
-
-async function fetchTokenMeta(address: string): Promise<TokenMeta> {
-  const prov = provider;
-  const strAbi = [
-    'function symbol() view returns (string)',
-    'function name() view returns (string)',
-    'function decimals() view returns (uint8)',
-  ];
-  const b32Abi = [
-    'function symbol() view returns (bytes32)',
-    'function name() view returns (bytes32)',
-  ];
-
-  const cStr = new ethers.Contract(address, strAbi, prov);
-  const cB32 = new ethers.Contract(address, b32Abi, prov);
-
-  let decimals = 18;
-  try { decimals = await cStr.decimals(); } catch {}
-
-  let symbol = '';
-  try { symbol = await cStr.symbol(); } catch {
-    try { symbol = decodeBytes32Loose(await cB32.symbol()); } catch {}
-  }
-
-  let name = '';
-  try { name = await cStr.name(); } catch {
-    try { name = decodeBytes32Loose(await cB32.name()); } catch {}
-  }
-
-  if (!symbol) symbol = 'TOKEN';
-  if (!name) name = symbol;
-
-  return { name, symbol, decimals };
-}
-
 /* ---------- BUY MENU ---------- */
 async function renderBuyMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
   const aw = getActiveWallet(ctx.from.id);
 
-  const amtIn = u?.buy_amount_pls ?? 0.01;
-  const pct   = u?.gas_pct ?? (u?.default_gas_pct ?? 0);
-  const gl    = u?.gas_limit ?? 250000;
-  const gb    = u?.gwei_boost_gwei ?? 0;
+  const amt = u?.buy_amount_pls ?? 0.01;
+  const pct = u?.gas_pct ?? (u?.default_gas_pct ?? 0);
+  const gl  = u?.gas_limit ?? 250000;
+  const gb  = u?.gwei_boost_gwei ?? 0;
 
-  const wplsAddr = process.env.WPLS_ADDRESS!;
-  const wplsMeta: TokenMeta = { name: 'WPLS', symbol: 'WPLS', decimals: 18 };
+  let tokenLine = `Token: ${u?.token_address ?? '—'}`;
+  const pairLine = `Pair: ${process.env.WPLS_ADDRESS} (WPLS)`;
 
-  let tokMeta = { name: 'TOKEN', symbol: 'TOKEN', decimals: 18 };
-  if (u?.token_address) {
-    tokMeta = await fetchTokenMeta(u.token_address).catch(() => tokMeta);
-  }
+  let quoteLine = 'Amount out: unavailable';
 
-  let outLine = 'Amount out: —';
-  if (u?.token_address && amtIn > 0) {
-    const amountInWei = ethers.parseEther(String(amtIn));
-    const path = [wplsAddr, u.token_address];
+  if (u?.token_address && amt > 0) {
     try {
-      const amounts = await getPrice(amountInWei, path);
-      outLine = `Amount out: ${fmtDec(ethers.formatUnits(amounts[1], tokMeta.decimals))} ${tokMeta.symbol}`;
-    } catch {
-      try {
-        const iface = new ethers.Interface([
-          'function getAmountsOut(uint256 amountIn, address[] memory path) view returns (uint256[] memory amounts)'
-        ]);
-        const data = iface.encodeFunctionData('getAmountsOut', [amountInWei, path]);
-        const ret  = await provider.call({ to: process.env.ROUTER_ADDRESS!, data });
-        const decoded = iface.decodeFunctionResult('getAmountsOut', ret);
-        const amountsOut = decoded[0] as readonly bigint[];
-        const out = amountsOut[1];
-        outLine = `Amount out: ${fmtDec(ethers.formatUnits(out, tokMeta.decimals))} ${tokMeta.symbol}`;
-      } catch {
-        outLine = 'Amount out: unavailable';
+      const meta = await tokenMeta(u.token_address);
+      tokenLine = `Token: ${u.token_address} (${meta.symbol})`;
+      const best = await bestQuoteBuy(ethers.parseEther(String(amt)), u.token_address);
+      if (best) {
+        const tag = best.route.kind === 'v3' ? ` ${best.route.fee / 10000}%` : '';
+        quoteLine = `Amount out: ${fmtDec(ethers.formatUnits(best.amountOut, meta.decimals))} ${meta.symbol}  [${best.route.key}${tag}]`;
       }
-    }
+    } catch { /* keep defaults */ }
   }
 
   const lines = [
     'BUY MENU',
-
-    `Token: ${u?.token_address ? `${u.token_address} (${tokMeta.name})` : '—'}`,
-    `Pair:  ${wplsAddr} (${wplsMeta.name})`,
-
+    '',
     `Wallet: ${aw ? short(aw.address) : '— (Select)'}`,
+    '',
+    tokenLine,
+    pairLine,
+    '',
+    `Amount in: ${fmtDec(String(amt))} PLS`,
+    '',
+    `Gas boost: +${NF.format(pct)}% over market`,
+    `GL: ${fmtInt(String(gl))}   Booster: ${NF.format(gb)} gwei`,
+    '',
+    quoteLine,
+  ];
 
-    `Amount in: ${fmtDec(String(amtIn))} ${wplsMeta.symbol}`,
-
-    `Gas boost: +${NF.format(pct)}% over market  |  GL: ${fmtInt(String(gl))}  |  Booster: ${NF.format(gb)} gwei`,
-
-    outLine,
-  ].join('\n\n');
-
-  return sendOrEdit(ctx, lines, buyMenu());
+  return sendOrEdit(ctx, lines.join('\n'), buyMenu());
 }
 
 bot.action('menu_buy', async (ctx) => { await ctx.answerCbQuery(); return renderBuyMenu(ctx); });
+
 bot.action('buy_set_amount', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_amount' });
   return sendOrEdit(ctx, 'Send *amount in PLS* (e.g., `0.05`).', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_buy')]]) });
 });
+
 bot.action('buy_set_token', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_token' });
   return sendOrEdit(ctx, 'Paste the *token contract address* (0x...).', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_buy')]]) });
 });
+
 bot.action('gas_pct_up', async (ctx) => { await ctx.answerCbQuery(); const u = getUserSettings(ctx.from.id); setGasPercent(ctx.from.id, (u?.gas_pct ?? (u?.default_gas_pct ?? 0)) + 5); return renderBuyMenu(ctx); });
 bot.action('gas_pct_down', async (ctx) => { await ctx.answerCbQuery(); const u = getUserSettings(ctx.from.id); setGasPercent(ctx.from.id, (u?.gas_pct ?? (u?.default_gas_pct ?? 0)) - 5); return renderBuyMenu(ctx); });
 bot.action('gas_pct_reset', async (ctx) => { await ctx.answerCbQuery(); const u = getUserSettings(ctx.from.id); setGasPercent(ctx.from.id, u?.default_gas_pct ?? 0); return renderBuyMenu(ctx); });
 
-// Approve / Buy
+// Approve across all routers
 bot.action('approve_now', async (ctx) => {
   await ctx.answerCbQuery();
   const w = getActiveWallet(ctx.from.id); const u = getUserSettings(ctx.from.id);
   if (!w || !u?.token_address) return sendOrEdit(ctx, 'Need active wallet and token set.', buyMenu());
   try {
     const gas = await computeGas(ctx.from.id);
-    const receipt = await approveToken(getPrivateKey(w), u.token_address, process.env.ROUTER_ADDRESS!, (2n ** 256n - 1n), gas);
-    await ctx.reply('Approve tx: ' + ((receipt as any)?.hash ?? '(pending)'));
+    const results = await approveAllRouters(getPrivateKey(w), u.token_address, gas);
+    await ctx.reply(['Approvals sent:', ...results].join('\n'));
   } catch (e: any) { await ctx.reply('Approve failed: ' + e.message); }
   return renderBuyMenu(ctx);
 });
+
 bot.action('choose_wallet', async (ctx) => {
   await ctx.answerCbQuery();
   const rows = listWallets(ctx.from.id);
@@ -429,6 +374,7 @@ bot.action('choose_wallet', async (ctx) => {
 });
 bot.action(/^select_wallet:(\d+)$/, async (ctx: any) => { await ctx.answerCbQuery(); try { setActiveWallet(ctx.from.id, String(Number(ctx.match[1]))); } catch {} return renderBuyMenu(ctx); });
 
+// Buy with auto-route
 bot.action('buy_exec', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id); const w = getActiveWallet(ctx.from.id);
@@ -436,11 +382,12 @@ bot.action('buy_exec', async (ctx) => {
   if (!u?.token_address) return sendOrEdit(ctx, 'Set token first.', buyMenu());
   try {
     const gas = await computeGas(ctx.from.id);
-    const receipt = await buyExactETHForTokens(getPrivateKey(w), u.token_address, ethers.parseEther(String(u?.buy_amount_pls ?? 0.01)), 0n, gas);
+    const receipt = await buyAutoRoute(getPrivateKey(w), u.token_address, ethers.parseEther(String(u?.buy_amount_pls ?? 0.01)), 0n, gas);
     await ctx.reply('Buy tx: ' + ((receipt as any)?.hash ?? '(pending)'));
   } catch (e: any) { await ctx.reply('Buy failed: ' + e.message); }
   return renderBuyMenu(ctx);
 });
+
 bot.action('buy_exec_all', async (ctx) => {
   await ctx.answerCbQuery();
   const rows = listWallets(ctx.from.id); const u = getUserSettings(ctx.from.id);
@@ -450,7 +397,7 @@ bot.action('buy_exec_all', async (ctx) => {
   for (const row of rows) {
     try {
       const gas = await computeGas(ctx.from.id);
-      const r = await buyExactETHForTokens(getPrivateKey(row), u.token_address, ethers.parseEther(String(u?.buy_amount_pls ?? 0.01)), 0n, gas);
+      const r = await buyAutoRoute(getPrivateKey(row), u.token_address, ethers.parseEther(String(u?.buy_amount_pls ?? 0.01)), 0n, gas);
       res.push(`✅ ${short(row.address)} -> ${(r as any)?.hash ?? '(pending)'}`);
     } catch (e: any) { res.push(`❌ ${short(row.address)} -> ${e.message}`); }
   }
@@ -465,36 +412,43 @@ async function renderSellMenu(ctx: any) {
   const pct = u?.sell_pct ?? 100;
 
   let balLine = 'Token balance: —';
-  let outLine = 'Amount out: —';
+  let quoteLine = 'Amount out: —';
+  let metaSym = 'TOKEN', metaDec = 18;
 
   if (w && u?.token_address) {
     try {
-      const meta = await fetchTokenMeta(u.token_address);
+      const meta = await tokenMeta(u.token_address);
+      metaSym = meta.symbol; metaDec = meta.decimals;
       const c = erc20(u.token_address);
       const bal = await c.balanceOf(w.address);
-      balLine = `Token balance: ${fmtDec(ethers.formatUnits(bal, meta.decimals))} ${meta.symbol}`;
-
+      balLine = `Token balance: ${fmtDec(ethers.formatUnits(bal, metaDec))} ${metaSym}`;
       const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
       if (amountIn > 0n) {
-        const amounts = await getPrice(amountIn, [u.token_address, process.env.WPLS_ADDRESS!]);
-        outLine = `Amount out: ${fmtDec(ethers.formatEther(amounts[1]))} PLS`;
+        const best = await bestQuoteSell(amountIn, u.token_address);
+        if (best) {
+          const tag = best.route.kind === 'v3' ? ` ${best.route.fee / 10000}%` : '';
+          quoteLine = `Amount out: ${fmtDec(ethers.formatEther(best.amountOut))} PLS  [${best.route.key}${tag}]`;
+        } else {
+          quoteLine = 'Amount out: unavailable';
+        }
       } else {
-        outLine = 'Amount out: 0';
+        quoteLine = 'Amount out: 0';
       }
-    } catch { /* leave defaults */ }
+    } catch { /* keep defaults */ }
   }
+
   const lines = [
     '//// SELL MENU ////',
-
+    '',
     `Wallet: ${w ? short(w.address) : '— (Select)'} | Token: ${u?.token_address ? short(u.token_address) : '—'}`,
-
+    '',
     `Sell percent: ${NF.format(pct)}%`,
-
+    '',
     balLine,
-
-    outLine,
-  ].join('\n\n');
-  return sendOrEdit(ctx, lines, sellMenu());
+    '',
+    quoteLine,
+  ];
+  return sendOrEdit(ctx, lines.join('\n'), sellMenu());
 }
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
@@ -503,6 +457,7 @@ bot.action('sell_pct_50', async (ctx) => { await ctx.answerCbQuery(); setSellPct
 bot.action('sell_pct_75', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 75); return renderSellMenu(ctx); });
 bot.action('sell_pct_100', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 100); return renderSellMenu(ctx); });
 
+// Sell with auto-route
 bot.action('sell_exec', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id); const w = getActiveWallet(ctx.from.id);
@@ -514,7 +469,7 @@ bot.action('sell_exec', async (ctx) => {
     const amount = (bal * BigInt(Math.round(pct))) / 100n;
     if (amount <= 0n) return sendOrEdit(ctx, 'Nothing to sell.', sellMenu());
     const gas = await computeGas(ctx.from.id);
-    const r = await sellExactTokensForETH(getPrivateKey(w), u.token_address, amount, 0n, gas);
+    const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
     await ctx.reply('Sell tx: ' + ((r as any)?.hash ?? '(pending)'));
   } catch (e: any) { await ctx.reply('Sell failed: ' + e.message); }
   return renderSellMenu(ctx);
@@ -533,7 +488,7 @@ bot.command('rpc_check', async (ctx) => {
     `maxPriorityFeePerGas(wei): ${info.maxPriorityFeePerGas ?? '—'}`,
     `active wallet: ${aw ? aw.address : '—'}`,
     `balance(wei): ${info.balanceWei ?? '—'}`,
-    `${info.error ? 'error: ' + info.error : ''}`,
+    `${(info as any).error ? 'error: ' + (info as any).error : ''}`,
   ].join('\n');
   await ctx.reply(lines, { parse_mode: 'Markdown' });
 });
@@ -565,6 +520,7 @@ bot.command('set_token', async (ctx) => {
   setToken(ctx.from.id, address); return renderBuyMenu(ctx);
 });
 bot.command('set_gas', async (ctx) => {
+  // legacy; map to new settings
   const parts = ctx.message.text.split(/\s+/);
   if (parts.length < 3) return ctx.reply('Usage: /set_gas <gwei_booster> <gas_limit>');
   const booster = Number(parts[1]), limit = Number(parts[2]);
@@ -576,23 +532,23 @@ bot.command('price', async (ctx) => {
   const u = getUserSettings(ctx.from.id);
   if (!u?.token_address) return ctx.reply('Set token first with /set_token <address>');
   try {
-    const meta = await fetchTokenMeta(u.token_address);
-    const amounts = await getPrice(ethers.parseEther('1'), [process.env.WPLS_ADDRESS!, u.token_address]);
-    return ctx.reply(`1 WPLS -> ${fmtDec(ethers.formatUnits(amounts[1], meta.decimals))} ${meta.symbol}`);
+    const meta = await tokenMeta(u.token_address);
+    const best = await bestQuoteBuy(ethers.parseEther('1'), u.token_address);
+    if (!best) return ctx.reply('No route could quote this pair.');
+    const tag = best.route.kind === 'v3' ? ` ${best.route.fee / 10000}%` : '';
+    return ctx.reply(`1 WPLS → ${fmtDec(ethers.formatUnits(best.amountOut, meta.decimals))} ${meta.symbol}  [${best.route.key}${tag}]`);
   } catch (e: any) { return ctx.reply('Price failed: ' + e.message); }
 });
 bot.command('balances', async (ctx) => {
   const w = getActiveWallet(ctx.from.id);
   if (!w) return ctx.reply('Select a wallet first.');
-
   const addr = w.address;
   const u = getUserSettings(ctx.from.id);
   const { value: plsBal } = await getBalanceFast(addr);
-
   let token = 'N/A';
   if (u?.token_address) {
     try {
-      const meta = await fetchTokenMeta(u.token_address);
+      const meta = await tokenMeta(u.token_address);
       const tokenC = erc20(u.token_address);
       const bal = await tokenC.balanceOf(addr);
       token = `${fmtDec(ethers.formatUnits(bal, meta.decimals))} ${meta.symbol}`;
@@ -600,14 +556,7 @@ bot.command('balances', async (ctx) => {
       token = 'N/A';
     }
   }
-
-  return ctx.reply(
-    [
-      `Wallet ${addr}`,
-      `PLS: ${fmtPls(plsBal)}`,
-      `Token: ${token}`
-    ].join('\n')
-  );
+  return ctx.reply(`Wallet ${addr}\nPLS: ${fmtPls(plsBal)}\nToken: ${token}`);
 });
 bot.command('sell', async (ctx) => {
   const [_, percentStr] = ctx.message.text.split(/\s+/, 2);
@@ -708,7 +657,7 @@ bot.on('text', async (ctx, next) => {
       if (!w) { await ctx.reply('Select or create a wallet first.'); return renderBuyMenu(ctx); }
       try {
         const gas = await computeGas(ctx.from.id);
-        const receipt = await buyExactETHForTokens(getPrivateKey(w), text, ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01)), 0n, gas);
+        const receipt = await buyAutoRoute(getPrivateKey(w), text, ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01)), 0n, gas);
         await ctx.reply(`Auto-buy tx: ${(receipt as any)?.hash ?? '(pending)'}`);
       } catch (e: any) {
         await ctx.reply('Auto-buy failed: ' + e.message);
