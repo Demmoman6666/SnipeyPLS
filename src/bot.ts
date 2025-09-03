@@ -311,17 +311,14 @@ async function fetchTokenMeta(address: string): Promise<TokenMeta> {
   const cStr = new ethers.Contract(address, strAbi, prov);
   const cB32 = new ethers.Contract(address, b32Abi, prov);
 
-  // decimals (usually ok)
   let decimals = 18;
   try { decimals = await cStr.decimals(); } catch {}
 
-  // symbol
   let symbol = '';
   try { symbol = await cStr.symbol(); } catch {
     try { symbol = decodeBytes32Loose(await cB32.symbol()); } catch {}
   }
 
-  // name
   let name = '';
   try { name = await cStr.name(); } catch {
     try { name = decodeBytes32Loose(await cB32.name()); } catch {}
@@ -344,7 +341,6 @@ async function renderBuyMenu(ctx: any) {
   const gb    = u?.gwei_boost_gwei ?? 0;
 
   const wplsAddr = process.env.WPLS_ADDRESS!;
-  // Keep WPLS fixed/displayed as WPLS to avoid confusion
   const wplsMeta: TokenMeta = { name: 'WPLS', symbol: 'WPLS', decimals: 18 };
 
   let tokMeta = { name: 'TOKEN', symbol: 'TOKEN', decimals: 18 };
@@ -352,7 +348,6 @@ async function renderBuyMenu(ctx: any) {
     tokMeta = await fetchTokenMeta(u.token_address).catch(() => tokMeta);
   }
 
-  // Amount out with router call, plus a low-level fallback if it reverts
   let outLine = 'Amount out: —';
   if (u?.token_address && amtIn > 0) {
     const amountInWei = ethers.parseEther(String(amtIn));
@@ -362,14 +357,14 @@ async function renderBuyMenu(ctx: any) {
       outLine = `Amount out: ${fmtDec(ethers.formatUnits(amounts[1], tokMeta.decimals))} ${tokMeta.symbol}`;
     } catch {
       try {
-        // low-level fallback: encode/decode getAmountsOut
         const iface = new ethers.Interface([
           'function getAmountsOut(uint256 amountIn, address[] memory path) view returns (uint256[] memory amounts)'
         ]);
         const data = iface.encodeFunctionData('getAmountsOut', [amountInWei, path]);
         const ret  = await provider.call({ to: process.env.ROUTER_ADDRESS!, data });
-        const decoded = iface.decodeFunctionResult('getAmountsOut', ret) as [bigint[]];
-        const out = decoded[0][1];
+        const decoded = iface.decodeFunctionResult('getAmountsOut', ret);
+        const amountsOut = decoded[0] as readonly bigint[];
+        const out = amountsOut[1];
         outLine = `Amount out: ${fmtDec(ethers.formatUnits(out, tokMeta.decimals))} ${tokMeta.symbol}`;
       } catch {
         outLine = 'Amount out: unavailable';
@@ -377,7 +372,6 @@ async function renderBuyMenu(ctx: any) {
     }
   }
 
-  // Paragraph spacing between sections
   const lines = [
     'BUY MENU',
 
