@@ -26,8 +26,9 @@ export async function initDb() {
       max_priority_fee_gwei REAL DEFAULT 0.1,
       max_fee_gwei REAL DEFAULT 0.2,
       gas_limit INTEGER DEFAULT 250000
-      -- buy_amount_pls will be added via migration below
+      -- buy_amount_pls added by migration below
     );
+
     CREATE TABLE IF NOT EXISTS wallets (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       telegram_id INTEGER NOT NULL,
@@ -37,7 +38,7 @@ export async function initDb() {
     );
   `);
 
-  // Migrations
+  // Lightweight migration: default per-user buy amount (PLS)
   const cols = db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>;
   const hasBuyAmt = cols.some(c => c.name === 'buy_amount_pls');
   if (!hasBuyAmt) {
