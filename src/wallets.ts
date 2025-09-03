@@ -18,9 +18,9 @@ type ActiveIdRow = { active_wallet_id: number | null } | undefined;
 
 export function ensureUserRow(telegramId: number) {
   const db = getDb();
-  const row = db.prepare('SELECT telegram_id FROM users WHERE telegram_id=?').get(telegramId) as
-    | { telegram_id: number }
-    | undefined;
+  const row = db
+    .prepare('SELECT telegram_id FROM users WHERE telegram_id=?')
+    .get(telegramId) as { telegram_id: number } | undefined;
   if (!row) {
     db.prepare('INSERT INTO users (telegram_id) VALUES (?)').run(telegramId);
   }
@@ -29,9 +29,7 @@ export function ensureUserRow(telegramId: number) {
 export function listWallets(telegramId: number): WalletRow[] {
   const db = getDb();
   return db
-    .prepare(
-      'SELECT id, telegram_id, name, address, enc_privkey FROM wallets WHERE telegram_id=? ORDER BY id',
-    )
+    .prepare('SELECT id, telegram_id, name, address, enc_privkey FROM wallets WHERE telegram_id=? ORDER BY id')
     .all(telegramId) as unknown as WalletRow[];
 }
 
@@ -75,11 +73,7 @@ export function importWallet(telegramId: number, name: string, privKey: string) 
 
 export function setActiveWallet(telegramId: number, idOrName: string) {
   const db = getDb();
-  let row:
-    | {
-        id: number;
-      }
-    | undefined;
+  let row: { id: number } | undefined;
 
   if (/^\d+$/.test(idOrName)) {
     row = db
@@ -114,7 +108,6 @@ export function getActiveWallet(telegramId: number): WalletRow | null {
 }
 
 export function getPrivateKey(row: WalletRow) {
-  // row.enc_privkey is a Buffer already
   return decryptPrivateKey(cfg.MASTER_KEY, row.enc_privkey);
 }
 
@@ -135,6 +128,13 @@ export function setGas(
   ).run(priorityGwei, maxGwei, gasLimit, telegramId);
 }
 
+/** NEW: set default buy amount (in PLS) for menu-driven buys */
+export function setBuyAmount(telegramId: number, amountPls: number) {
+  const db = getDb();
+  db.prepare('UPDATE users SET buy_amount_pls=? WHERE telegram_id=?').run(amountPls, telegramId);
+}
+
+/** Include buy_amount_pls in returned settings */
 export function getUserSettings(telegramId: number) {
   const db = getDb();
   const row = db.prepare('SELECT * FROM users WHERE telegram_id=?').get(telegramId) as
@@ -142,10 +142,11 @@ export function getUserSettings(telegramId: number) {
         telegram_id: number;
         active_wallet_id: number | null;
         token_address: string | null;
-        base_pair?: string | null; // kept for schema compatibility
+        base_pair?: string | null; // legacy field, harmless
         max_priority_fee_gwei: number | null;
         max_fee_gwei: number | null;
         gas_limit: number | null;
+        buy_amount_pls: number | null;
       }
     | undefined;
   return row;
