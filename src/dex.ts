@@ -35,7 +35,7 @@ const ERC20_BYTES32_ABI = [
   'function name() view returns (bytes32)',
 ];
 
-/* ---------------- Helpers ---------------- */
+/* ---------------- Types & helpers ---------------- */
 
 export type GasOpts = {
   maxPriorityFeePerGas: bigint;
@@ -62,16 +62,19 @@ export function erc20(address: string, signer?: ethers.Signer) {
 export async function tokenMeta(address: string): Promise<{ decimals: number; symbol: string; name: string }> {
   const c = new ethers.Contract(address, ERC20_ABI, provider);
   const decimals = await c.decimals().catch(() => 18);
+
   let symbol = await c.symbol().catch(async () => {
     const b = new ethers.Contract(address, ERC20_BYTES32_ABI, provider);
     const raw = await b.symbol().catch(() => null);
-    return raw ? ethers.decodeBytes32String(raw as string) : 'TOKEN';
+    try { return raw ? ethers.decodeBytes32String(raw as string) : 'TOKEN'; } catch { return 'TOKEN'; }
   });
+
   let name = await c.name().catch(async () => {
     const b = new ethers.Contract(address, ERC20_BYTES32_ABI, provider);
     const raw = await b.name().catch(() => null);
-    return raw ? ethers.decodeBytes32String(raw as string) : 'Token';
+    try { return raw ? ethers.decodeBytes32String(raw as string) : 'Token'; } catch { return 'Token'; }
   });
+
   return { decimals, symbol, name };
 }
 
@@ -279,7 +282,7 @@ export async function approveAllRouters(
   const results: string[] = [];
 
   for (const r of routes) {
-    const spender = r.kind === 'v2' ? r.router : r.router; // same
+    const spender = r.router;
     const current = await t.allowance(me, spender);
     if (current >= amount / 2n) { results.push(`skipped ${r.key}`); continue; }
     const tx = await t.approve(spender, amount, ov(gas));
