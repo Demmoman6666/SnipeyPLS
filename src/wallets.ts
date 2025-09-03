@@ -33,6 +33,14 @@ export function listWallets(telegramId: number): WalletRow[] {
     .all(telegramId) as unknown as WalletRow[];
 }
 
+export function getWalletById(telegramId: number, walletId: number): WalletRow | null {
+  const db = getDb();
+  const w = db
+    .prepare('SELECT id, telegram_id, name, address, enc_privkey FROM wallets WHERE id=? AND telegram_id=?')
+    .get(walletId, telegramId) as WalletRow | undefined;
+  return w ?? null;
+}
+
 export function createWallet(telegramId: number, name: string) {
   ensureUserRow(telegramId);
 
@@ -69,6 +77,23 @@ export function importWallet(telegramId: number, name: string, privKey: string) 
   const newId = Number(res.lastInsertRowid);
 
   return { id: newId, address: w.address };
+}
+
+export function removeWallet(telegramId: number, walletId: number) {
+  const db = getDb();
+  const wasActive = db
+    .prepare('SELECT active_wallet_id FROM users WHERE telegram_id=?')
+    .get(telegramId) as { active_wallet_id: number | null } | undefined;
+
+  db.prepare('DELETE FROM wallets WHERE id=? AND telegram_id=?').run(walletId, telegramId);
+
+  if (wasActive?.active_wallet_id === walletId) {
+    const next = db
+      .prepare('SELECT id FROM wallets WHERE telegram_id=? ORDER BY id LIMIT 1')
+      .get(telegramId) as { id: number } | undefined;
+    db.prepare('UPDATE users SET active_wallet_id=? WHERE telegram_id=?')
+      .run(next ? next.id : null, telegramId);
+  }
 }
 
 export function setActiveWallet(telegramId: number, idOrName: string) {
@@ -128,13 +153,11 @@ export function setGas(
   ).run(priorityGwei, maxGwei, gasLimit, telegramId);
 }
 
-/** NEW: set default buy amount (in PLS) for menu-driven buys */
 export function setBuyAmount(telegramId: number, amountPls: number) {
   const db = getDb();
   db.prepare('UPDATE users SET buy_amount_pls=? WHERE telegram_id=?').run(amountPls, telegramId);
 }
 
-/** Include buy_amount_pls in returned settings */
 export function getUserSettings(telegramId: number) {
   const db = getDb();
   const row = db.prepare('SELECT * FROM users WHERE telegram_id=?').get(telegramId) as
@@ -142,7 +165,7 @@ export function getUserSettings(telegramId: number) {
         telegram_id: number;
         active_wallet_id: number | null;
         token_address: string | null;
-        base_pair?: string | null; // legacy field, harmless
+        base_pair?: string | null;
         max_priority_fee_gwei: number | null;
         max_fee_gwei: number | null;
         gas_limit: number | null;
