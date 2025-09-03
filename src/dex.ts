@@ -73,11 +73,7 @@ export async function buyExactETHForTokens(
   const path = [cfg.WPLS_ADDRESS, token];
   const deadline = Math.floor(Date.now() / 1000) + 60 * 10;
   const tx = await r.swapExactETHForTokensSupportingFeeOnTransferTokens(
-    minOut,
-    path,
-    await s.getAddress(),
-    deadline,
-    {
+    minOut, path, await s.getAddress(), deadline, {
       value: amountInWei,
       maxPriorityFeePerGas: gas.maxPriorityFeePerGas,
       maxFeePerGas: gas.maxFeePerGas,
@@ -99,12 +95,7 @@ export async function sellExactTokensForETH(
   const path = [token, cfg.WPLS_ADDRESS];
   const deadline = Math.floor(Date.now() / 1000) + 60 * 10;
   const tx = await r.swapExactTokensForETHSupportingFeeOnTransferTokens(
-    amountIn,
-    minOut,
-    path,
-    await s.getAddress(),
-    deadline,
-    {
+    amountIn, minOut, path, await s.getAddress(), deadline, {
       maxPriorityFeePerGas: gas.maxPriorityFeePerGas,
       maxFeePerGas: gas.maxFeePerGas,
       gasLimit: gas.gasLimit,
@@ -122,7 +113,6 @@ export async function clearPendingTransactions(
   const addr = await s.getAddress();
   const latest = await provider.getTransactionCount(addr, 'latest');
   const pending = await provider.getTransactionCount(addr, 'pending');
-
   const toClear = Math.max(0, Number(pending) - Number(latest));
   if (toClear === 0) return { cleared: 0 };
 
