@@ -97,6 +97,22 @@ export function getWalletById(telegramId: number, walletId: number): WalletRow |
   return w ?? null;
 }
 
+export function removeWallet(telegramId: number, walletId: number) {
+  const db = getDb();
+  // If removing the active wallet, pick the next one (or null)
+  const cur = db.prepare('SELECT active_wallet_id FROM users WHERE telegram_id=?')
+    .get(telegramId) as ActiveIdRow;
+
+  db.prepare('DELETE FROM wallets WHERE id=? AND telegram_id=?').run(walletId, telegramId);
+
+  if (cur?.active_wallet_id === walletId) {
+    const next = db.prepare('SELECT id FROM wallets WHERE telegram_id=? ORDER BY id LIMIT 1')
+      .get(telegramId) as { id: number } | undefined;
+    db.prepare('UPDATE users SET active_wallet_id=? WHERE telegram_id=?')
+      .run(next?.id ?? null, telegramId);
+  }
+}
+
 export function getPrivateKey(row: WalletRow) {
   return decryptPrivateKey(cfg.MASTER_KEY, row.enc_privkey);
 }
