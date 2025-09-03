@@ -23,11 +23,13 @@ import {
 import { ethers } from 'ethers';
 import {
   provider,
-  getPrice,
-  buyExactETHForTokens,
-  sellExactTokensForETH,
+  tokenMeta,
+  bestQuoteBuy,
+  bestQuoteSell,
+  buyAutoRoute,
+  sellAutoRoute,
+  approveAllRouters,
   erc20,
-  approveToken,
   clearPendingTransactions,
   withdrawPls,
   pingRpc,
