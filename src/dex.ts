@@ -1,9 +1,10 @@
+// src/dex.ts
 import { ethers } from 'ethers';
 import { getConfig } from './config.js';
 
 const cfg = getConfig();
 
-// Be explicit about the network
+// Be explicit about the network (PulseChain mainnet = 369)
 const network: ethers.Networkish = { chainId: cfg.CHAIN_ID, name: 'pulsechain' };
 export const provider = new ethers.JsonRpcProvider(cfg.RPC_URL, network);
 
@@ -33,8 +34,9 @@ export function erc20(address: string, signer?: ethers.Signer) {
 
 export async function getPrice(amountInWei: bigint, path: string[]) {
   const r = routerInstance();
-  const amounts: bigint[] = await r.getAmountsOut(amountInWei, path);
-  return amounts.map(a => BigInt(a.toString()));
+  const amounts: readonly bigint[] = await r.getAmountsOut(amountInWei, path);
+  // Normalize to native bigint
+  return amounts.map((a) => BigInt(a.toString()));
 }
 
 export function signerFromPrivKey(privKey: string) {
@@ -76,7 +78,11 @@ export async function buyExactETHForTokens(
   const path = [cfg.WPLS_ADDRESS, token];
   const deadline = Math.floor(Date.now() / 1000) + 60 * 10;
   const tx = await r.swapExactETHForTokensSupportingFeeOnTransferTokens(
-    minOut, path, await s.getAddress(), deadline, {
+    minOut,
+    path,
+    await s.getAddress(),
+    deadline,
+    {
       value: amountInWei,
       maxPriorityFeePerGas: gas.maxPriorityFeePerGas,
       maxFeePerGas: gas.maxFeePerGas,
@@ -98,7 +104,12 @@ export async function sellExactTokensForETH(
   const path = [token, cfg.WPLS_ADDRESS];
   const deadline = Math.floor(Date.now() / 1000) + 60 * 10;
   const tx = await r.swapExactTokensForETHSupportingFeeOnTransferTokens(
-    amountIn, minOut, path, await s.getAddress(), deadline, {
+    amountIn,
+    minOut,
+    path,
+    await s.getAddress(),
+    deadline,
+    {
       maxPriorityFeePerGas: gas.maxPriorityFeePerGas,
       maxFeePerGas: gas.maxFeePerGas,
       gasLimit: gas.gasLimit,
@@ -151,12 +162,14 @@ export async function withdrawPls(
   return await tx.wait();
 }
 
-/** Diagnostics for RPC */
+/** Diagnostics for RPC (ethers v6: use getFeeData instead of getGasPrice) */
 export async function pingRpc(address?: string) {
   const info: {
     chainId?: number;
     blockNumber?: number;
     gasPrice?: string;
+    maxFeePerGas?: string;
+    maxPriorityFeePerGas?: string;
     balanceWei?: string;
     error?: string;
   } = {};
@@ -164,8 +177,14 @@ export async function pingRpc(address?: string) {
     const net = await provider.getNetwork();
     info.chainId = Number(net.chainId);
     info.blockNumber = await provider.getBlockNumber();
-    const gp = await provider.getGasPrice().catch(() => null);
-    if (gp) info.gasPrice = gp.toString();
+
+    const fee = await provider.getFeeData().catch(() => null);
+    if (fee) {
+      if (fee.gasPrice) info.gasPrice = fee.gasPrice.toString();
+      if (fee.maxFeePerGas) info.maxFeePerGas = fee.maxFeePerGas.toString();
+      if (fee.maxPriorityFeePerGas) info.maxPriorityFeePerGas = fee.maxPriorityFeePerGas.toString();
+    }
+
     if (address) {
       const bal = await provider.getBalance(address);
       info.balanceWei = bal.toString();
