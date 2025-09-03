@@ -54,8 +54,10 @@ function withKb(kb?: any, extra?: any) { return kb ? { ...(kb as any), ...(extra
 async function sendOrEdit(ctx: any, text: string, extra?: any) {
   if (canEdit(ctx)) {
     try { return await ctx.editMessageText(text, extra); }
-    catch { try { await ctx.deleteMessage(ctx.callbackQuery.message.message_id); } catch {}
-            return await ctx.reply(text, extra); }
+    catch {
+      try { await ctx.deleteMessage(ctx.callbackQuery.message.message_id); } catch {}
+      return await ctx.reply(text, extra);
+    }
   } else {
     return await ctx.reply(text, extra);
   }
@@ -152,7 +154,7 @@ bot.action('auto_amt', async (ctx) => {
   return sendOrEdit(ctx, 'Send *Auto-buy amount* in PLS (e.g., `0.5`).', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
 });
 
-/* ---------- Wallets: list/manage (unchanged behaviour except formatting) ---------- */
+/* ---------- Wallets: list/manage ---------- */
 async function renderWalletsList(ctx: any) {
   const rows = listWallets(ctx.from.id);
   if (!rows.length) {
@@ -242,9 +244,13 @@ bot.action(/^wallet_clear:(\d+)$/, async (ctx: any) => {
   const id = Number(ctx.match[1]);
   const w = getWalletById(ctx.from.id, id);
   if (!w) return sendOrEdit(ctx, 'Wallet not found.');
-  const gas = await computeGas(ctx.from.id, 10); // add +10% to push cancellations through
-  const res = await clearPendingTransactions(getPrivateKey(w), gas).catch((e: any) => ({ cleared: 0, err: e?.message }));
-  await ctx.reply(res?.err ? `Clear failed: ${res.err}` : `Cleared ${res.cleared} pending txs.`);
+  try {
+    const gas = await computeGas(ctx.from.id, 10); // add +10% to push cancellations through
+    const res = await clearPendingTransactions(getPrivateKey(w), gas);
+    await ctx.reply(`Cleared ${res.cleared} pending transactions.`);
+  } catch (e: any) {
+    await ctx.reply('Clear pending failed: ' + (e?.message ?? String(e)));
+  }
   return renderWalletManage(ctx, id);
 });
 bot.action(/^wallet_withdraw:(\d+)$/, async (ctx: any) => {
@@ -272,8 +278,16 @@ bot.action(/^wallet_remove_confirm:(\d+)$/, async (ctx: any) => {
 bot.action(/^wallet_refresh:(\d+)$/, async (ctx: any) => { await ctx.answerCbQuery(); return renderWalletManage(ctx, Number(ctx.match[1])); });
 
 /* Generate / Import prompts */
-bot.action('wallet_generate', async (ctx) => { await ctx.answerCbQuery(); pending.set(ctx.from.id, { type: 'gen_name' }); return sendOrEdit(ctx, 'Send a name for the new wallet (e.g., `trader1`).', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]) }); });
-bot.action('wallet_add', async (ctx) => { await ctx.answerCbQuery(); pending.set(ctx.from.id, { type: 'import_wallet' }); return sendOrEdit(ctx, 'Reply: `name privkey` (e.g., `hot1 0x...`)', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]) }); });
+bot.action('wallet_generate', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.set(ctx.from.id, { type: 'gen_name' });
+  return sendOrEdit(ctx, 'Send a name for the new wallet (e.g., `trader1`).', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]) });
+});
+bot.action('wallet_add', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.set(ctx.from.id, { type: 'import_wallet' });
+  return sendOrEdit(ctx, 'Reply: `name privkey` (e.g., `hot1 0x...`)', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]) });
+});
 
 /* ---------- BUY MENU ---------- */
 async function renderBuyMenu(ctx: any) {
