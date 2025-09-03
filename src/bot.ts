@@ -1,4 +1,3 @@
-// src/bot.ts
 import { Telegraf, Markup } from 'telegraf';
 import { getConfig } from './config.js';
 import { mainMenu, buyMenu } from './keyboards.js';
@@ -26,6 +25,7 @@ import {
   approveToken,
   clearPendingTransactions,
   withdrawPls,
+  pingRpc,
 } from './dex.js';
 
 const cfg = getConfig();
@@ -35,20 +35,22 @@ export const bot = new Telegraf(cfg.BOT_TOKEN, { handlerTimeout: 60_000 });
 const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
 const fmtPls = (wei: bigint) => (wei === 0n ? '0' : ethers.formatEther(wei));
 
+// time-bounded balance fetch; returns [value, ok]
 const BAL_TIMEOUT_MS = 8000;
 function withTimeout<T>(p: Promise<T>, ms = BAL_TIMEOUT_MS): Promise<T> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('timeout')), ms);
-    p.then(
-      v => { clearTimeout(t); resolve(v); },
-      e => { clearTimeout(t); reject(e); }
-    );
+    p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
   });
 }
-// Always return a bigint; on error/timeout we return 0n (so UI shows 0)
-async function getBalanceFast(address: string): Promise<bigint> {
-  try { return await withTimeout(provider.getBalance(address)); }
-  catch { return 0n; }
+async function getBalanceFast(address: string): Promise<{ value: bigint; ok: boolean }> {
+  try {
+    const v = await withTimeout(provider.getBalance(address));
+    return { value: v, ok: true };
+  } catch (e) {
+    // show 0 for UX but mark as not-ok so we can warn
+    return { value: 0n, ok: false };
+  }
 }
 
 // Pending state for DM replies
@@ -80,7 +82,7 @@ async function renderWalletsList(ctx: any) {
     return;
   }
 
-  const balances = await Promise.all(rows.map(w => getBalanceFast(w.address)));
+  const results = await Promise.all(rows.map(w => getBalanceFast(w.address)));
   const u = getUserSettings(ctx.from.id);
 
   const lines = [
@@ -89,11 +91,16 @@ async function renderWalletsList(ctx: any) {
     'Address                              | Balance (PLS)',
     '-------------------------------------|----------------',
     ...rows.map((w, i) => {
-      const bal = fmtPls(balances[i]);
+      const bal = fmtPls(results[i].value);
       const active = u?.active_wallet_id === w.id ? '   (active)' : '';
       return `${w.address} | ${bal}${active}`;
     }),
-  ].join('\n');
+  ];
+
+  // If any balance pulled failed, add a small hint
+  if (results.some(r => !r.ok)) {
+    lines.push('', '⚠️ Some balances didn’t load from the RPC. Use /rpc_check to diagnose.');
+  }
 
   const kb = rows.map(w => [
     Markup.button.callback(`${w.id}. ${short(w.address)}`, `wallet_manage:${w.id}`),
@@ -102,18 +109,18 @@ async function renderWalletsList(ctx: any) {
   kb.push([Markup.button.callback('➕ Generate', 'wallet_generate'), Markup.button.callback('📥 Add (Import)', 'wallet_add')]);
   kb.push([Markup.button.callback('⬅️ Back', 'main_back')]);
 
-  await ctx.reply(lines, Markup.inlineKeyboard(kb));
+  await ctx.reply(lines.join('\n'), Markup.inlineKeyboard(kb));
 }
 
 async function renderWalletManage(ctx: any, walletId: number) {
   const w = getWalletById(ctx.from.id, walletId);
   if (!w) return ctx.reply('Wallet not found.');
-  const bal = await getBalanceFast(w.address);
+  const { value: bal, ok } = await getBalanceFast(w.address);
   const lines = [
     '//// Wallet ////',
     `ID: ${walletId}`,
     `Address: ${w.address}`,
-    `Balance: ${fmtPls(bal)} PLS`,
+    `Balance: ${fmtPls(bal)} PLS${ok ? '' : '  (RPC issue)'}`
   ].join('\n');
 
   const kb = Markup.inlineKeyboard([
@@ -469,6 +476,22 @@ bot.action('buy_exec_all', async (ctx) => {
   return renderBuyMenu(ctx);
 });
 
+// ---------- diagnostics ----------
+bot.command('rpc_check', async (ctx) => {
+  const aw = getActiveWallet(ctx.from.id);
+  const info = await pingRpc(aw?.address);
+  const lines = [
+    '*RPC Check*',
+    `chainId: ${info.chainId ?? '—'}`,
+    `block: ${info.blockNumber ?? '—'}`,
+    `gasPrice(wei): ${info.gasPrice ?? '—'}`,
+    `active wallet: ${aw ? aw.address : '—'}`,
+    `balance(wei): ${info.balanceWei ?? '—'}`,
+    `${info.error ? 'error: ' + info.error : ''}`,
+  ].join('\n');
+  await ctx.reply(lines, { parse_mode: 'Markdown' });
+});
+
 // ---------- traditional commands ----------
 bot.command('wallets', async (ctx) => renderWalletsList(ctx));
 bot.command('wallet_new', async (ctx) => {
@@ -517,7 +540,7 @@ bot.command('balances', async (ctx) => {
   if (!w) return ctx.reply('Select a wallet first.');
   const addr = w.address;
   const u = getUserSettings(ctx.from.id);
-  const plsBal = await getBalanceFast(addr);
+  const { value: plsBal } = await getBalanceFast(addr);
   let token = 'N/A';
   if (u?.token_address) {
     const erc = erc20(u.token_address);
