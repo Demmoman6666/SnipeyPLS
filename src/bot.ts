@@ -39,7 +39,7 @@ export const bot = new Telegraf(cfg.BOT_TOKEN, { handlerTimeout: 60_000 });
 /* ---------- helpers ---------- */
 const NF = new Intl.NumberFormat('en-GB', { maximumFractionDigits: 6 });
 const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
-const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ','); // group integers
+const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const fmtDec = (s: string) => {
   const [i, d] = s.split('.');
   return d ? `${fmtInt(i)}.${d}` : fmtInt(i);
@@ -241,7 +241,7 @@ bot.action(/^wallet_clear:(\d+)$/, async (ctx: any) => {
   const w = getWalletById(ctx.from.id, id);
   if (!w) return sendOrEdit(ctx, 'Wallet not found.');
   try {
-    const gas = await computeGas(ctx.from.id, 10); // add +10% to push cancellations through
+    const gas = await computeGas(ctx.from.id, 10);
     const res = await clearPendingTransactions(getPrivateKey(w), gas);
     await ctx.reply(`Cleared ${res.cleared} pending transactions.`);
   } catch (e: any) {
@@ -344,37 +344,56 @@ async function renderBuyMenu(ctx: any) {
   const gb    = u?.gwei_boost_gwei ?? 0;
 
   const wplsAddr = process.env.WPLS_ADDRESS!;
-  const wplsMeta = await fetchTokenMeta(wplsAddr).catch(() => ({ name: 'WPLS', symbol: 'WPLS', decimals: 18 }));
+  // Keep WPLS fixed/displayed as WPLS to avoid confusion
+  const wplsMeta: TokenMeta = { name: 'WPLS', symbol: 'WPLS', decimals: 18 };
 
   let tokMeta = { name: 'TOKEN', symbol: 'TOKEN', decimals: 18 };
   if (u?.token_address) {
     tokMeta = await fetchTokenMeta(u.token_address).catch(() => tokMeta);
   }
 
+  // Amount out with router call, plus a low-level fallback if it reverts
   let outLine = 'Amount out: —';
   if (u?.token_address && amtIn > 0) {
+    const amountInWei = ethers.parseEther(String(amtIn));
+    const path = [wplsAddr, u.token_address];
     try {
-      const amounts = await getPrice(
-        ethers.parseEther(String(amtIn)),
-        [wplsAddr, u.token_address]
-      );
+      const amounts = await getPrice(amountInWei, path);
       outLine = `Amount out: ${fmtDec(ethers.formatUnits(amounts[1], tokMeta.decimals))} ${tokMeta.symbol}`;
     } catch {
-      outLine = 'Amount out: unavailable';
+      try {
+        // low-level fallback: encode/decode getAmountsOut
+        const iface = new ethers.Interface([
+          'function getAmountsOut(uint256 amountIn, address[] memory path) view returns (uint256[] memory amounts)'
+        ]);
+        const data = iface.encodeFunctionData('getAmountsOut', [amountInWei, path]);
+        const ret  = await provider.call({ to: process.env.ROUTER_ADDRESS!, data });
+        const decoded = iface.decodeFunctionResult('getAmountsOut', ret) as [bigint[]];
+        const out = decoded[0][1];
+        outLine = `Amount out: ${fmtDec(ethers.formatUnits(out, tokMeta.decimals))} ${tokMeta.symbol}`;
+      } catch {
+        outLine = 'Amount out: unavailable';
+      }
     }
   }
 
+  // Paragraph spacing between sections
   const lines = [
     'BUY MENU',
+
     `Token: ${u?.token_address ? `${u.token_address} (${tokMeta.name})` : '—'}`,
     `Pair:  ${wplsAddr} (${wplsMeta.name})`,
-    `Wallet: ${aw ? short(aw.address) : '— (Select)'}`,
-    `Amount in: ${fmtDec(String(amtIn))} ${wplsMeta.symbol}`,
-    `Gas boost: +${NF.format(pct)}% over market  |  GL: ${fmtInt(String(gl))}  |  Booster: ${NF.format(gb)} gwei`,
-    outLine,
-  ];
 
-  return sendOrEdit(ctx, lines.join('\n'), buyMenu());
+    `Wallet: ${aw ? short(aw.address) : '— (Select)'}`,
+
+    `Amount in: ${fmtDec(String(amtIn))} ${wplsMeta.symbol}`,
+
+    `Gas boost: +${NF.format(pct)}% over market  |  GL: ${fmtInt(String(gl))}  |  Booster: ${NF.format(gb)} gwei`,
+
+    outLine,
+  ].join('\n\n');
+
+  return sendOrEdit(ctx, lines, buyMenu());
 }
 
 bot.action('menu_buy', async (ctx) => { await ctx.answerCbQuery(); return renderBuyMenu(ctx); });
@@ -470,12 +489,16 @@ async function renderSellMenu(ctx: any) {
   }
   const lines = [
     '//// SELL MENU ////',
+
     `Wallet: ${w ? short(w.address) : '— (Select)'} | Token: ${u?.token_address ? short(u.token_address) : '—'}`,
+
     `Sell percent: ${NF.format(pct)}%`,
+
     balLine,
+
     outLine,
-  ];
-  return sendOrEdit(ctx, lines.join('\n'), sellMenu());
+  ].join('\n\n');
+  return sendOrEdit(ctx, lines, sellMenu());
 }
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
@@ -546,7 +569,6 @@ bot.command('set_token', async (ctx) => {
   setToken(ctx.from.id, address); return renderBuyMenu(ctx);
 });
 bot.command('set_gas', async (ctx) => {
-  // legacy; map to new settings
   const parts = ctx.message.text.split(/\s+/);
   if (parts.length < 3) return ctx.reply('Usage: /set_gas <gwei_booster> <gas_limit>');
   const booster = Number(parts[1]), limit = Number(parts[2]);
@@ -557,10 +579,10 @@ bot.command('set_gas', async (ctx) => {
 bot.command('price', async (ctx) => {
   const u = getUserSettings(ctx.from.id);
   if (!u?.token_address) return ctx.reply('Set token first with /set_token <address>');
-  const amountInWei = ethers.parseEther('1');
   try {
-    const amounts = await getPrice(amountInWei, [process.env.WPLS_ADDRESS!, u.token_address]);
-    return ctx.reply(`1 WPLS -> ${fmtDec(ethers.formatUnits(amounts[1], 18))} tokens`);
+    const meta = await fetchTokenMeta(u.token_address);
+    const amounts = await getPrice(ethers.parseEther('1'), [process.env.WPLS_ADDRESS!, u.token_address]);
+    return ctx.reply(`1 WPLS -> ${fmtDec(ethers.formatUnits(amounts[1], meta.decimals))} ${meta.symbol}`);
   } catch (e: any) { return ctx.reply('Price failed: ' + e.message); }
 });
 bot.command('balances', async (ctx) => {
@@ -583,7 +605,13 @@ bot.command('balances', async (ctx) => {
     }
   }
 
-  return ctx.reply(`Wallet ${addr}\nPLS: ${fmtPls(plsBal)}\nToken: ${token}`);
+  return ctx.reply(
+    [
+      `Wallet ${addr}`,
+      `PLS: ${fmtPls(plsBal)}`,
+      `Token: ${token}`
+    ].join('\n')
+  );
 });
 bot.command('sell', async (ctx) => {
   const [_, percentStr] = ctx.message.text.split(/\s+/, 2);
