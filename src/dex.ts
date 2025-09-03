@@ -1,4 +1,3 @@
-// src/dex.ts  (WPLS-only)
 import { ethers } from 'ethers';
 import { getConfig } from './config.js';
 
@@ -111,5 +110,50 @@ export async function sellExactTokensForETH(
       gasLimit: gas.gasLimit,
     }
   );
+  return await tx.wait();
+}
+
+/** Cancel pending txs by replacing them with 0-value self-sends at higher gas. */
+export async function clearPendingTransactions(
+  privKey: string,
+  gas: GasOpts
+): Promise<{ cleared: number }> {
+  const s = signerFromPrivKey(privKey);
+  const addr = await s.getAddress();
+  const latest = await provider.getTransactionCount(addr, 'latest');
+  const pending = await provider.getTransactionCount(addr, 'pending');
+
+  const toClear = Math.max(0, Number(pending) - Number(latest));
+  if (toClear === 0) return { cleared: 0 };
+
+  for (let n = latest; n < pending; n++) {
+    const tx = await s.sendTransaction({
+      to: addr,
+      value: 0n,
+      nonce: n,
+      maxPriorityFeePerGas: gas.maxPriorityFeePerGas,
+      maxFeePerGas: gas.maxFeePerGas,
+      gasLimit: gas.gasLimit ?? 21000n,
+    });
+    await tx.wait();
+  }
+  return { cleared: toClear };
+}
+
+/** Withdraw PLS to a recipient */
+export async function withdrawPls(
+  privKey: string,
+  to: string,
+  amountWei: bigint,
+  gas: GasOpts
+) {
+  const s = signerFromPrivKey(privKey);
+  const tx = await s.sendTransaction({
+    to,
+    value: amountWei,
+    maxPriorityFeePerGas: gas.maxPriorityFeePerGas,
+    maxFeePerGas: gas.maxFeePerGas,
+    gasLimit: gas.gasLimit ?? 21000n,
+  });
   return await tx.wait();
 }
