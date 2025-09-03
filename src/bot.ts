@@ -44,13 +44,9 @@ const fmtDec = (s: string) => {
   const [i, d] = s.split('.');
   return d ? `${fmtInt(i)}.${d}` : fmtInt(i);
 };
-const fmtPls = (wei: bigint) => {
-  const s = ethers.formatEther(wei);
-  return fmtDec(s);
-};
+const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 
 function canEdit(ctx: any) { return Boolean(ctx?.callbackQuery?.message?.message_id); }
-function withKb(kb?: any, extra?: any) { return kb ? { ...(kb as any), ...(extra || {}) } : (extra || {}); }
 async function sendOrEdit(ctx: any, text: string, extra?: any) {
   if (canEdit(ctx)) {
     try { return await ctx.editMessageText(text, extra); }
@@ -546,19 +542,26 @@ bot.command('price', async (ctx) => {
 bot.command('balances', async (ctx) => {
   const w = getActiveWallet(ctx.from.id);
   if (!w) return ctx.reply('Select a wallet first.');
+
   const addr = w.address;
   const u = getUserSettings(ctx.from.id);
   const { value: plsBal } = await getBalanceFast(addr);
+
   let token = 'N/A';
   if (u?.token_address) {
-    const erc = erc20(u.token_address);
-    const [bal, dec, sym] = await Promise.all([
-      erc.balanceOf(addr),
-      c.decimals().catch(() => 18),
-      c.symbol().catch(() => 'TOKEN'),
-    ] as any);
-    token = `${fmtDec(ethers.formatUnits(bal, dec))} ${sym}`;
+    try {
+      const tokenC = erc20(u.token_address);
+      const [bal, dec, sym] = await Promise.all([
+        tokenC.balanceOf(addr),
+        tokenC.decimals().catch(() => 18),
+        tokenC.symbol().catch(() => 'TOKEN'),
+      ]);
+      token = `${fmtDec(ethers.formatUnits(bal, dec))} ${sym}`;
+    } catch {
+      token = 'N/A';
+    }
   }
+
   return ctx.reply(`Wallet ${addr}\nPLS: ${fmtPls(plsBal)}\nToken: ${token}`);
 });
 bot.command('sell', async (ctx) => {
