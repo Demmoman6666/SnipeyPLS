@@ -285,17 +285,52 @@ bot.action('wallet_add', async (ctx) => {
   return sendOrEdit(ctx, 'Reply: `name privkey` (e.g., `hot1 0x...`)', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]) });
 });
 
-/* ===== token meta helper (for full address + name) ===== */
+/* ===== token meta helper (robust for string/bytes32) ===== */
 type TokenMeta = { name: string; symbol: string; decimals: number };
 
+function decodeBytes32Loose(b: string): string {
+  try { return ethers.decodeBytes32String(b); }
+  catch {
+    const hex = b.replace(/(00)+$/i, '');
+    try { return ethers.toUtf8String(hex as any); } catch { return ''; }
+  }
+}
+
 async function fetchTokenMeta(address: string): Promise<TokenMeta> {
-  const c = erc20(address);
-  const [symbol, name, decimals] = await Promise.all([
-    c.symbol().catch(() => 'TOKEN'),
-    c.name().catch(() => ''),
-    c.decimals().catch(() => 18),
-  ]);
-  return { symbol, name: name || symbol, decimals };
+  const prov = provider;
+  const strAbi = [
+    'function symbol() view returns (string)',
+    'function name() view returns (string)',
+    'function decimals() view returns (uint8)',
+  ];
+  const b32Abi = [
+    'function symbol() view returns (bytes32)',
+    'function name() view returns (bytes32)',
+  ];
+
+  const cStr = new ethers.Contract(address, strAbi, prov);
+  const cB32 = new ethers.Contract(address, b32Abi, prov);
+
+  // decimals (usually ok)
+  let decimals = 18;
+  try { decimals = await cStr.decimals(); } catch {}
+
+  // symbol
+  let symbol = '';
+  try { symbol = await cStr.symbol(); } catch {
+    try { symbol = decodeBytes32Loose(await cB32.symbol()); } catch {}
+  }
+
+  // name
+  let name = '';
+  try { name = await cStr.name(); } catch {
+    try { name = decodeBytes32Loose(await cB32.name()); } catch {}
+  }
+
+  if (!symbol) symbol = 'TOKEN';
+  if (!name) name = symbol;
+
+  return { name, symbol, decimals };
 }
 
 /* ---------- BUY MENU ---------- */
@@ -303,51 +338,40 @@ async function renderBuyMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
   const aw = getActiveWallet(ctx.from.id);
 
-  const amt = u?.buy_amount_pls ?? 0.01;
-  const pct = u?.gas_pct ?? (u?.default_gas_pct ?? 0);
-  const gl  = u?.gas_limit ?? 250000;
-  const gb  = u?.gwei_boost_gwei ?? 0;
+  const amtIn = u?.buy_amount_pls ?? 0.01;
+  const pct   = u?.gas_pct ?? (u?.default_gas_pct ?? 0);
+  const gl    = u?.gas_limit ?? 250000;
+  const gb    = u?.gwei_boost_gwei ?? 0;
 
   const wplsAddr = process.env.WPLS_ADDRESS!;
-  let wplsMeta: TokenMeta | null = null;
-  let tokMeta:  TokenMeta | null = null;
+  const wplsMeta = await fetchTokenMeta(wplsAddr).catch(() => ({ name: 'WPLS', symbol: 'WPLS', decimals: 18 }));
 
-  try { wplsMeta = await fetchTokenMeta(wplsAddr); } catch {}
-
-  let quoteLine = 'Quote: —';
-
+  let tokMeta = { name: 'TOKEN', symbol: 'TOKEN', decimals: 18 };
   if (u?.token_address) {
+    tokMeta = await fetchTokenMeta(u.token_address).catch(() => tokMeta);
+  }
+
+  let outLine = 'Amount out: —';
+  if (u?.token_address && amtIn > 0) {
     try {
-      tokMeta = await fetchTokenMeta(u.token_address);
-      if (amt > 0) {
-        const amounts = await getPrice(
-          ethers.parseEther(String(amt)),
-          [wplsAddr, u.token_address]
-        );
-        const dec = tokMeta.decimals ?? 18;
-        quoteLine = `Quote: ${fmtDec(String(amt))} ${wplsMeta?.symbol ?? 'WPLS'} → ${fmtDec(ethers.formatUnits(amounts[1], dec))} ${tokMeta.symbol}`;
-      }
+      const amounts = await getPrice(
+        ethers.parseEther(String(amtIn)),
+        [wplsAddr, u.token_address]
+      );
+      outLine = `Amount out: ${fmtDec(ethers.formatUnits(amounts[1], tokMeta.decimals))} ${tokMeta.symbol}`;
     } catch {
-      quoteLine = 'Quote: unavailable';
+      outLine = 'Amount out: unavailable';
     }
   }
 
-  const tokenLine =
-    `Token: ${u?.token_address
-      ? `${u.token_address} (${tokMeta?.name ?? tokMeta?.symbol ?? 'TOKEN'})`
-      : '—'}`;
-
-  const pairLine =
-    `Pair: ${wplsAddr} (${wplsMeta?.name ?? wplsMeta?.symbol ?? 'WPLS'})`;
-
   const lines = [
     'BUY MENU',
-    tokenLine,
-    pairLine,
+    `Token: ${u?.token_address ? `${u.token_address} (${tokMeta.name})` : '—'}`,
+    `Pair:  ${wplsAddr} (${wplsMeta.name})`,
     `Wallet: ${aw ? short(aw.address) : '— (Select)'}`,
-    `Amount: ${fmtDec(String(amt))} PLS`,
+    `Amount in: ${fmtDec(String(amtIn))} ${wplsMeta.symbol}`,
     `Gas boost: +${NF.format(pct)}% over market  |  GL: ${fmtInt(String(gl))}  |  Booster: ${NF.format(gb)} gwei`,
-    quoteLine,
+    outLine,
   ];
 
   return sendOrEdit(ctx, lines.join('\n'), buyMenu());
@@ -424,23 +448,23 @@ async function renderSellMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
   const w = getActiveWallet(ctx.from.id);
   const pct = u?.sell_pct ?? 100;
+
   let balLine = 'Token balance: —';
-  let quoteLine = 'Quote: —';
+  let outLine = 'Amount out: —';
+
   if (w && u?.token_address) {
     try {
+      const meta = await fetchTokenMeta(u.token_address);
       const c = erc20(u.token_address);
-      const [bal, dec, sym] = await Promise.all([
-        c.balanceOf(w.address),
-        c.decimals().catch(() => 18),
-        c.symbol().catch(() => 'TOKEN'),
-      ]);
-      balLine = `Token balance: ${fmtDec(ethers.formatUnits(bal, dec))} ${sym}`;
+      const bal = await c.balanceOf(w.address);
+      balLine = `Token balance: ${fmtDec(ethers.formatUnits(bal, meta.decimals))} ${meta.symbol}`;
+
       const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
       if (amountIn > 0n) {
         const amounts = await getPrice(amountIn, [u.token_address, process.env.WPLS_ADDRESS!]);
-        quoteLine = `Quote: ${fmtDec(ethers.formatUnits(amountIn, dec))} ${sym} → ${fmtDec(ethers.formatEther(amounts[1]))} PLS`;
+        outLine = `Amount out: ${fmtDec(ethers.formatEther(amounts[1]))} PLS`;
       } else {
-        quoteLine = 'Quote: 0';
+        outLine = 'Amount out: 0';
       }
     } catch { /* leave defaults */ }
   }
@@ -449,7 +473,7 @@ async function renderSellMenu(ctx: any) {
     `Wallet: ${w ? short(w.address) : '— (Select)'} | Token: ${u?.token_address ? short(u.token_address) : '—'}`,
     `Sell percent: ${NF.format(pct)}%`,
     balLine,
-    quoteLine,
+    outLine,
   ];
   return sendOrEdit(ctx, lines.join('\n'), sellMenu());
 }
@@ -550,13 +574,10 @@ bot.command('balances', async (ctx) => {
   let token = 'N/A';
   if (u?.token_address) {
     try {
+      const meta = await fetchTokenMeta(u.token_address);
       const tokenC = erc20(u.token_address);
-      const [bal, dec, sym] = await Promise.all([
-        tokenC.balanceOf(addr),
-        tokenC.decimals().catch(() => 18),
-        tokenC.symbol().catch(() => 'TOKEN'),
-      ]);
-      token = `${fmtDec(ethers.formatUnits(bal, dec))} ${sym}`;
+      const bal = await tokenC.balanceOf(addr);
+      token = `${fmtDec(ethers.formatUnits(bal, meta.decimals))} ${meta.symbol}`;
     } catch {
       token = 'N/A';
     }
@@ -576,7 +597,6 @@ bot.command('sell', async (ctx) => {
 bot.on('text', async (ctx, next) => {
   const p = pending.get(ctx.from.id);
   if (p) {
-    // handle prompts
     const msg = String(ctx.message.text).trim();
 
     if (p.type === 'set_amount') {
@@ -651,7 +671,7 @@ bot.on('text', async (ctx, next) => {
       pending.delete(ctx.from.id); return renderSettings(ctx);
     }
 
-    return; // end of pending flow
+    return;
   }
 
   // No pending prompt → auto-detect token address
