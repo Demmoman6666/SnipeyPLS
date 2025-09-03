@@ -92,27 +92,42 @@ function v3(key: string, router?: string, quoter?: string, fee?: number): RouteV
   return { key, kind: 'v3', router, quoter, fee };
 }
 
+/** Human label for a route (useful in UI). */
+export function routeLabel(r: Route): string {
+  if (r.kind === 'v2') {
+    if (r.key === 'PULSEX_V1') return 'PulseX v1';
+    if (r.key === 'LEGACY')     return 'PulseX v2';
+    if (r.key === '9MM_V2')     return '9mm v2';
+    if (r.key === '9INCH_V2')   return '9inch v2';
+    return r.key;
+  } else {
+    const pct = r.fee === 500 ? '0.05%' : r.fee === 3000 ? '0.3%' : r.fee === 10000 ? '1%' : `${r.fee/100}%`;
+    if (r.key.startsWith('9MM_V3'))   return `9mm v3 (${pct})`;
+    if (r.key.startsWith('9INCH_V3')) return `9inch v3 (${pct})`;
+    return `v3 (${pct})`;
+  }
+}
+
 /** Build the list of candidate routes (skip undefined). */
 function candidateRoutes(): Route[] {
   const routes: (Route | null)[] = [];
 
   // V2
-  routes.push(v2('PULSEX_V1', process.env.PULSEX_V1_ROUTER));
+  routes.push(v2('PULSEX_V1', process.env.PULSEX_V1_ROUTER));     // <- add this env in Railway for v1 pools
   routes.push(v2('9MM_V2', process.env.NINEMM_V2_ROUTER));
   routes.push(v2('9INCH_V2', process.env.NINEINCH_V2_ROUTER));
 
-  // V3 (try common fee tiers per DEX if router+quoter present)
-  const v3Fees = [500, 3000, 10000]; // 0.05%, 0.3%, 1%
+  // Back-compat: your original v2 router env
+  if (process.env.ROUTER_ADDRESS) routes.push({ key: 'LEGACY', kind: 'v2', router: process.env.ROUTER_ADDRESS } as RouteV2);
 
+  // V3 (only if router+quoter provided)
+  const v3Fees = [500, 3000, 10000]; // 0.05%, 0.3%, 1%
   if (process.env.NINEMM_V3_ROUTER && process.env.NINEMM_V3_QUOTER) {
     for (const fee of v3Fees) routes.push(v3('9MM_V3', process.env.NINEMM_V3_ROUTER, process.env.NINEMM_V3_QUOTER, fee));
   }
   if (process.env.NINEINCH_V3_ROUTER && process.env.NINEINCH_V3_QUOTER) {
     for (const fee of v3Fees) routes.push(v3('9INCH_V3', process.env.NINEINCH_V3_ROUTER, process.env.NINEINCH_V3_QUOTER, fee));
   }
-
-  // Back-compat one-router env (treated like V2)
-  if (process.env.ROUTER_ADDRESS) routes.push({ key: 'LEGACY', kind: 'v2', router: process.env.ROUTER_ADDRESS } as RouteV2);
 
   return routes.filter(Boolean) as Route[];
 }
@@ -282,12 +297,12 @@ export async function approveAllRouters(
   const results: string[] = [];
 
   for (const r of routes) {
-    const spender = r.router;
+    const spender = r.kind === 'v2' ? r.router : r.router; // both use router as spender
     const current = await t.allowance(me, spender);
-    if (current >= amount / 2n) { results.push(`skipped ${r.key}`); continue; }
+    if (current >= amount / 2n) { results.push(`skipped ${routeLabel(r)}`); continue; }
     const tx = await t.approve(spender, amount, ov(gas));
     const rc = await tx.wait();
-    results.push(`${r.key}: ${rc.hash}`);
+    results.push(`${routeLabel(r)}: ${rc.hash}`);
   }
   return results;
 }
