@@ -1,3 +1,4 @@
+// src/bot.ts
 import { Telegraf, Markup } from 'telegraf';
 import { getConfig } from './config.js';
 import { mainMenu, buyMenu } from './keyboards.js';
@@ -32,18 +33,22 @@ export const bot = new Telegraf(cfg.BOT_TOKEN, { handlerTimeout: 60_000 });
 
 // ---------- helpers ----------
 const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
-const fmt = (num: bigint) => ethers.formatEther(num);
+const fmtPls = (wei: bigint) => (wei === 0n ? '0' : ethers.formatEther(wei));
 
 const BAL_TIMEOUT_MS = 8000;
 function withTimeout<T>(p: Promise<T>, ms = BAL_TIMEOUT_MS): Promise<T> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('timeout')), ms);
-    p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+    p.then(
+      v => { clearTimeout(t); resolve(v); },
+      e => { clearTimeout(t); reject(e); }
+    );
   });
 }
-async function getBalanceFast(address: string): Promise<bigint | null> {
+// Always return a bigint; on error/timeout we return 0n (so UI shows 0)
+async function getBalanceFast(address: string): Promise<bigint> {
   try { return await withTimeout(provider.getBalance(address)); }
-  catch { return null; }
+  catch { return 0n; }
 }
 
 // Pending state for DM replies
@@ -84,8 +89,7 @@ async function renderWalletsList(ctx: any) {
     'Address                              | Balance (PLS)',
     '-------------------------------------|----------------',
     ...rows.map((w, i) => {
-      const b = balances[i];
-      const bal = b === null ? 'N/A' : fmt(b);
+      const bal = fmtPls(balances[i]);
       const active = u?.active_wallet_id === w.id ? '   (active)' : '';
       return `${w.address} | ${bal}${active}`;
     }),
@@ -109,7 +113,7 @@ async function renderWalletManage(ctx: any, walletId: number) {
     '//// Wallet ////',
     `ID: ${walletId}`,
     `Address: ${w.address}`,
-    `Balance: ${bal === null ? 'N/A' : fmt(bal)} PLS`,
+    `Balance: ${fmtPls(bal)} PLS`,
   ].join('\n');
 
   const kb = Markup.inlineKeyboard([
@@ -465,7 +469,7 @@ bot.action('buy_exec_all', async (ctx) => {
   return renderBuyMenu(ctx);
 });
 
-// ---------- traditional commands still available ----------
+// ---------- traditional commands ----------
 bot.command('wallets', async (ctx) => renderWalletsList(ctx));
 bot.command('wallet_new', async (ctx) => {
   const [_, name] = ctx.message.text.split(/\s+/, 2);
@@ -524,7 +528,7 @@ bot.command('balances', async (ctx) => {
     ]);
     token = `${ethers.formatUnits(bal, dec)} ${sym}`;
   }
-  return ctx.reply(`Wallet ${addr}\nPLS: ${plsBal === null ? 'N/A' : ethers.formatEther(plsBal)}\nToken: ${token}`);
+  return ctx.reply(`Wallet ${addr}\nPLS: ${fmtPls(plsBal)}\nToken: ${token}`);
 });
 bot.command('sell', async (ctx) => {
   const [_, percentStr] = ctx.message.text.split(/\s+/, 2);
