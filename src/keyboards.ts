@@ -1,5 +1,9 @@
+// src/keyboards.ts
 import { Markup } from 'telegraf';
 
+/**
+ * Main menu
+ */
 export const mainMenu = () =>
   Markup.inlineKeyboard([
     [
@@ -14,79 +18,92 @@ export const mainMenu = () =>
     ],
   ]);
 
-/** Buy menu (Pulseonic-style layout) */
-export const buyMenu = () =>
+/**
+ * Buy menu keyboard (compact, Pulseonic-style)
+ * @param gasPct current gas over-market %
+ */
+export const buyMenu = (gasPct: number) => {
+  // Top single pill → opens the selector screen
+  const top = [Markup.button.callback(`⛽️ Gas ±% (${gasPct}% )`, 'gas_pct_open')];
+
+  const nav = [
+    Markup.button.callback('⬅️ Back', 'main_back'),
+    Markup.button.callback('🔄 Refresh', 'buy_refresh'),
+  ];
+
+  // Disabled “pill” – we use a no-op handler
+  const editPill = [Markup.button.callback('• EDIT BUY DATA •', 'noop')];
+
+  const infoRow = [
+    Markup.button.callback('🧾 Contract', 'buy_set_token'),
+    Markup.button.callback('🧩 Pair', 'pair_info'),
+  ];
+
+  const actions1 = [
+    Markup.button.callback('👛 Choose Wallet', 'choose_wallet'),
+    Markup.button.callback('💰 Amount', 'buy_set_amount'),
+  ];
+
+  const actions2 = [
+    Markup.button.callback('✅ Buy Now', 'buy_exec'),
+    Markup.button.callback('✅ Buy All Wallets', 'buy_exec_all'),
+  ];
+
+  return Markup.inlineKeyboard([top, nav, editPill, infoRow, actions1, actions2]);
+};
+
+/**
+ * Separate screen: choose a gas % boost.
+ */
+export const buyGasPctMenu = () =>
   Markup.inlineKeyboard([
-    // Top row: Gas picker + Back + Refresh
     [
-      Markup.button.callback('⛽️ Gas ± %', 'buy_gas_picker'),
-      Markup.button.callback('⬅️ Back', 'main_back'),
-      Markup.button.callback('🔄 Refresh', 'buy_refresh'),
+      Markup.button.callback('−10%', 'gas_pct_set:-10'),
+      Markup.button.callback('0%', 'gas_pct_set:0'),
+      Markup.button.callback('+5%', 'gas_pct_set:5'),
     ],
-
-    // Non-clickable label (we’ll ignore the noop action)
-    [Markup.button.callback('———  EDIT BUY DATA  ———', 'noop')],
-
-    // Edit data row
     [
-      Markup.button.callback('🧾 Contract', 'buy_set_token'),
-      Markup.button.callback('🧩 Pair', 'pair_info'),
-      Markup.button.callback('💰 Amount In', 'buy_set_amount'),
+      Markup.button.callback('+10%', 'gas_pct_set:10'),
+      Markup.button.callback('+25%', 'gas_pct_set:25'),
+      Markup.button.callback('+50%', 'gas_pct_set:50'),
     ],
-
-    // Utility
-    [Markup.button.callback('👛 Choose Wallet', 'choose_wallet')],
-
-    // Primary actions
     [
-      Markup.button.callback('✅ Buy Now', 'buy_exec'),
-      Markup.button.callback('✅ Buy All Wallets', 'buy_exec_all'),
+      Markup.button.callback('+100%', 'gas_pct_set:100'),
+      Markup.button.callback('Back', 'menu_buy'),
     ],
   ]);
 
-/** Gas percent quick picker */
-export const gasPercentMenu = () =>
-  Markup.inlineKeyboard([
-    [
-      Markup.button.callback('5%', 'gas_pct_set:5'),
-      Markup.button.callback('10%', 'gas_pct_set:10'),
-      Markup.button.callback('15%', 'gas_pct_set:15'),
-      Markup.button.callback('25%', 'gas_pct_set:25'),
-      Markup.button.callback('50%', 'gas_pct_set:50'),
-    ],
-    [
-      Markup.button.callback('Reset to Default', 'gas_pct_reset'),
-      Markup.button.callback('Custom…', 'gas_pct_custom'),
-    ],
-    [Markup.button.callback('⬅️ Back', 'menu_buy')],
-  ]);
-
-/** Sell menu (unchanged layout except no approve in buy) */
+/**
+ * Sell menu (unchanged behaviour)
+ */
 export const sellMenu = () =>
   Markup.inlineKeyboard([
     [
       Markup.button.callback('⬅️ Back', 'main_back'),
-      Markup.button.callback('🔄 Refresh', 'sell_refresh'),
+      Markup.button.callback('🔄 Refresh', 'menu_sell'),
     ],
     [
-      Markup.button.callback('25%', 'sell_pct_25'),
-      Markup.button.callback('50%', 'sell_pct_50'),
-      Markup.button.callback('75%', 'sell_pct_75'),
-      Markup.button.callback('100%', 'sell_pct_100'),
+      Markup.button.callback('Sell 25%', 'sell_pct_25'),
+      Markup.button.callback('Sell 50%', 'sell_pct_50'),
+      Markup.button.callback('Sell 75%', 'sell_pct_75'),
+      Markup.button.callback('Sell 100%', 'sell_pct_100'),
     ],
-    [Markup.button.callback('✅ Sell Now', 'sell_exec')],
+    [Markup.button.callback('✅ Sell', 'sell_exec')],
   ]);
 
 export const settingsMenu = () =>
   Markup.inlineKeyboard([
     [
-      Markup.button.callback('⛽️ Gas Limit', 'set_gl'),
-      Markup.button.callback('⚡️ Gwei Booster', 'set_gb'),
+      Markup.button.callback('⬅️ Back', 'main_back'),
+      Markup.button.callback('🔄 Refresh', 'settings'),
     ],
-    [Markup.button.callback('⛽️ Default Gas %', 'set_defpct')],
     [
-      Markup.button.callback('🤖 Auto-buy On/Off', 'auto_toggle'),
-      Markup.button.callback('💸 Auto-buy Amount', 'auto_amt'),
+      Markup.button.callback('Gas Limit', 'set_gl'),
+      Markup.button.callback('Gwei Booster', 'set_gb'),
     ],
-    [Markup.button.callback('⬅️ Back', 'main_back')],
+    [Markup.button.callback('Default Gas %', 'set_defpct')],
+    [
+      Markup.button.callback('Auto-Buy Toggle', 'auto_toggle'),
+      Markup.button.callback('Auto-Buy Amount', 'auto_amt'),
+    ],
   ]);
