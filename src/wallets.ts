@@ -1,4 +1,3 @@
-// src/wallets.ts
 import { ethers } from 'ethers';
 import { getDb } from './db.js';
 import { encryptPrivateKey, decryptPrivateKey } from './crypto.js';
@@ -21,9 +20,7 @@ export function ensureUserRow(telegramId: number) {
   const row = db
     .prepare('SELECT telegram_id FROM users WHERE telegram_id=?')
     .get(telegramId) as { telegram_id: number } | undefined;
-  if (!row) {
-    db.prepare('INSERT INTO users (telegram_id) VALUES (?)').run(telegramId);
-  }
+  if (!row) db.prepare('INSERT INTO users (telegram_id) VALUES (?)').run(telegramId);
 }
 
 export function listWallets(telegramId: number): WalletRow[] {
@@ -43,7 +40,6 @@ export function getWalletById(telegramId: number, walletId: number): WalletRow |
 
 export function createWallet(telegramId: number, name: string) {
   ensureUserRow(telegramId);
-
   const w = ethers.Wallet.createRandom();
   const enc = encryptPrivateKey(cfg.MASTER_KEY, w.privateKey);
 
@@ -66,7 +62,6 @@ export function createWallet(telegramId: number, name: string) {
 
 export function importWallet(telegramId: number, name: string, privKey: string) {
   ensureUserRow(telegramId);
-
   const w = new ethers.Wallet(privKey);
   const enc = encryptPrivateKey(cfg.MASTER_KEY, w.privateKey);
 
@@ -118,17 +113,14 @@ export function setActiveWallet(telegramId: number, idOrName: string) {
 
 export function getActiveWallet(telegramId: number): WalletRow | null {
   const db = getDb();
-
   const u = db
     .prepare('SELECT active_wallet_id FROM users WHERE telegram_id=?')
     .get(telegramId) as ActiveIdRow;
-
   if (!u || !u.active_wallet_id) return null;
 
   const w = db
     .prepare('SELECT id, telegram_id, name, address, enc_privkey FROM wallets WHERE id=? AND telegram_id=?')
     .get(u.active_wallet_id, telegramId) as WalletRow | undefined;
-
   return w ?? null;
 }
 
@@ -141,12 +133,7 @@ export function setToken(telegramId: number, token: string) {
   db.prepare('UPDATE users SET token_address=? WHERE telegram_id=?').run(token, telegramId);
 }
 
-export function setGas(
-  telegramId: number,
-  priorityGwei: number,
-  maxGwei: number,
-  gasLimit: number,
-) {
+export function setGas(telegramId: number, priorityGwei: number, maxGwei: number, gasLimit: number) {
   const db = getDb();
   db.prepare(
     'UPDATE users SET max_priority_fee_gwei=?, max_fee_gwei=?, gas_limit=? WHERE telegram_id=?',
