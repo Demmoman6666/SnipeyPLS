@@ -1,4 +1,4 @@
-// src/dex.ts (WPLS-only)
+// src/dex.ts  (WPLS-only)
 import { ethers } from 'ethers';
 import { getConfig } from './config.js';
 
@@ -12,6 +12,7 @@ const ROUTER_ABI = [
   "function swapExactTokensForTokensSupportingFeeOnTransferTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline)",
   "function WETH() external view returns (address)"
 ];
+
 const ERC20_ABI = [
   "function balanceOf(address) view returns (uint256)",
   "function allowance(address owner, address spender) view returns (uint256)",
@@ -44,7 +45,13 @@ export type GasOpts = {
   gasLimit?: bigint;
 };
 
-export async function approveToken(privKey: string, token: string, spender: string, amount: bigint, gas: GasOpts) {
+export async function approveToken(
+  privKey: string,
+  token: string,
+  spender: string,
+  amount: bigint,
+  gas: GasOpts
+) {
   const s = signerFromPrivKey(privKey);
   const c = erc20(token, s);
   const tx = await c.approve(spender, amount, {
@@ -55,13 +62,23 @@ export async function approveToken(privKey: string, token: string, spender: stri
   return await tx.wait();
 }
 
-export async function buyExactETHForTokens(privKey: string, token: string, amountInWei: bigint, minOut: bigint, gas: GasOpts) {
+export async function buyExactETHForTokens(
+  privKey: string,
+  token: string,
+  amountInWei: bigint,
+  minOut: bigint,
+  gas: GasOpts
+) {
   const s = signerFromPrivKey(privKey);
   const r = routerInstance(s);
   const path = [cfg.WPLS_ADDRESS, token];
-  const deadline = Math.floor(Date.now()/1000)+60*10;
+  const deadline = Math.floor(Date.now() / 1000) + 60 * 10;
   const tx = await r.swapExactETHForTokensSupportingFeeOnTransferTokens(
-    minOut, path, await s.getAddress(), deadline, {
+    minOut,
+    path,
+    await s.getAddress(),
+    deadline,
+    {
       value: amountInWei,
       maxPriorityFeePerGas: gas.maxPriorityFeePerGas,
       maxFeePerGas: gas.maxFeePerGas,
@@ -71,13 +88,24 @@ export async function buyExactETHForTokens(privKey: string, token: string, amoun
   return await tx.wait();
 }
 
-export async function sellExactTokensForETH(privKey: string, token: string, amountIn: bigint, minOut: bigint, gas: GasOpts) {
+export async function sellExactTokensForETH(
+  privKey: string,
+  token: string,
+  amountIn: bigint,
+  minOut: bigint,
+  gas: GasOpts
+) {
   const s = signerFromPrivKey(privKey);
   const r = routerInstance(s);
   const path = [token, cfg.WPLS_ADDRESS];
-  const deadline = Math.floor(Date.now()/1000)+60*10;
+  const deadline = Math.floor(Date.now() / 1000) + 60 * 10;
   const tx = await r.swapExactTokensForETHSupportingFeeOnTransferTokens(
-    amountIn, minOut, path, await s.getAddress(), deadline, {
+    amountIn,
+    minOut,
+    path,
+    await s.getAddress(),
+    deadline,
+    {
       maxPriorityFeePerGas: gas.maxPriorityFeePerGas,
       maxFeePerGas: gas.maxFeePerGas,
       gasLimit: gas.gasLimit,
