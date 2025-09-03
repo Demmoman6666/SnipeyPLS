@@ -1,3 +1,4 @@
+// src/bot.ts
 import { Telegraf, Markup } from 'telegraf';
 import { getConfig } from './config.js';
 import { mainMenu, buyMenu } from './keyboards.js';
@@ -31,11 +32,38 @@ import {
 const cfg = getConfig();
 export const bot = new Telegraf(cfg.BOT_TOKEN, { handlerTimeout: 60_000 });
 
-// ---------- helpers ----------
+/* ----------------------- small UI helpers ----------------------- */
+
 const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
 const fmtPls = (wei: bigint) => (wei === 0n ? '0' : ethers.formatEther(wei));
 
-// time-bounded balance fetch; returns [value, ok]
+function canEdit(ctx: any) {
+  return Boolean(ctx?.callbackQuery?.message?.message_id);
+}
+
+// Merge a keyboard (Markup.inlineKeyboard(...)) with extra (e.g., parse_mode)
+function withKb(kb?: any, extra?: any) {
+  return kb ? { ...(kb as any), ...(extra || {}) } : (extra || {});
+}
+
+// Edit the pressed message if possible; otherwise send a new one.
+// Falls back to reply if edit fails (e.g., "message is not modified" or too old).
+async function sendOrEdit(ctx: any, text: string, extra?: any) {
+  if (canEdit(ctx)) {
+    try {
+      return await ctx.editMessageText(text, extra);
+    } catch (e: any) {
+      // If edit fails, try to delete then send fresh (best-effort)
+      try { await ctx.deleteMessage(ctx.callbackQuery.message.message_id); } catch {}
+      return await ctx.reply(text, extra);
+    }
+  } else {
+    return await ctx.reply(text, extra);
+  }
+}
+
+/* ----------------------- balances (timeout) ----------------------- */
+
 const BAL_TIMEOUT_MS = 8000;
 function withTimeout<T>(p: Promise<T>, ms = BAL_TIMEOUT_MS): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -43,17 +71,18 @@ function withTimeout<T>(p: Promise<T>, ms = BAL_TIMEOUT_MS): Promise<T> {
     p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
   });
 }
+// Always return something; if RPC fails, value=0n and ok=false.
 async function getBalanceFast(address: string): Promise<{ value: bigint; ok: boolean }> {
   try {
     const v = await withTimeout(provider.getBalance(address));
     return { value: v, ok: true };
-  } catch (e) {
-    // show 0 for UX but mark as not-ok so we can warn
+  } catch {
     return { value: 0n, ok: false };
   }
 }
 
-// Pending state for DM replies
+/* ----------------------- pending prompts ----------------------- */
+
 type Pending =
   | { type: 'set_amount' }
   | { type: 'set_token' }
@@ -62,24 +91,28 @@ type Pending =
   | { type: 'withdraw'; walletId: number };
 const pending = new Map<number, Pending>();
 
-// ---------- main ----------
+/* ----------------------- /start ----------------------- */
+
 bot.start(async (ctx) => {
-  await ctx.reply('Welcome to PulseChain Trading Bot. Use commands or the menu below.', mainMenu());
+  await ctx.reply('Main Menu', mainMenu());
 });
 
-// ---------- wallets list & manage ----------
+/* ----------------------- Wallets: list & manage ----------------------- */
+
 async function renderWalletsList(ctx: any) {
   const rows = listWallets(ctx.from.id);
 
   if (!rows.length) {
-    await ctx.reply(
+    return sendOrEdit(
+      ctx,
       'No wallets yet.',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('➕ Generate', 'wallet_generate'), Markup.button.callback('📥 Add (Import)', 'wallet_add')],
-        [Markup.button.callback('⬅️ Back', 'main_back')],
-      ])
+      withKb(
+        Markup.inlineKeyboard([
+          [Markup.button.callback('➕ Generate', 'wallet_generate'), Markup.button.callback('📥 Add (Import)', 'wallet_add')],
+          [Markup.button.callback('⬅️ Back', 'main_back')],
+        ])
+      )
     );
-    return;
   }
 
   const results = await Promise.all(rows.map(w => getBalanceFast(w.address)));
@@ -96,8 +129,6 @@ async function renderWalletsList(ctx: any) {
       return `${w.address} | ${bal}${active}`;
     }),
   ];
-
-  // If any balance pulled failed, add a small hint
   if (results.some(r => !r.ok)) {
     lines.push('', '⚠️ Some balances didn’t load from the RPC. Use /rpc_check to diagnose.');
   }
@@ -109,12 +140,13 @@ async function renderWalletsList(ctx: any) {
   kb.push([Markup.button.callback('➕ Generate', 'wallet_generate'), Markup.button.callback('📥 Add (Import)', 'wallet_add')]);
   kb.push([Markup.button.callback('⬅️ Back', 'main_back')]);
 
-  await ctx.reply(lines.join('\n'), Markup.inlineKeyboard(kb));
+  return sendOrEdit(ctx, lines.join('\n'), Markup.inlineKeyboard(kb));
 }
 
 async function renderWalletManage(ctx: any, walletId: number) {
   const w = getWalletById(ctx.from.id, walletId);
-  if (!w) return ctx.reply('Wallet not found.');
+  if (!w) return sendOrEdit(ctx, 'Wallet not found.');
+
   const { value: bal, ok } = await getBalanceFast(w.address);
   const lines = [
     '//// Wallet ////',
@@ -129,13 +161,12 @@ async function renderWalletManage(ctx: any, walletId: number) {
     [Markup.button.callback('🗑 Remove', `wallet_remove:${walletId}`), Markup.button.callback('⬅️ Back', 'wallets')],
   ]);
 
-  await ctx.reply(lines, kb);
+  return sendOrEdit(ctx, lines, kb);
 }
 
-bot.action('wallets', async (ctx) => {
-  await ctx.answerCbQuery();
-  await renderWalletsList(ctx);
-});
+/* actions */
+
+bot.action('wallets', async (ctx) => { await ctx.answerCbQuery(); return renderWalletsList(ctx); });
 
 bot.action(/^wallet_manage:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
@@ -148,32 +179,33 @@ bot.action(/^wallet_set_active:(\d+)$/, async (ctx: any) => {
   const id = Number(ctx.match[1]);
   try {
     const setId = setActiveWallet(ctx.from.id, String(id));
-    await ctx.reply(`Active wallet set to ID ${setId}.`);
+    await ctx.answerCbQuery(`Active wallet set to ${setId}`);
   } catch (e: any) {
-    await ctx.reply('Select failed: ' + e.message);
+    await ctx.answerCbQuery('Select failed', { show_alert: true });
   }
   return renderWalletsList(ctx);
 });
 
-// Show PK (mask + confirm)
+// PK flow
 bot.action(/^wallet_pk:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const id = Number(ctx.match[1]);
   const w = getWalletById(ctx.from.id, id);
-  if (!w) return ctx.reply('Wallet not found.');
+  if (!w) return sendOrEdit(ctx, 'Wallet not found.');
   const masked = getPrivateKey(w).replace(/^(.{6}).+(.{4})$/, '$1…$2');
   const kb = Markup.inlineKeyboard([
     [Markup.button.callback('⚠️ Reveal (I understand the risk)', `wallet_pk_reveal:${id}`)],
     [Markup.button.callback('⬅️ Back', `wallet_manage:${id}`)],
   ]);
-  await ctx.reply(`Private key (masked): ${masked}\nRevealing exposes full control of funds.`, kb);
+  return sendOrEdit(ctx, `Private key (masked): ${masked}\nRevealing exposes full control of funds.`, kb);
 });
 
 bot.action(/^wallet_pk_reveal:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const id = Number(ctx.match[1]);
   const w = getWalletById(ctx.from.id, id);
-  if (!w) return ctx.reply('Wallet not found.');
+  if (!w) return sendOrEdit(ctx, 'Wallet not found.');
+  // reveal as a separate message (don’t edit menu with sensitive data)
   await ctx.reply(`PRIVATE KEY for ${short(w.address)}:\n\`${getPrivateKey(w)}\``, { parse_mode: 'Markdown' });
   return renderWalletManage(ctx, id);
 });
@@ -183,7 +215,7 @@ bot.action(/^wallet_clear:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const id = Number(ctx.match[1]);
   const w = getWalletById(ctx.from.id, id);
-  if (!w) return ctx.reply('Wallet not found.');
+  if (!w) return sendOrEdit(ctx, 'Wallet not found.');
   const u = getUserSettings(ctx.from.id);
   try {
     const res = await clearPendingTransactions(getPrivateKey(w), {
@@ -198,17 +230,16 @@ bot.action(/^wallet_clear:(\d+)$/, async (ctx: any) => {
   return renderWalletManage(ctx, id);
 });
 
-// Withdraw
+// Withdraw prompt
 bot.action(/^wallet_withdraw:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const id = Number(ctx.match[1]);
-  const w = getWalletById(ctx.from.id, id);
-  if (!w) return ctx.reply('Wallet not found.');
+  const kb = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', `wallet_manage:${id}`)]]);
   pending.set(ctx.from.id, { type: 'withdraw', walletId: id });
-  return ctx.reply('Reply with: `address amount_pls`\nExample: `0xabc123... 0.5`', { parse_mode: 'Markdown' });
+  return sendOrEdit(ctx, 'Reply with: `address amount_pls`\nExample: `0xabc123... 0.5`', withKb(kb, { parse_mode: 'Markdown' }));
 });
 
-// Remove (confirm)
+// Remove
 bot.action(/^wallet_remove:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const id = Number(ctx.match[1]);
@@ -216,9 +247,8 @@ bot.action(/^wallet_remove:(\d+)$/, async (ctx: any) => {
     [Markup.button.callback('❌ Confirm Remove', `wallet_remove_confirm:${id}`)],
     [Markup.button.callback('⬅️ Back', `wallet_manage:${id}`)],
   ]);
-  await ctx.reply(`Remove wallet ID ${id}? This does NOT revoke keys on-chain.`, kb);
+  return sendOrEdit(ctx, `Remove wallet ID ${id}? This does NOT revoke keys on-chain.`, kb);
 });
-
 bot.action(/^wallet_remove_confirm:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const id = Number(ctx.match[1]);
@@ -238,19 +268,22 @@ bot.action(/^wallet_refresh:(\d+)$/, async (ctx: any) => {
   return renderWalletManage(ctx, id);
 });
 
-// Generate / Import via inline
+// Generate / Import prompts (edit menu into prompt with Back)
 bot.action('wallet_generate', async (ctx) => {
   await ctx.answerCbQuery();
+  const kb = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]);
   pending.set(ctx.from.id, { type: 'gen_name' });
-  return ctx.reply('Send a name for your new wallet (e.g., `trader1`).', { parse_mode: 'Markdown' });
+  return sendOrEdit(ctx, 'Send a name for your new wallet (e.g., `trader1`).', withKb(kb, { parse_mode: 'Markdown' }));
 });
 bot.action('wallet_add', async (ctx) => {
   await ctx.answerCbQuery();
+  const kb = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]);
   pending.set(ctx.from.id, { type: 'import_wallet' });
-  return ctx.reply('Reply with: `name privkey`\nExample: `hot1 0xYOUR_PRIVATE_KEY`', { parse_mode: 'Markdown' });
+  return sendOrEdit(ctx, 'Reply with: `name privkey`\nExample: `hot1 0xYOUR_PRIVATE_KEY`', withKb(kb, { parse_mode: 'Markdown' }));
 });
 
-// Handle text replies for prompts
+/* ----------------------- Text replies for prompts ----------------------- */
+
 bot.on('text', async (ctx, next) => {
   const p = pending.get(ctx.from.id);
   if (!p) return next();
@@ -261,7 +294,7 @@ bot.on('text', async (ctx, next) => {
     setBuyAmount(ctx.from.id, v);
     pending.delete(ctx.from.id);
     await ctx.reply(`Buy amount set to ${v} PLS.`);
-    return ctx.reply('Back to Buy menu:', buyMenu());
+    return sendOrEdit(ctx, '//// BUY MENU ////', buyMenu());
   }
 
   if (p.type === 'set_token') {
@@ -270,7 +303,7 @@ bot.on('text', async (ctx, next) => {
     setToken(ctx.from.id, adr);
     pending.delete(ctx.from.id);
     await ctx.reply(`Token set to ${adr}`);
-    return ctx.reply('Back to Buy menu:', buyMenu());
+    return sendOrEdit(ctx, '//// BUY MENU ////', buyMenu());
   }
 
   if (p.type === 'gen_name') {
@@ -330,7 +363,8 @@ bot.on('text', async (ctx, next) => {
   }
 });
 
-// ---------- Buy submenu ----------
+/* ----------------------- Buy menu (edit in place) ----------------------- */
+
 async function renderBuyMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
   const aw = getActiveWallet(ctx.from.id);
@@ -346,14 +380,24 @@ async function renderBuyMenu(ctx: any) {
     `Amount: ${amt} PLS`,
     `Gas: priority=${pri} gwei, max=${max} gwei, gasLimit=${gl}`,
   ];
-  await ctx.reply(lines.join('\n'), buyMenu());
+  return sendOrEdit(ctx, lines.join('\n'), buyMenu());
 }
 
 bot.action('menu_buy', async (ctx) => { await ctx.answerCbQuery(); return renderBuyMenu(ctx); });
-bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); return ctx.reply('Back to main.', mainMenu()); });
+bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); return sendOrEdit(ctx, 'Main Menu', mainMenu()); });
 
-bot.action('buy_set_amount', async (ctx) => { await ctx.answerCbQuery(); pending.set(ctx.from.id, { type: 'set_amount' }); return ctx.reply('Reply with the PLS amount (e.g., `0.02`).', { parse_mode: 'Markdown' }); });
-bot.action('buy_set_token', async (ctx) => { await ctx.answerCbQuery(); pending.set(ctx.from.id, { type: 'set_token' }); return ctx.reply('Reply with the token contract address (0x…).'); });
+bot.action('buy_set_amount', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.set(ctx.from.id, { type: 'set_amount' });
+  const kb = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_buy')]]);
+  return sendOrEdit(ctx, 'Reply with the PLS amount (e.g., `0.02`).', withKb(kb, { parse_mode: 'Markdown' }));
+});
+bot.action('buy_set_token', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.set(ctx.from.id, { type: 'set_token' });
+  const kb = Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_buy')]]);
+  return sendOrEdit(ctx, 'Reply with the token contract address (0x…).', kb);
+});
 
 // Gas nudges
 function nudgeGas(ctx: any, dPri: number, dMax: number, dGL: number) {
@@ -370,12 +414,12 @@ bot.action('gas_max_down',async (ctx) => { await ctx.answerCbQuery(); nudgeGas(c
 bot.action('gas_limit_up',async (ctx) => { await ctx.answerCbQuery(); nudgeGas(ctx, 0, 0, +25000); return renderBuyMenu(ctx); });
 bot.action('gas_limit_down',async (ctx) => { await ctx.answerCbQuery(); nudgeGas(ctx, 0, 0, -25000); return renderBuyMenu(ctx); });
 
-// Approve
+// Approve (keeps menu, prints tx separately)
 bot.action('approve_now', async (ctx) => {
   await ctx.answerCbQuery();
   const w = getActiveWallet(ctx.from.id);
   const u = getUserSettings(ctx.from.id);
-  if (!w || !u?.token_address) return ctx.reply('Need active wallet and token set.');
+  if (!w || !u?.token_address) return sendOrEdit(ctx, 'Need active wallet and token set.', buyMenu());
   try {
     const receipt = await approveToken(
       getPrivateKey(w),
@@ -388,7 +432,7 @@ bot.action('approve_now', async (ctx) => {
         gasLimit: BigInt(u.gas_limit ?? 250000),
       },
     );
-    const txHash = receipt?.hash ?? '(pending)';
+    const txHash = (receipt as any)?.hash ?? '(pending)';
     await ctx.reply('Approve tx: ' + txHash);
   } catch (e: any) {
     await ctx.reply('Approve failed: ' + e.message);
@@ -396,35 +440,35 @@ bot.action('approve_now', async (ctx) => {
   return renderBuyMenu(ctx);
 });
 
-// Choose wallet from Buy menu
+// Choose wallet (in-place)
 bot.action('choose_wallet', async (ctx) => {
   await ctx.answerCbQuery();
   const rows = listWallets(ctx.from.id);
-  if (!rows.length) return ctx.reply('No wallets yet. Use /wallet_new <name> or /wallet_import <name> <privkey>');
+  if (!rows.length) return sendOrEdit(ctx, 'No wallets yet. Use /wallet_new <name> or /wallet_import <name> <privkey>');
   const buttons = rows.map(w => [Markup.button.callback(`${w.id}. ${w.name} ${short(w.address)}`, `select_wallet:${w.id}`)]);
   buttons.push([Markup.button.callback('⬅️ Back', 'menu_buy')]);
-  return ctx.reply('Select a wallet to set active:', Markup.inlineKeyboard(buttons));
+  return sendOrEdit(ctx, 'Select a wallet to set active:', Markup.inlineKeyboard(buttons));
 });
 bot.action(/^select_wallet:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const id = Number(ctx.match[1]);
   try {
     const setId = setActiveWallet(ctx.from.id, String(id));
-    await ctx.reply(`Active wallet set to ID ${setId}.`);
+    await ctx.answerCbQuery(`Active set to ${setId}`);
   } catch (e: any) {
-    await ctx.reply('Select failed: ' + e.message);
+    await ctx.answerCbQuery('Select failed', { show_alert: true });
   }
   return renderBuyMenu(ctx);
 });
 
-// Execute buys
+// Execute buys (menu persists; tx printed separately)
 bot.action('buy_exec', async (ctx) => {
   await ctx.answerCbQuery();
   const w = getActiveWallet(ctx.from.id);
   const u = getUserSettings(ctx.from.id);
   const amt = u?.buy_amount_pls ?? 0.01;
-  if (!w) return ctx.reply('Select a wallet first.');
-  if (!u?.token_address) return ctx.reply('Set token first with /set_token <address>');
+  if (!w) return sendOrEdit(ctx, 'Select a wallet first.', buyMenu());
+  if (!u?.token_address) return sendOrEdit(ctx, 'Set token first with /set_token <address>', buyMenu());
   try {
     const receipt = await buyExactETHForTokens(
       getPrivateKey(w),
@@ -437,7 +481,7 @@ bot.action('buy_exec', async (ctx) => {
         gasLimit: BigInt(u.gas_limit ?? 250000),
       },
     );
-    const txHash = receipt?.hash ?? '(pending)';
+    const txHash = (receipt as any)?.hash ?? '(pending)';
     await ctx.reply('Buy tx: ' + txHash);
   } catch (e: any) {
     await ctx.reply('Buy failed: ' + e.message);
@@ -450,8 +494,8 @@ bot.action('buy_exec_all', async (ctx) => {
   const rows = listWallets(ctx.from.id);
   const u = getUserSettings(ctx.from.id);
   const amt = u?.buy_amount_pls ?? 0.01;
-  if (!rows.length) return ctx.reply('No wallets yet. Use /wallet_new or /wallet_import.');
-  if (!u?.token_address) return ctx.reply('Set token first with /set_token <address>');
+  if (!rows.length) return sendOrEdit(ctx, 'No wallets yet. Use /wallet_new or /wallet_import.', buyMenu());
+  if (!u?.token_address) return sendOrEdit(ctx, 'Set token first with /set_token <address>', buyMenu());
   const results: string[] = [];
   for (const row of rows) {
     try {
@@ -466,7 +510,7 @@ bot.action('buy_exec_all', async (ctx) => {
           gasLimit: BigInt(u.gas_limit ?? 250000),
         },
       );
-      const txHash = receipt?.hash ?? '(pending)';
+      const txHash = (receipt as any)?.hash ?? '(pending)';
       results.push(`✅ ${short(row.address)} -> ${txHash}`);
     } catch (e: any) {
       results.push(`❌ ${short(row.address)} -> ${e.message}`);
@@ -476,7 +520,8 @@ bot.action('buy_exec_all', async (ctx) => {
   return renderBuyMenu(ctx);
 });
 
-// ---------- diagnostics ----------
+/* ----------------------- Diagnostics ----------------------- */
+
 bot.command('rpc_check', async (ctx) => {
   const aw = getActiveWallet(ctx.from.id);
   const info = await pingRpc(aw?.address);
@@ -485,6 +530,8 @@ bot.command('rpc_check', async (ctx) => {
     `chainId: ${info.chainId ?? '—'}`,
     `block: ${info.blockNumber ?? '—'}`,
     `gasPrice(wei): ${info.gasPrice ?? '—'}`,
+    `maxFeePerGas(wei): ${info.maxFeePerGas ?? '—'}`,
+    `maxPriorityFeePerGas(wei): ${info.maxPriorityFeePerGas ?? '—'}`,
     `active wallet: ${aw ? aw.address : '—'}`,
     `balance(wei): ${info.balanceWei ?? '—'}`,
     `${info.error ? 'error: ' + info.error : ''}`,
@@ -492,7 +539,8 @@ bot.command('rpc_check', async (ctx) => {
   await ctx.reply(lines, { parse_mode: 'Markdown' });
 });
 
-// ---------- traditional commands ----------
+/* ----------------------- Classic commands (unchanged UX) ----------------------- */
+
 bot.command('wallets', async (ctx) => renderWalletsList(ctx));
 bot.command('wallet_new', async (ctx) => {
   const [_, name] = ctx.message.text.split(/\s+/, 2);
@@ -571,13 +619,15 @@ bot.command('sell', async (ctx) => {
         gasLimit: BigInt(u.gas_limit ?? 250000),
       }
     );
-    const txHash = receipt?.hash ?? '(pending)';
+    const txHash = (receipt as any)?.hash ?? '(pending)';
     return ctx.reply('Sell tx: ' + txHash);
   } catch (e: any) { return ctx.reply('Sell failed: ' + e.message); }
 });
 
-// Shortcuts from main
-bot.action('sell', async (ctx) => { await ctx.answerCbQuery(); return ctx.reply('Use /sell <percent>'); });
-bot.action('settings', async (ctx) => { await ctx.answerCbQuery(); return ctx.reply('Use /set_token <addr> and /set_gas <priority> <max> <limit>'); });
-bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return ctx.reply('Use /price after setting token.'); });
-bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return ctx.reply('Use /balances after selecting a wallet.'); });
+/* shortcuts from main (keep simple) */
+bot.action('sell', async (ctx) => { await ctx.answerCbQuery(); return sendOrEdit(ctx, 'Use /sell <percent>', mainMenu()); });
+bot.action('settings', async (ctx) => { await ctx.answerCbQuery(); return sendOrEdit(ctx, 'Use /set_token <addr> and /set_gas <priority> <max> <limit>', mainMenu()); });
+bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return sendOrEdit(ctx, 'Use /price after setting token.', mainMenu()); });
+bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return sendOrEdit(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
+
+export {};
