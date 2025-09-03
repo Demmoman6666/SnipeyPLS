@@ -1,3 +1,4 @@
+// src/config.ts
 import { z } from 'zod';
 
 const schema = z.object({
@@ -6,7 +7,6 @@ const schema = z.object({
   CHAIN_ID: z.coerce.number().default(369),
   ROUTER_ADDRESS: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
   WPLS_ADDRESS: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-  STABLE_ADDRESS: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
   MASTER_KEY: z.string().min(32),
 });
 
