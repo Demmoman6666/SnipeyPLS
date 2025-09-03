@@ -2,7 +2,10 @@ import { ethers } from 'ethers';
 import { getConfig } from './config.js';
 
 const cfg = getConfig();
-export const provider = new ethers.JsonRpcProvider(cfg.RPC_URL, cfg.CHAIN_ID);
+
+// Be explicit about the network
+const network: ethers.Networkish = { chainId: cfg.CHAIN_ID, name: 'pulsechain' };
+export const provider = new ethers.JsonRpcProvider(cfg.RPC_URL, network);
 
 const ROUTER_ABI = [
   "function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts)",
@@ -146,4 +149,29 @@ export async function withdrawPls(
     gasLimit: gas.gasLimit ?? 21000n,
   });
   return await tx.wait();
+}
+
+/** Diagnostics for RPC */
+export async function pingRpc(address?: string) {
+  const info: {
+    chainId?: number;
+    blockNumber?: number;
+    gasPrice?: string;
+    balanceWei?: string;
+    error?: string;
+  } = {};
+  try {
+    const net = await provider.getNetwork();
+    info.chainId = Number(net.chainId);
+    info.blockNumber = await provider.getBlockNumber();
+    const gp = await provider.getGasPrice().catch(() => null);
+    if (gp) info.gasPrice = gp.toString();
+    if (address) {
+      const bal = await provider.getBalance(address);
+      info.balanceWei = bal.toString();
+    }
+  } catch (e: any) {
+    info.error = e?.message || String(e);
+  }
+  return info;
 }
