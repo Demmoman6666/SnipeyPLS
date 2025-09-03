@@ -1,3 +1,4 @@
+// src/dex.ts (WPLS-only)
 import { ethers } from 'ethers';
 import { getConfig } from './config.js';
 
@@ -54,10 +55,10 @@ export async function approveToken(privKey: string, token: string, spender: stri
   return await tx.wait();
 }
 
-export async function buyExactETHForTokens(privKey: string, token: string, base: 'WPLS' | 'STABLE', amountInWei: bigint, minOut: bigint, gas: GasOpts) {
+export async function buyExactETHForTokens(privKey: string, token: string, amountInWei: bigint, minOut: bigint, gas: GasOpts) {
   const s = signerFromPrivKey(privKey);
   const r = routerInstance(s);
-  const path = base === 'WPLS' ? [cfg.WPLS_ADDRESS, token] : [cfg.STABLE_ADDRESS, token];
+  const path = [cfg.WPLS_ADDRESS, token];
   const deadline = Math.floor(Date.now()/1000)+60*10;
   const tx = await r.swapExactETHForTokensSupportingFeeOnTransferTokens(
     minOut, path, await s.getAddress(), deadline, {
@@ -70,10 +71,10 @@ export async function buyExactETHForTokens(privKey: string, token: string, base:
   return await tx.wait();
 }
 
-export async function sellExactTokensForETH(privKey: string, token: string, base: 'WPLS' | 'STABLE', amountIn: bigint, minOut: bigint, gas: GasOpts) {
+export async function sellExactTokensForETH(privKey: string, token: string, amountIn: bigint, minOut: bigint, gas: GasOpts) {
   const s = signerFromPrivKey(privKey);
   const r = routerInstance(s);
-  const path = base === 'WPLS' ? [token, cfg.WPLS_ADDRESS] : [token, cfg.STABLE_ADDRESS];
+  const path = [token, cfg.WPLS_ADDRESS];
   const deadline = Math.floor(Date.now()/1000)+60*10;
   const tx = await r.swapExactTokensForETHSupportingFeeOnTransferTokens(
     amountIn, minOut, path, await s.getAddress(), deadline, {
