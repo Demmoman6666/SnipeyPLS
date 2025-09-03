@@ -8,10 +8,10 @@ export const mainMenu = () =>
 
 export const buyMenu = () =>
   Markup.inlineKeyboard([
-    [Markup.button.callback('💧 Set Token', 'buy_set_token'), Markup.button.callback('💰 Set Amount', 'buy_set_amount')],
-    [Markup.button.callback('➖ Gas %', 'gas_pct_down'), Markup.button.callback('↩️ Reset', 'gas_pct_reset'), Markup.button.callback('➕ Gas %', 'gas_pct_up')],
-    [Markup.button.callback('👛 Choose Wallet', 'choose_wallet')],
-    // Removed approve here (PLS/WPLS buys don’t need it)
+    [Markup.button.callback('👛 Choose Wallet', 'choose_wallet'), Markup.button.callback('💧 Set Token', 'buy_set_token'), Markup.button.callback('💰 Set Amount', 'buy_set_amount')],
+    [Markup.button.callback('➖ Gas %', 'gas_pct_down'), Markup.button.callback('↻ Refresh', 'buy_refresh'), Markup.button.callback('➕ Gas %', 'gas_pct_up')],
+    [Markup.button.callback('↩️ Reset %', 'gas_pct_reset')],
+    // No approve here (buying with PLS/WPLS never needs allowance)
     [Markup.button.callback('✅ Buy Now', 'buy_exec'), Markup.button.callback('🧑‍🤝‍🧑 Buy All Wallets', 'buy_exec_all')],
     [Markup.button.callback('⬅️ Back', 'main_back')],
   ]);
@@ -19,7 +19,7 @@ export const buyMenu = () =>
 export const sellMenu = () =>
   Markup.inlineKeyboard([
     [Markup.button.callback('25%', 'sell_pct_25'), Markup.button.callback('50%', 'sell_pct_50'), Markup.button.callback('75%', 'sell_pct_75'), Markup.button.callback('100%', 'sell_pct_100')],
-    // Keep approve here (selling ERC-20 needs allowance)
+    // Keep approve for sell (ERC-20 -> WPLS needs allowance)
     [Markup.button.callback('✅ Approve (Sell)', 'approve_now'), Markup.button.callback('💸 Sell Now', 'sell_exec')],
     [Markup.button.callback('⬅️ Back', 'main_back')],
   ]);
