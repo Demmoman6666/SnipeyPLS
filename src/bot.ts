@@ -48,6 +48,8 @@ const fmtDec = (s: string) => {
 };
 const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 
+const explorerTx = (h: string) => `https://otter.pulsechain.com/tx/${h}`; // confirmed format
+
 function canEdit(ctx: any) { return Boolean(ctx?.callbackQuery?.message?.message_id); }
 async function sendOrEdit(ctx: any, text: string, extra?: any) {
   if (canEdit(ctx)) {
@@ -217,7 +219,7 @@ bot.action(/^wallet_set_active:(\d+)$/, async (ctx: any) => {
   return renderWalletsList(ctx);
 });
 
-// PK (masked + reveal)
+// PK
 bot.action(/^wallet_pk:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const id = Number(ctx.match[1]);
@@ -299,19 +301,25 @@ async function renderBuyMenu(ctx: any) {
 
   let tokenLine = `Token: ${u?.token_address ?? '—'}`;
   const pairLine = `Pair: ${process.env.WPLS_ADDRESS} (WPLS)`;
-
   let quoteLine = 'Amount out: unavailable';
 
   if (u?.token_address && amt > 0) {
+    // Get quote even if metadata fails
+    let metaDec = 18, metaSym = 'TOKEN';
     try {
       const meta = await tokenMeta(u.token_address);
+      metaDec = meta.decimals; metaSym = meta.symbol;
       tokenLine = `Token: ${u.token_address} (${meta.symbol})`;
+    } catch {
+      tokenLine = `Token: ${u.token_address}`;
+    }
+    try {
       const best = await bestQuoteBuy(ethers.parseEther(String(amt)), u.token_address);
       if (best) {
         const tag = best.route.kind === 'v3' ? ` ${best.route.fee / 10000}%` : '';
-        quoteLine = `Amount out: ${fmtDec(ethers.formatUnits(best.amountOut, meta.decimals))} ${meta.symbol}  [${best.route.key}${tag}]`;
+        quoteLine = `Amount out: ${fmtDec(ethers.formatUnits(best.amountOut, metaDec))} ${metaSym}  [${best.route.key}${tag}]`;
       }
-    } catch { /* keep defaults */ }
+    } catch {}
   }
 
   const lines = [
@@ -351,30 +359,7 @@ bot.action('gas_pct_up', async (ctx) => { await ctx.answerCbQuery(); const u = g
 bot.action('gas_pct_down', async (ctx) => { await ctx.answerCbQuery(); const u = getUserSettings(ctx.from.id); setGasPercent(ctx.from.id, (u?.gas_pct ?? (u?.default_gas_pct ?? 0)) - 5); return renderBuyMenu(ctx); });
 bot.action('gas_pct_reset', async (ctx) => { await ctx.answerCbQuery(); const u = getUserSettings(ctx.from.id); setGasPercent(ctx.from.id, u?.default_gas_pct ?? 0); return renderBuyMenu(ctx); });
 
-// Approve across all routers
-bot.action('approve_now', async (ctx) => {
-  await ctx.answerCbQuery();
-  const w = getActiveWallet(ctx.from.id); const u = getUserSettings(ctx.from.id);
-  if (!w || !u?.token_address) return sendOrEdit(ctx, 'Need active wallet and token set.', buyMenu());
-  try {
-    const gas = await computeGas(ctx.from.id);
-    const results = await approveAllRouters(getPrivateKey(w), u.token_address, gas);
-    await ctx.reply(['Approvals sent:', ...results].join('\n'));
-  } catch (e: any) { await ctx.reply('Approve failed: ' + e.message); }
-  return renderBuyMenu(ctx);
-});
-
-bot.action('choose_wallet', async (ctx) => {
-  await ctx.answerCbQuery();
-  const rows = listWallets(ctx.from.id);
-  if (!rows.length) return sendOrEdit(ctx, 'No wallets yet. /wallet_new or /wallet_import');
-  const buttons = rows.map(w => [Markup.button.callback(`${w.id}. ${w.name} ${short(w.address)}`, `select_wallet:${w.id}`)]);
-  buttons.push([Markup.button.callback('⬅️ Back', 'menu_buy')]);
-  return sendOrEdit(ctx, 'Select a wallet:', Markup.inlineKeyboard(buttons));
-});
-bot.action(/^select_wallet:(\d+)$/, async (ctx: any) => { await ctx.answerCbQuery(); try { setActiveWallet(ctx.from.id, String(Number(ctx.match[1]))); } catch {} return renderBuyMenu(ctx); });
-
-// Buy with auto-route
+// Buy with auto-route (+ explorer link)
 bot.action('buy_exec', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id); const w = getActiveWallet(ctx.from.id);
@@ -382,8 +367,9 @@ bot.action('buy_exec', async (ctx) => {
   if (!u?.token_address) return sendOrEdit(ctx, 'Set token first.', buyMenu());
   try {
     const gas = await computeGas(ctx.from.id);
-    const receipt = await buyAutoRoute(getPrivateKey(w), u.token_address, ethers.parseEther(String(u?.buy_amount_pls ?? 0.01)), 0n, gas);
-    await ctx.reply('Buy tx: ' + ((receipt as any)?.hash ?? '(pending)'));
+    const rc = await buyAutoRoute(getPrivateKey(w), u.token_address, ethers.parseEther(String(u?.buy_amount_pls ?? 0.01)), 0n, gas);
+    const h = (rc as any)?.hash;
+    await ctx.reply(`✅ Buy sent\nHash: \`${h}\`\n[View on Otter](${explorerTx(h)})`, { parse_mode: 'Markdown' });
   } catch (e: any) { await ctx.reply('Buy failed: ' + e.message); }
   return renderBuyMenu(ctx);
 });
@@ -398,10 +384,11 @@ bot.action('buy_exec_all', async (ctx) => {
     try {
       const gas = await computeGas(ctx.from.id);
       const r = await buyAutoRoute(getPrivateKey(row), u.token_address, ethers.parseEther(String(u?.buy_amount_pls ?? 0.01)), 0n, gas);
-      res.push(`✅ ${short(row.address)} -> ${(r as any)?.hash ?? '(pending)'}`);
-    } catch (e: any) { res.push(`❌ ${short(row.address)} -> ${e.message}`); }
+      const h = (r as any)?.hash;
+      res.push(`✅ ${short(row.address)} → \`${h}\`  [Otter](${explorerTx(h)})`);
+    } catch (e: any) { res.push(`❌ ${short(row.address)} → ${e.message}`); }
   }
-  await ctx.reply(res.join('\n'));
+  await ctx.reply(res.join('\n'), { parse_mode: 'Markdown' });
   return renderBuyMenu(ctx);
 });
 
@@ -419,18 +406,17 @@ async function renderSellMenu(ctx: any) {
     try {
       const meta = await tokenMeta(u.token_address);
       metaSym = meta.symbol; metaDec = meta.decimals;
+    } catch { /* ignore meta errors */ }
+
+    try {
       const c = erc20(u.token_address);
       const bal = await c.balanceOf(w.address);
       balLine = `Token balance: ${fmtDec(ethers.formatUnits(bal, metaDec))} ${metaSym}`;
       const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
       if (amountIn > 0n) {
         const best = await bestQuoteSell(amountIn, u.token_address);
-        if (best) {
-          const tag = best.route.kind === 'v3' ? ` ${best.route.fee / 10000}%` : '';
-          quoteLine = `Amount out: ${fmtDec(ethers.formatEther(best.amountOut))} PLS  [${best.route.key}${tag}]`;
-        } else {
-          quoteLine = 'Amount out: unavailable';
-        }
+        if (best) quoteLine = `Amount out: ${fmtDec(ethers.formatEther(best.amountOut))} PLS  [${best.route.key}${best.route.kind === 'v3' ? ` ${best.route.fee/10000}%` : ''}]`;
+        else quoteLine = 'Amount out: unavailable';
       } else {
         quoteLine = 'Amount out: 0';
       }
@@ -457,7 +443,20 @@ bot.action('sell_pct_50', async (ctx) => { await ctx.answerCbQuery(); setSellPct
 bot.action('sell_pct_75', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 75); return renderSellMenu(ctx); });
 bot.action('sell_pct_100', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 100); return renderSellMenu(ctx); });
 
-// Sell with auto-route
+// Approve for SELL (kept here only)
+bot.action('approve_now', async (ctx) => {
+  await ctx.answerCbQuery();
+  const w = getActiveWallet(ctx.from.id); const u = getUserSettings(ctx.from.id);
+  if (!w || !u?.token_address) return sendOrEdit(ctx, 'Need active wallet and token set.', sellMenu());
+  try {
+    const gas = await computeGas(ctx.from.id);
+    const results = await approveAllRouters(getPrivateKey(w), u.token_address, gas);
+    await ctx.reply(['Approvals sent:', ...results].join('\n'));
+  } catch (e: any) { await ctx.reply('Approve failed: ' + e.message); }
+  return renderSellMenu(ctx);
+});
+
+// Sell with auto-route (+ explorer link)
 bot.action('sell_exec', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id); const w = getActiveWallet(ctx.from.id);
@@ -470,7 +469,8 @@ bot.action('sell_exec', async (ctx) => {
     if (amount <= 0n) return sendOrEdit(ctx, 'Nothing to sell.', sellMenu());
     const gas = await computeGas(ctx.from.id);
     const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
-    await ctx.reply('Sell tx: ' + ((r as any)?.hash ?? '(pending)'));
+    const h = (r as any)?.hash;
+    await ctx.reply(`✅ Sell sent\nHash: \`${h}\`\n[View on Otter](${explorerTx(h)})`, { parse_mode: 'Markdown' });
   } catch (e: any) { await ctx.reply('Sell failed: ' + e.message); }
   return renderSellMenu(ctx);
 });
@@ -532,11 +532,14 @@ bot.command('price', async (ctx) => {
   const u = getUserSettings(ctx.from.id);
   if (!u?.token_address) return ctx.reply('Set token first with /set_token <address>');
   try {
-    const meta = await tokenMeta(u.token_address);
+    // 1 WPLS quote via best V2 route
     const best = await bestQuoteBuy(ethers.parseEther('1'), u.token_address);
     if (!best) return ctx.reply('No route could quote this pair.');
+    // Try to show symbol if available
+    let sym = 'TOKEN', dec = 18;
+    try { const m = await tokenMeta(u.token_address); sym = m.symbol; dec = m.decimals; } catch {}
     const tag = best.route.kind === 'v3' ? ` ${best.route.fee / 10000}%` : '';
-    return ctx.reply(`1 WPLS → ${fmtDec(ethers.formatUnits(best.amountOut, meta.decimals))} ${meta.symbol}  [${best.route.key}${tag}]`);
+    return ctx.reply(`1 WPLS → ${fmtDec(ethers.formatUnits(best.amountOut, dec))} ${sym}  [${best.route.key}${tag}]`);
   } catch (e: any) { return ctx.reply('Price failed: ' + e.message); }
 });
 bot.command('balances', async (ctx) => {
@@ -610,7 +613,8 @@ bot.on('text', async (ctx, next) => {
       try {
         const gas = await computeGas(ctx.from.id);
         const receipt = await withdrawPls(getPrivateKey(w), to, ethers.parseEther(String(amount)), gas);
-        await ctx.reply(`Withdraw tx: ${(receipt as any)?.hash ?? '(pending)'}`);
+        const h = (receipt as any)?.hash;
+        await ctx.reply(`Withdraw tx\nHash: \`${h}\`\n[View on Otter](${explorerTx(h)})`, { parse_mode: 'Markdown' });
       } catch (e: any) { await ctx.reply('Withdraw failed: ' + e.message); }
       pending.delete(ctx.from.id);
       return renderWalletManage(ctx, p.walletId);
@@ -658,7 +662,8 @@ bot.on('text', async (ctx, next) => {
       try {
         const gas = await computeGas(ctx.from.id);
         const receipt = await buyAutoRoute(getPrivateKey(w), text, ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01)), 0n, gas);
-        await ctx.reply(`Auto-buy tx: ${(receipt as any)?.hash ?? '(pending)'}`);
+        const h = (receipt as any)?.hash;
+        await ctx.reply(`✅ Auto-buy sent\nHash: \`${h}\`\n[View on Otter](${explorerTx(h)})`, { parse_mode: 'Markdown' });
       } catch (e: any) {
         await ctx.reply('Auto-buy failed: ' + e.message);
       }
