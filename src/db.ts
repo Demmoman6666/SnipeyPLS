@@ -1,6 +1,8 @@
+// src/db.ts
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
+import { ethers } from 'ethers';
 
 let db: Database.Database;
 
@@ -10,7 +12,7 @@ export function getDb() {
 }
 
 function tryAlter(sql: string) {
-  try { db.exec(sql); } catch { /* ignore if exists */ }
+  try { db.exec(sql); } catch { /* ignore if already applied */ }
 }
 
 export async function initDb() {
@@ -24,20 +26,14 @@ export async function initDb() {
       telegram_id INTEGER PRIMARY KEY,
       active_wallet_id INTEGER DEFAULT NULL,
       token_address TEXT DEFAULT NULL,
-
-      -- legacy (kept)
       max_priority_fee_gwei REAL DEFAULT 0.1,
       max_fee_gwei REAL DEFAULT 0.2,
-
-      -- current settings
       gas_limit INTEGER DEFAULT 250000,
       gwei_boost_gwei REAL DEFAULT 0.0,
       gas_pct REAL DEFAULT 0.0,
       default_gas_pct REAL DEFAULT 0.0,
-
       buy_amount_pls REAL DEFAULT 0.01,
       sell_pct REAL DEFAULT 100.0,
-
       auto_buy_enabled INTEGER DEFAULT 0,
       auto_buy_amount_pls REAL DEFAULT 0.01
     );
@@ -49,26 +45,40 @@ export async function initDb() {
       address TEXT NOT NULL,
       enc_privkey BLOB NOT NULL
     );
-  `);
 
-  // -------- Trades tracking (for avg entry / PnL) --------
-  db.exec(`
+    -- Executed trades to build avg entry/PnL
     CREATE TABLE IF NOT EXISTS trades (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       telegram_id INTEGER NOT NULL,
       wallet_address TEXT NOT NULL,
       token_address TEXT NOT NULL,
-      side TEXT NOT NULL,                        -- 'BUY' | 'SELL'
-      pls_in_wei TEXT NOT NULL,                  -- BUY: PLS spent;  SELL: PLS received
-      token_out_wei TEXT NOT NULL,               -- BUY: tokens received; SELL: tokens spent
-      route_key TEXT DEFAULT NULL,
-      ts INTEGER NOT NULL
+      side TEXT NOT NULL CHECK(side IN ('BUY','SELL')),
+      pls_in_wei TEXT NOT NULL,        -- bigint as string
+      token_out_wei TEXT NOT NULL,     -- bigint as string (for BUY: tokens received; for SELL: tokens sold)
+      route TEXT,
+      created_at INTEGER NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS idx_trades_user_token ON trades (telegram_id, token_address);
-    CREATE INDEX IF NOT EXISTS idx_trades_user_time  ON trades (telegram_id, ts);
+
+    -- Limit orders
+    CREATE TABLE IF NOT EXISTS limit_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_id INTEGER NOT NULL,
+      wallet_id INTEGER NOT NULL,
+      token_address TEXT NOT NULL,
+      side TEXT NOT NULL CHECK(side IN ('BUY','SELL')),
+      amount_pls_wei TEXT DEFAULT NULL,     -- for BUY
+      sell_pct REAL DEFAULT NULL,           -- for SELL (0..100)
+      trigger_type TEXT NOT NULL CHECK(trigger_type IN ('PLS','USD','MCAP','MULT')),
+      trigger_value REAL NOT NULL,          -- numeric value (USD / PLS / MCAP in USD / multiplier)
+      status TEXT NOT NULL DEFAULT 'OPEN' CHECK(status IN ('OPEN','FILLED','CANCELLED','ERROR')),
+      last_error TEXT DEFAULT NULL,
+      tx_hash TEXT DEFAULT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `);
 
-  // best-effort migrations
+  // Migrations
   tryAlter(`ALTER TABLE users ADD COLUMN gwei_boost_gwei REAL DEFAULT 0.0;`);
   tryAlter(`ALTER TABLE users ADD COLUMN gas_pct REAL DEFAULT 0.0;`);
   tryAlter(`ALTER TABLE users ADD COLUMN default_gas_pct REAL DEFAULT 0.0;`);
@@ -78,7 +88,7 @@ export async function initDb() {
   tryAlter(`ALTER TABLE users ADD COLUMN auto_buy_amount_pls REAL DEFAULT 0.01;`);
 }
 
-/** Record a trade for PnL tracking */
+/* ---------- trades / avg entry ---------- */
 export function recordTrade(
   telegramId: number,
   walletAddress: string,
@@ -86,72 +96,127 @@ export function recordTrade(
   side: 'BUY' | 'SELL',
   plsInWei: bigint,
   tokenOutWei: bigint,
-  routeKey?: string
+  route?: string
 ) {
-  const stmt = getDb().prepare(`
-    INSERT INTO trades (telegram_id, wallet_address, token_address, side, pls_in_wei, token_out_wei, route_key, ts)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  stmt.run(
-    telegramId,
-    walletAddress.toLowerCase(),
-    tokenAddress.toLowerCase(),
-    side,
-    plsInWei.toString(),
-    tokenOutWei.toString(),
-    routeKey ?? null,
-    Math.floor(Date.now() / 1000)
-  );
+  getDb().prepare(`
+    INSERT INTO trades (telegram_id, wallet_address, token_address, side, pls_in_wei, token_out_wei, route, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+  `).run(telegramId, walletAddress, tokenAddress.toLowerCase(), side, plsInWei.toString(), tokenOutWei.toString(), route ?? null);
 }
 
-/** Average entry based on BUYs only */
-export function getAvgEntry(telegramId: number, tokenAddress: string): {
-  avgPlsPerToken: number; totalTokens: bigint; totalPlsIn: bigint;
-} | null {
-  const stmt = getDb().prepare(`
-    SELECT pls_in_wei, token_out_wei FROM trades
-    WHERE telegram_id = ? AND token_address = ? AND side = 'BUY'
-  `);
-  const rows = stmt.all(telegramId, tokenAddress.toLowerCase()) as Array<{ pls_in_wei: string; token_out_wei: string }>;
-  if (!rows.length) return null;
-  let sumPls = 0n, sumTok = 0n;
+/** Average entry (PLS/token) using executed BUYs only (net of SELLs reduces position) */
+export function getAvgEntry(telegramId: number, tokenAddress: string): { avgPlsPerToken: number, totalPlsIn: bigint, netTokens: bigint } | null {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT side, pls_in_wei, token_out_wei
+    FROM trades
+    WHERE telegram_id = ? AND token_address = ?
+    ORDER BY id ASC
+  `).all(telegramId, tokenAddress.toLowerCase());
+
+  let totalPlsIn = 0n;
+  let netTokens = 0n;
+
   for (const r of rows) {
-    sumPls += BigInt(r.pls_in_wei);
-    sumTok += BigInt(r.token_out_wei);
+    const pls = BigInt(r.pls_in_wei);
+    const tok = BigInt(r.token_out_wei);
+    if (r.side === 'BUY') { totalPlsIn += pls; netTokens += tok; }
+    else { // SELL: reduce position by tokens sold, reduce cost basis proportionally
+      if (netTokens > 0n) {
+        const reduce = tok > netTokens ? netTokens : tok;
+        // proportional PLS to remove = totalPlsIn * (reduce / netTokens)
+        const plsReduce = (totalPlsIn * reduce) / netTokens;
+        totalPlsIn -= plsReduce;
+        netTokens -= reduce;
+      }
+    }
   }
-  if (sumTok === 0n) return null;
-  const avg = Number(sumPls) / Number(sumTok); // PLS per token (both wei, ratio is safe)
-  return { avgPlsPerToken: avg, totalTokens: sumTok, totalPlsIn: sumPls };
+
+  if (netTokens <= 0n) return null;
+  const avg = Number(ethers.formatEther(totalPlsIn)) / Number(ethers.formatUnits(netTokens, 18));
+  return { avgPlsPerToken: avg, totalPlsIn, netTokens };
 }
 
-/** Position totals: net tokens = buys - sells (in token wei) */
-export function getPosition(telegramId: number, tokenAddress: string): {
-  totalBuyTokens: bigint; totalSellTokens: bigint; netTokens: bigint;
-} {
-  const dbi = getDb();
-  const buys = dbi.prepare(`
-      SELECT COALESCE(SUM(CAST(token_out_wei AS TEXT)), '0') AS s FROM trades
-      WHERE telegram_id = ? AND token_address = ? AND side = 'BUY'
-    `).get(telegramId, tokenAddress.toLowerCase()) as { s: string };
-  const sells = dbi.prepare(`
-      SELECT COALESCE(SUM(CAST(token_out_wei AS TEXT)), '0') AS s FROM trades
-      WHERE telegram_id = ? AND token_address = ? AND side = 'SELL'
-    `).get(telegramId, tokenAddress.toLowerCase()) as { s: string };
-  const buySum = BigInt(buys?.s ?? '0');
-  const sellSum = BigInt(sells?.s ?? '0');
-  return { totalBuyTokens: buySum, totalSellTokens: sellSum, netTokens: buySum - sellSum };
+/** Convenience: net position tokens (can be negative if over-sold, but we guard above) */
+export function getPosition(telegramId: number, tokenAddress: string): bigint {
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT side, token_out_wei FROM trades
+    WHERE telegram_id = ? AND token_address = ?
+  `).all(telegramId, tokenAddress.toLowerCase());
+
+  let net = 0n;
+  for (const r of rows) {
+    const tok = BigInt(r.token_out_wei);
+    net += (r.side === 'BUY') ? tok : -tok;
+  }
+  return net;
 }
 
-/** Optional: list recent trades */
-export function listUserTrades(telegramId: number, tokenAddress?: string, limit = 20) {
-  const dbi = getDb();
-  if (tokenAddress) {
-    return dbi.prepare(`
-      SELECT * FROM trades WHERE telegram_id = ? AND token_address = ?
-      ORDER BY ts DESC LIMIT ?
-    `).all(telegramId, tokenAddress.toLowerCase(), limit);
-  }
-  return dbi.prepare(`
-    SELECT * FROM trades WHERE telegram_id = ? ORDER BY ts DESC LIMIT ?
-  `).all(telegramId, limit);
+/* ---------- limit orders ---------- */
+export type LimitTrigger = 'PLS' | 'USD' | 'MCAP' | 'MULT';
+export type LimitSide = 'BUY' | 'SELL';
+
+export function addLimitOrder(o: {
+  telegramId: number,
+  walletId: number,
+  token: string,
+  side: LimitSide,
+  amountPlsWei?: bigint,
+  sellPct?: number,
+  trigger: LimitTrigger,
+  value: number
+}) {
+  const stmt = getDb().prepare(`
+    INSERT INTO limit_orders
+    (telegram_id, wallet_id, token_address, side, amount_pls_wei, sell_pct, trigger_type, trigger_value, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', strftime('%s','now'), strftime('%s','now'))
+  `);
+  const info = stmt.run(
+    o.telegramId,
+    o.walletId,
+    o.token.toLowerCase(),
+    o.side,
+    o.amountPlsWei ? o.amountPlsWei.toString() : null,
+    o.sellPct ?? null,
+    o.trigger,
+    o.value
+  );
+  return Number(info.lastInsertRowid);
+}
+
+export function listLimitOrders(telegramId: number) {
+  return getDb().prepare(`
+    SELECT * FROM limit_orders
+    WHERE telegram_id = ?
+    ORDER BY id DESC
+  `).all(telegramId);
+}
+
+export function getOpenLimitOrders() {
+  return getDb().prepare(`SELECT * FROM limit_orders WHERE status = 'OPEN'`).all();
+}
+
+export function cancelLimitOrder(telegramId: number, id: number) {
+  return getDb().prepare(`
+    UPDATE limit_orders
+    SET status = 'CANCELLED', updated_at = strftime('%s','now')
+    WHERE id = ? AND telegram_id = ? AND status = 'OPEN'
+  `).run(id, telegramId).changes;
+}
+
+export function markLimitFilled(id: number, txHash?: string) {
+  return getDb().prepare(`
+    UPDATE limit_orders
+    SET status = 'FILLED', tx_hash = ?, updated_at = strftime('%s','now')
+    WHERE id = ? AND status = 'OPEN'
+  `).run(txHash ?? null, id).changes;
+}
+
+export function markLimitError(id: number, err: string) {
+  return getDb().prepare(`
+    UPDATE limit_orders
+    SET status = 'ERROR', last_error = ?, updated_at = strftime('%s','now')
+    WHERE id = ? AND status = 'OPEN'
+  `).run(err.slice(0, 500), id).changes;
 }
