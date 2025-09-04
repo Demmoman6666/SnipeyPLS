@@ -1020,7 +1020,7 @@ async function checkLimitsOnce() {
       const gas = await computeGas(r.telegram_id);
 
       if (r.side === 'BUY') {
-        const amt = BigInt(r.amount_pls_wei);
+const amt = r.amount_pls_wei ? BigInt(r.amount_pls_wei) : 0n;
         if (amt <= 0n) { markLimitError(r.id, 'amount zero'); continue; }
         const rec = await buyAutoRoute(getPrivateKey(w), r.token_address, amt, 0n, gas);
         const hash = (rec as any)?.hash;
