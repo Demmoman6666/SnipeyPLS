@@ -1,8 +1,42 @@
+// src/dex.ts
 import { ethers } from 'ethers';
 import { getConfig } from './config.js';
 
 const cfg = getConfig();
-export const provider = new ethers.JsonRpcProvider(cfg.RPC_URL, cfg.CHAIN_ID);
+
+/* ---------------- Provider (multi-RPC racing) ---------------- */
+
+function parseFallbacks(): string[] {
+  const raw =
+    process.env.RPC_FALLBACKS ??
+    process.env.rpc_fallback ?? // support your existing env name too
+    '';
+  return raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+function mkJsonRpc(url: string) {
+  return new ethers.JsonRpcProvider(url, cfg.CHAIN_ID);
+}
+
+function mkRacingProvider(): ethers.Provider {
+  const urls = [cfg.RPC_URL, ...parseFallbacks()].filter(Boolean);
+  if (urls.length <= 1) return mkJsonRpc(urls[0]!);
+
+  const configs = urls.map((u, i) => ({
+    provider: mkJsonRpc(u),
+    priority: i + 1,
+    weight: 1,
+    stallTimeout: 900, // 700–1200ms is a good range
+  }));
+
+  // quorum = 1 (first healthy answer wins)
+  return new ethers.FallbackProvider(configs, 1);
+}
+
+export const provider: ethers.Provider = mkRacingProvider();
 
 /* ---------------- ABIs ---------------- */
 
@@ -21,7 +55,7 @@ const V3_ROUTER_ABI = [
   'function exactInputSingle(tuple(address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 deadline,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)',
 ];
 
-// ERC20
+// ERC20 (+ bytes32 fallbacks)
 const ERC20_ABI = [
   'function decimals() view returns (uint8)',
   'function symbol() view returns (string)',
@@ -97,8 +131,8 @@ function candidateRoutes(): Route[] {
   const routes: (Route | null)[] = [];
 
   // V2 DEXes
-  routes.push(v2('PULSEX_V1', process.env.PULSEX_V1_ROUTER));         // 0x98bf...Acc02
-  routes.push(v2('PULSEX_V2', process.env.ROUTER_ADDRESS));            // 0x165c...52d9  (your existing V2)
+  routes.push(v2('PULSEX_V1', process.env.PULSEX_V1_ROUTER));         // 0x98bf...Acc02 (mainnet)
+  routes.push(v2('PULSEX_V2', process.env.PULSEX_V2_ROUTER ?? process.env.ROUTER_ADDRESS)); // keep your existing V2
   routes.push(v2('9MM_V2', process.env.NINEMM_V2_ROUTER));             // optional
   routes.push(v2('9INCH_V2', process.env.NINEINCH_V2_ROUTER));         // optional
 
@@ -186,7 +220,7 @@ export async function bestQuoteSell(amountInWei: bigint, tokenIn: string): Promi
   return valid[0]!;
 }
 
-/** Debug helper (you can wire this to a /route_debug command if you like). */
+/** Optional: quick debug of route quotes */
 export async function debugQuotesBuy(amountInWei: bigint, tokenOut: string) {
   const W = process.env.WPLS_ADDRESS!;
   const routes = candidateRoutes();
@@ -197,7 +231,7 @@ export async function debugQuotesBuy(amountInWei: bigint, tokenOut: string) {
       amt = r.kind === 'v2'
         ? await quoteV2(amountInWei, W, tokenOut, r.router)
         : await quoteV3(amountInWei, W, tokenOut, r.fee, (r as RouteV3).quoter);
-    } catch { /* ignore */ }
+    } catch {}
     out.push({ route: r.key, amountOut: amt ? amt.toString() : undefined });
   }
   return out;
