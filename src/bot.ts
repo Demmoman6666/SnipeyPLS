@@ -106,8 +106,14 @@ async function upsertPinnedPosition(ctx: any) {
     const existing = pinnedPosMsg.get(uid);
     if (existing) {
       try {
-        // FIX: use 4-arg overload (no inlineMessageId) to avoid string|null type issues
-        await bot.telegram.editMessageText(chatId, existing, text, { parse_mode: 'Markdown', ...kb } as any);
+        // ✅ Use the 5-arg overload: chatId, messageId, inlineMessageId, text, extra
+        await bot.telegram.editMessageText(
+          chatId,
+          existing,
+          undefined, // inline message id
+          text,
+          { parse_mode: 'Markdown', ...kb } as any
+        );
         await bot.telegram.pinChatMessage(chatId, existing, { disable_notification: true } as any);
         return;
       } catch { /* if deleted, send a new one */ }
@@ -144,9 +150,8 @@ async function computeGas(telegramId: number, extraPct = 0): Promise<{
   const pct = (u?.gas_pct ?? 0) + extraPct;
   const mul = 1 + (pct / 100);
   const effMax = (baseMax + boost) * mul;
-  const effPri = (basePri + boost) * mul;
   return {
-    maxPriorityFeePerGas: ethers.parseUnits(effPri.toFixed(9), 'gwei'),
+    maxPriorityFeePerGas: ethers.parseUnits(((basePri + boost) * mul).toFixed(9), 'gwei'),
     maxFeePerGas: ethers.parseUnits(effMax.toFixed(9), 'gwei'),
     gasLimit: BigInt(u?.gas_limit ?? 250000),
   };
