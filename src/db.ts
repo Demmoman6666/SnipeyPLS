@@ -1,3 +1,4 @@
+// src/db.ts
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -10,7 +11,7 @@ export function getDb() {
 }
 
 function tryAlter(sql: string) {
-  try { db.exec(sql); } catch { /* column already exists or older sqlite */ }
+  try { db.exec(sql); } catch { /* ignore if already applied / old sqlite */ }
 }
 
 export async function initDb() {
@@ -48,6 +49,15 @@ export async function initDb() {
       name TEXT NOT NULL,
       address TEXT NOT NULL,
       enc_privkey BLOB NOT NULL
+    );
+
+    -- Average entry totals for buys done via the bot
+    CREATE TABLE IF NOT EXISTS avg_entry (
+      uid               INTEGER NOT NULL,
+      token             TEXT    NOT NULL,
+      total_token_wei   TEXT    NOT NULL,
+      total_pls_wei     TEXT    NOT NULL,
+      PRIMARY KEY (uid, token)
     );
   `);
 
