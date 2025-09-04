@@ -61,7 +61,7 @@ async function showMenu(ctx: any, text: string, extra?: any) {
   lastMenuMsg.set(uid, m.message_id);
 }
 
-/** Post or update a pinned "POSITION" card */
+/** Post or replace a pinned "POSITION" card (delete + re-send to avoid edit overload typing) */
 async function upsertPinnedPosition(ctx: any) {
   const uid = ctx.from.id;
   const u = getUserSettings(uid);
@@ -69,10 +69,8 @@ async function upsertPinnedPosition(ctx: any) {
   if (!u?.token_address || !w) return;
 
   // always pass a definite chat id
-const chatId: number | string =
-  (ctx && ctx.chat && (ctx.chat as any).id != null)
-    ? (ctx.chat as any).id
-    : ctx.from.id;
+  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
+
   try {
     const meta = await tokenMeta(u.token_address);
     const decimals = meta.decimals ?? 18;
@@ -105,23 +103,12 @@ const chatId: number | string =
       [Markup.button.callback('🟢 Buy More', 'pin_buy'), Markup.button.callback('🔴 Sell', 'pin_sell')],
     ]);
 
-  const existing = pinnedPosMsg.get(uid);
-if (existing) {
-  try {
-    // Correct signature: (chatId, messageId, inlineMessageId, text, extra)
-    await bot.telegram.editMessageText(
-      chatId,                // number | string
-      existing,              // message_id
-      undefined,             // inline_message_id MUST be undefined in this overload
-      text,                  // new message text
-      { parse_mode: 'Markdown', ...kb } as any
-    );
-    await bot.telegram.pinChatMessage(chatId, existing, { disable_notification: true } as any);
-    return;
-  } catch {
-    // fall through to send a new pinned message if edit failed/deleted
-  }
-}
+    // delete old pinned message if we tracked one
+    const existing = pinnedPosMsg.get(uid);
+    if (existing) {
+      try { await bot.telegram.deleteMessage(chatId, existing); } catch {}
+    }
+
     const m = await bot.telegram.sendMessage(chatId, text, { parse_mode: 'Markdown', ...kb } as any);
     pinnedPosMsg.set(uid, m.message_id);
     try { await bot.telegram.pinChatMessage(chatId, m.message_id, { disable_notification: true } as any); } catch {}
@@ -153,8 +140,9 @@ async function computeGas(telegramId: number, extraPct = 0): Promise<{
   const pct = (u?.gas_pct ?? 0) + extraPct;
   const mul = 1 + (pct / 100);
   const effMax = (baseMax + boost) * mul;
+  const effPri = (basePri + boost) * mul;
   return {
-    maxPriorityFeePerGas: ethers.parseUnits(((basePri + boost) * mul).toFixed(9), 'gwei'),
+    maxPriorityFeePerGas: ethers.parseUnits(effPri.toFixed(9), 'gwei'),
     maxFeePerGas: ethers.parseUnits(effMax.toFixed(9), 'gwei'),
     gasLimit: BigInt(u?.gas_limit ?? 250000),
   };
