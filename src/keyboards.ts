@@ -4,9 +4,12 @@ import { Markup } from 'telegraf';
 /** Main menu */
 export function mainMenu() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback('👛 Wallets', 'wallets'), Markup.button.callback('🟢 Buy', 'menu_buy')],
-    [Markup.button.callback('🔴 Sell', 'menu_sell'), Markup.button.callback('📊 Price', 'price')],
-    [Markup.button.callback('⚙️ Settings', 'settings'), Markup.button.callback('🧾 Balances', 'balances')],
+    // Row 1
+    [Markup.button.callback('🟢 Buy', 'menu_buy'),
+     Markup.button.callback('🔴 Sell', 'menu_sell')],
+    // Row 2
+    [Markup.button.callback('👛 Wallets', 'wallets'),
+     Markup.button.callback('⚙️ Settings', 'settings')],
   ]);
 }
 
