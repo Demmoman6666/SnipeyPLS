@@ -69,8 +69,10 @@ async function upsertPinnedPosition(ctx: any) {
   if (!u?.token_address || !w) return;
 
   // always pass a definite chat id
-  const chatId: number | string = (ctx.chat?.id ?? ctx.from?.id) as number | string;
-
+const chatId: number | string =
+  (ctx && ctx.chat && (ctx.chat as any).id != null)
+    ? (ctx.chat as any).id
+    : ctx.from.id;
   try {
     const meta = await tokenMeta(u.token_address);
     const decimals = meta.decimals ?? 18;
@@ -103,24 +105,23 @@ async function upsertPinnedPosition(ctx: any) {
       [Markup.button.callback('🟢 Buy More', 'pin_buy'), Markup.button.callback('🔴 Sell', 'pin_sell')],
     ]);
 
-    const existing = pinnedPosMsg.get(uid);
-    if (existing) {
-      try {
-        // ✅ Correct 5-arg overload: (chatId, messageId, inlineMessageId, text, extra)
-        await bot.telegram.editMessageText(
-          chatId,
-          existing,
-          undefined,
-          text,
-          { parse_mode: 'Markdown', ...kb } as any
-        );
-        await bot.telegram.pinChatMessage(chatId, existing, { disable_notification: true } as any);
-        return;
-      } catch {
-        // if it was deleted, fall through and send a new one
-      }
-    }
-
+  const existing = pinnedPosMsg.get(uid);
+if (existing) {
+  try {
+    // Correct signature: (chatId, messageId, inlineMessageId, text, extra)
+    await bot.telegram.editMessageText(
+      chatId,                // number | string
+      existing,              // message_id
+      undefined,             // inline_message_id MUST be undefined in this overload
+      text,                  // new message text
+      { parse_mode: 'Markdown', ...kb } as any
+    );
+    await bot.telegram.pinChatMessage(chatId, existing, { disable_notification: true } as any);
+    return;
+  } catch {
+    // fall through to send a new pinned message if edit failed/deleted
+  }
+}
     const m = await bot.telegram.sendMessage(chatId, text, { parse_mode: 'Markdown', ...kb } as any);
     pinnedPosMsg.set(uid, m.message_id);
     try { await bot.telegram.pinChatMessage(chatId, m.message_id, { disable_notification: true } as any); } catch {}
