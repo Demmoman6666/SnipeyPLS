@@ -61,14 +61,14 @@ async function showMenu(ctx: any, text: string, extra?: any) {
   lastMenuMsg.set(uid, m.message_id);
 }
 
-/** Post or update a pinned "POSITION" card after a buy. */
+/** Post or update a pinned "POSITION" card */
 async function upsertPinnedPosition(ctx: any) {
   const uid = ctx.from.id;
   const u = getUserSettings(uid);
   const w = getActiveWallet(uid);
   if (!u?.token_address || !w) return;
 
-  // Always pass a definite chat id to Telegram methods
+  // always pass a definite chat id
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as unknown as (number | string);
 
   try {
@@ -109,17 +109,13 @@ async function upsertPinnedPosition(ctx: any) {
         await bot.telegram.editMessageText(chatId, existing, undefined as any, text, { parse_mode: 'Markdown', ...kb } as any);
         await bot.telegram.pinChatMessage(chatId, existing, { disable_notification: true } as any);
         return;
-      } catch {
-        // if it was deleted, fall through and send a new one
-      }
+      } catch { /* if deleted, send a new one */ }
     }
 
     const m = await bot.telegram.sendMessage(chatId, text, { parse_mode: 'Markdown', ...kb } as any);
     pinnedPosMsg.set(uid, m.message_id);
     try { await bot.telegram.pinChatMessage(chatId, m.message_id, { disable_notification: true } as any); } catch {}
-  } catch {
-    /* ignore */
-  }
+  } catch { /* ignore */ }
 }
 
 /* ---------- utilities ---------- */
@@ -437,29 +433,23 @@ bot.action('pair_info', async (ctx) => {
   return ctx.reply(`Base pair is WPLS:\n${W}`);
 });
 
-/* Toggle wallet in selection set */
-bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
-  await ctx.answerCbQuery();
-  const id = Number(ctx.match[1]);
-  const s = getSelSet(ctx.from.id);
-  if (s.has(id)) s.delete(id); else s.add(id);
-  return renderBuyMenu(ctx);
-});
-
-/* ----- Tx notifications: pending link -> success & delete pending ----- */
+/* ----- Tx notifications: pending -> success (delete pending) ----- */
 async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string) {
   if (!hash) return;
-  const pendingMsg = await ctx.reply(`${kind} pending… ${otter(hash)}`);
+  // Pending message: ONLY the simplified text (no link)
+  const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
     await provider.waitForTransaction(hash);
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
-    await ctx.reply(`${kind} success! ${otter(hash)}`);
+    const link = otter(hash);
+    const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
+    await ctx.reply(`✅ ${title} — ${link}`);
   } catch {
-    // leave pending message if it fails / times out
+    // leave pending if it fails/times out (optional: edit to failed)
   }
 }
 
-/* Buy using selected wallets (or active) + auto-approve + record entry + pin card */
+/* ---------- BUY EXEC ---------- */
 bot.action('buy_exec', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
@@ -472,7 +462,6 @@ bot.action('buy_exec', async (ctx) => {
     : (active ? [active] : []);
   if (!wallets.length) return showMenu(ctx, 'Select a wallet first (Wallets page).', buyMenu(u?.gas_pct ?? 0));
 
-  const res: string[] = [];
   const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
   const preQuote = await bestQuoteBuy(amountIn, u.token_address);
 
@@ -481,7 +470,6 @@ bot.action('buy_exec', async (ctx) => {
       const gas = await computeGas(ctx.from.id);
       const r = await buyAutoRoute(getPrivateKey(w), u.token_address, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
-      res.push(`✅ ${w.name ?? ''} ${short(w.address)} → ${hash ?? '(pending)'}${hash ? `  ${otter(hash)}` : ''}`);
 
       if (preQuote?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
       if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
@@ -490,24 +478,22 @@ bot.action('buy_exec', async (ctx) => {
         approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
       }
     } catch (e: any) {
-      res.push(`❌ ${w.name ?? ''} ${short(w.address)} → ${e.message}`);
+      await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${e.message}`);
     }
   }
-  await ctx.reply(res.join('\n'));
 
   // Update/Pin position card for this token
   await upsertPinnedPosition(ctx);
-
   return renderBuyMenu(ctx);
 });
 
 bot.action('buy_exec_all', async (ctx) => {
   await ctx.answerCbQuery();
-  const rows = listWallets(ctx.from.id); const u = getUserSettings(ctx.from.id);
+  const rows = listWallets(ctx.from.id);
+  const u = getUserSettings(ctx.from.id);
   if (!rows.length) return showMenu(ctx, 'No wallets.', buyMenu(u?.gas_pct ?? 0));
   if (!u?.token_address) return showMenu(ctx, 'Set token first.', buyMenu(u?.gas_pct ?? 0));
 
-  const res: string[] = [];
   const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
   const preQuote = await bestQuoteBuy(amountIn, u.token_address);
 
@@ -516,16 +502,17 @@ bot.action('buy_exec_all', async (ctx) => {
       const gas = await computeGas(ctx.from.id);
       const r = await buyAutoRoute(getPrivateKey(row), u.token_address, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
-      res.push(`✅ ${short(row.address)} -> ${hash ?? '(pending)'}${hash ? `  ${otter(hash)}` : ''}`);
+
       if (preQuote?.amountOut) recordTrade(ctx.from.id, row.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
       if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(row), u.token_address, gas).catch(() => {});
       }
-    } catch (e: any) { res.push(`❌ ${short(row.address)} -> ${e.message}`); }
+    } catch (e: any) {
+      await ctx.reply(`❌ Buy failed for ${short(row.address)}: ${e.message}`);
+    }
   }
-  await ctx.reply(res.join('\n'));
 
   await upsertPinnedPosition(ctx);
   return renderBuyMenu(ctx);
@@ -595,59 +582,73 @@ bot.action(/^limit_cancel:(\d+)$/, async (ctx: any) => {
   return showMenu(ctx, changed ? `Limit #${id} cancelled.` : `Couldn’t cancel #${id}.`, mainMenu());
 });
 
-/* ---------- SELL MENU (tidy) ---------- */
+/* ---------- SELL MENU (clean UI) ---------- */
 async function renderSellMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
   const w = getActiveWallet(ctx.from.id);
   const pct = u?.sell_pct ?? 100;
 
-  let balLine = 'Token balance: —';
-  let outLine = 'Amount out: —';
-  let pnlLine = '';
-  let entryLine = '';
-  let infoLine = '';
+  let header = '🟥 *SELL MENU*';
+  let walletLine = `*Wallet:* ${w ? '`' + short(w.address) + '`' : '—'}`;
+  let tokenLine  = `*Token:* ${u?.token_address ? '`' + short(u.token_address) + '`' : '—'}`;
+
+  let balLine = '• *Balance:* —';
+  let outLine = '• *Est. Out:* —';
+  let entryLine = '• *Entry:* —';
+  let pnlLine = '• *Net PnL:* —';
+  let metaSymbol = 'TOKEN';
 
   if (w && u?.token_address) {
     try {
       const meta = await tokenMeta(u.token_address);
       const dec = meta.decimals ?? 18;
+      metaSymbol = meta.symbol || meta.name || 'TOKEN';
+
       const c = erc20(u.token_address);
-      const [bal, fee, block] = await Promise.all([ c.balanceOf(w.address), provider.getFeeData(), provider.getBlockNumber() ]);
+      const [bal, best] = await Promise.all([
+        c.balanceOf(w.address),
+        (async () => {
+          const amt = await c.balanceOf(w.address);
+          const sellAmt = (amt * BigInt(Math.round(pct))) / 100n;
+          return (sellAmt > 0n) ? bestQuoteSell(sellAmt, u.token_address) : null;
+        })()
+      ]);
 
-      const gasGwei = Number(ethers.formatUnits(fee.gasPrice ?? fee.maxFeePerGas ?? 0n, 'gwei'));
-      infoLine = `Block: ${fmtInt(String(block))}  |  Gas: ${NF.format(gasGwei)} gwei`;
+      // balance
+      balLine = `• *Balance:* ${fmtDec(ethers.formatUnits(bal, dec))} ${metaSymbol}`;
 
-      balLine = `Token balance: ${fmtDec(ethers.formatUnits(bal, dec))} ${meta.symbol || 'TOKEN'}`;
-      const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
-      if (amountIn > 0n) {
-        const best = await bestQuoteSell(amountIn, u.token_address);
-        if (best) {
-          outLine = `Amount out: ${fmtPls(best.amountOut)} PLS   ·   Route: ${best.route.key}`;
-          const avg = getAvgEntry(ctx.from.id, u.token_address, dec);
-          if (avg && avg.avgPlsPerToken > 0) {
-            const amtTok = Number(ethers.formatUnits(amountIn, dec));
-            const curPls = Number(ethers.formatEther(best.amountOut));
-            const curAvg = amtTok > 0 ? curPls / amtTok : 0;
-            const pnlPls = curPls - (avg.avgPlsPerToken * amtTok);
-            const pnlPct = avg.avgPlsPerToken > 0 ? (curAvg / avg.avgPlsPerToken - 1) * 100 : 0;
-            pnlLine = `Net PnL: ${pnlPls >= 0 ? '🟢' : '🔴'} ${NF.format(pnlPls)} PLS  (${NF.format(pnlPct)}%)`;
-            entryLine = `Entry avg: ${NF.format(avg.avgPlsPerToken)} PLS/token  ·  Total PLS in: ${fmtDec(ethers.formatEther(avg.totalPlsIn))}`;
-          } else {
-            pnlLine = `Net PnL: — (no entry recorded yet)`;
-          }
-        }
-      } else outLine = 'Amount out: 0';
-    } catch {}
+      // estimate out
+      if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  _(Route: ${best.route.key})_`;
+
+      // P&L (decimals-aware)
+      const avg = getAvgEntry(ctx.from.id, u.token_address, dec);
+      if (avg && best) {
+        const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
+        const amtTok = Number(ethers.formatUnits(amountIn, dec));
+        const curPls = Number(ethers.formatEther(best.amountOut));
+        const curAvg = amtTok > 0 ? curPls / amtTok : 0;
+        const pnlPls = curPls - (avg.avgPlsPerToken * amtTok);
+        const pnlPct = avg.avgPlsPerToken > 0 ? (curAvg / avg.avgPlsPerToken - 1) * 100 : 0;
+
+        entryLine = `• *Entry:* ${NF.format(avg.avgPlsPerToken)} PLS / ${metaSymbol}`;
+        pnlLine   = `• *Net PnL:* ${pnlPls >= 0 ? '🟢' : '🔴'} ${NF.format(pnlPls)} PLS  (${NF.format(pnlPct)}%)`;
+      }
+    } catch { /* keep defaults */ }
   }
 
   const text = [
-    'SELL MENU', '',
-    `Wallet: ${w ? short(w.address) : '— (Select)'} | Token: ${u?.token_address ? short(u.token_address) : '—'}`,
-    `Sell percent: ${NF.format(pct)}%`,
-    balLine, outLine, entryLine, pnlLine, infoLine,
-  ].filter(Boolean).join('\n');
+    header,
+    '',
+    `${walletLine}    |    ${tokenLine}`,
+    `*Sell %:* ${NF.format(pct)}%`,
+    '',
+    balLine,
+    outLine,
+    entryLine,
+    pnlLine,
+  ].join('\n');
 
-  await showMenu(ctx, text, sellMenu());
+  await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenu() });
 }
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
@@ -985,7 +986,6 @@ async function checkLimitsOnce() {
 
   for (const r of rows) {
     try {
-      // compute live metrics
       const pPLS = await pricePLSPerToken(r.token_address);
       if (pPLS == null) continue;
 
@@ -999,10 +999,9 @@ async function checkLimitsOnce() {
         should = (r.side === 'BUY') ? (pUSD <= r.trigger_value) : (pUSD >= r.trigger_value);
       } else if (r.trigger_type === 'MCAP') {
         if (usd == null) continue;
-        const sup = await totalSupply(r.token_address);
-        if (!sup) continue;
-        const pUSD = pPLS * usd;
+        const sup = await totalSupply(r.token_address); if (!sup) continue;
         const meta = await tokenMeta(r.token_address);
+        const pUSD = pPLS * usd;
         const mcap = Number(ethers.formatUnits(sup, meta.decimals ?? 18)) * pUSD;
         should = (r.side === 'BUY') ? (mcap <= r.trigger_value) : (mcap >= r.trigger_value);
       } else if (r.trigger_type === 'MULT') {
@@ -1014,13 +1013,12 @@ async function checkLimitsOnce() {
 
       if (!should) continue;
 
-      // execute
       const w = getWalletById(r.telegram_id, r.wallet_id);
       if (!w) { markLimitError(r.id, 'wallet missing'); continue; }
       const gas = await computeGas(r.telegram_id);
 
       if (r.side === 'BUY') {
-const amt = r.amount_pls_wei ? BigInt(r.amount_pls_wei) : 0n;
+        const amt = r.amount_pls_wei ? BigInt(r.amount_pls_wei) : 0n;
         if (amt <= 0n) { markLimitError(r.id, 'amount zero'); continue; }
         const rec = await buyAutoRoute(getPrivateKey(w), r.token_address, amt, 0n, gas);
         const hash = (rec as any)?.hash;
@@ -1031,7 +1029,6 @@ const amt = r.amount_pls_wei ? BigInt(r.amount_pls_wei) : 0n;
         } catch {}
         await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${hash ? otter(hash) : ''}`);
       } else {
-        // SELL
         const c = erc20(r.token_address);
         const bal = await c.balanceOf(w.address);
         const pct = Math.max(1, Math.min(100, Number(r.sell_pct ?? 100)));
@@ -1051,7 +1048,6 @@ const amt = r.amount_pls_wei ? BigInt(r.amount_pls_wei) : 0n;
   }
 }
 
-// kick off loop
 setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
 
 export {};
