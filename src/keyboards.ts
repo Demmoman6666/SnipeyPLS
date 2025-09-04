@@ -69,9 +69,12 @@ export function buyMenu(gasPct: number, walletRows?: any[][]) {
 /** Sell menu keyboard */
 export function sellMenu() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback('25%', 'sell_pct_25'), Markup.button.callback('50%', 'sell_pct_50'),
-     Markup.button.callback('75%', 'sell_pct_75'), Markup.button.callback('100%', 'sell_pct_100')],
-    [Markup.button.callback('⬅️ Back', 'main_back'), Markup.button.callback('🧾 Balances', 'balances')],
-    [Markup.button.callback('🔴 Sell Now', 'sell_exec')],
+    [Markup.button.callback('25%', 'sell_pct_25'),
+     Markup.button.callback('50%', 'sell_pct_50'),
+     Markup.button.callback('75%', 'sell_pct_75'),
+     Markup.button.callback('100%', 'sell_pct_100')],
+    [Markup.button.callback('🛡 Approve', 'sell_approve')],
+    [Markup.button.callback('⬅️ Back', 'main_back'),
+     Markup.button.callback('🔴 Sell Now', 'sell_exec')],
   ]);
 }
