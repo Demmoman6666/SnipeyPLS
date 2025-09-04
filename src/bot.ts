@@ -648,7 +648,7 @@ bot.command('set_token', async (ctx) => {
   return renderBuyMenu(ctx);
 });
 bot.command('set_gas', async (ctx) => {
-  const parts = ctx.message.text split(/\s+/);
+  const parts = ctx.message.text.split(/\s+/);
   if (parts.length < 3) return ctx.reply('Usage: /set_gas <gwei_booster> <gas_limit>');
   const booster = Number(parts[1]), limit = Number(parts[2]);
   if (!Number.isFinite(booster) || !Number.isFinite(limit)) return ctx.reply('Invalid numbers.');
