@@ -97,6 +97,13 @@ async function computeGas(telegramId: number, extraPct = 0): Promise<{
   };
 }
 
+/* warm token meta + best route quote (fire-and-forget after setToken) */
+function warmTokenAsync(userId: number, address: string) {
+  tokenMeta(address).catch(() => {});
+  const amt = ethers.parseEther(String(getUserSettings(userId)?.buy_amount_pls ?? 0.01));
+  bestQuoteBuy(amt, address).catch(() => {});
+}
+
 /* pending prompts */
 type Pending =
   | { type: 'set_amount' }
@@ -518,7 +525,12 @@ bot.command('wallet_select', async (ctx) => {
 bot.command('set_token', async (ctx) => {
   const [_, address] = ctx.message.text.split(/\s+/, 2);
   if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) return ctx.reply('Usage: /set_token <0xAddress>');
-  setToken(ctx.from.id, address); return renderBuyMenu(ctx);
+  setToken(ctx.from.id, address);
+
+  // 🔥 warm caches for symbol/decimals and best route
+  warmTokenAsync(ctx.from.id, address);
+
+  return renderBuyMenu(ctx);
 });
 bot.command('set_gas', async (ctx) => {
   // legacy; map to new settings
@@ -575,7 +587,12 @@ bot.on('text', async (ctx, next) => {
 
     if (p.type === 'set_token') {
       if (!/^0x[a-fA-F0-9]{40}$/.test(msg)) return ctx.reply('That does not look like a token address.');
-      setToken(ctx.from.id, msg); pending.delete(ctx.from.id);
+      setToken(ctx.from.id, msg);
+
+      // 🔥 warm caches
+      warmTokenAsync(ctx.from.id, msg);
+
+      pending.delete(ctx.from.id);
       return renderBuyMenu(ctx);
     }
 
@@ -645,6 +662,10 @@ bot.on('text', async (ctx, next) => {
   const text = String(ctx.message.text).trim();
   if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
     setToken(ctx.from.id, text);
+
+    // 🔥 warm caches
+    warmTokenAsync(ctx.from.id, text);
+
     const u = getUserSettings(ctx.from.id);
     if (u?.auto_buy_enabled) {
       const w = getActiveWallet(ctx.from.id);
