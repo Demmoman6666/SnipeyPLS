@@ -12,12 +12,13 @@ export function getDb() {
 }
 
 function tryAlter(sql: string) {
-  try { db.exec(sql); } catch { /* ignore if already applied */ }
+  try { db.exec(sql); } catch { /* ignore if already applied / old sqlite */ }
 }
 
 export async function initDb() {
   const dataDir = path.join(process.cwd(), 'data');
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+
   db = new Database(path.join(dataDir, 'pulsebot.sqlite'));
   db.pragma('journal_mode = wal');
 
@@ -27,7 +28,7 @@ export async function initDb() {
       active_wallet_id INTEGER DEFAULT NULL,
       token_address TEXT DEFAULT NULL,
 
-      -- legacy
+      -- legacy (kept for compatibility)
       max_priority_fee_gwei REAL DEFAULT 0.1,
       max_fee_gwei REAL DEFAULT 0.2,
 
@@ -52,7 +53,7 @@ export async function initDb() {
       enc_privkey BLOB NOT NULL
     );
 
-    -- Executed trades to build avg entry/PnL
+    -- Executed trades to build avg entry / PnL
     CREATE TABLE IF NOT EXISTS trades (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       telegram_id INTEGER NOT NULL,
@@ -62,7 +63,7 @@ export async function initDb() {
       pls_in_wei TEXT NOT NULL,
       token_out_wei TEXT NOT NULL,
       route TEXT,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
     );
 
     -- Limit orders
@@ -79,12 +80,13 @@ export async function initDb() {
       status TEXT NOT NULL DEFAULT 'OPEN' CHECK(status IN ('OPEN','FILLED','CANCELLED','ERROR')),
       last_error TEXT DEFAULT NULL,
       tx_hash TEXT DEFAULT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+      updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
     );
   `);
 
-  // Migrations (best-effort)
+  /* --------- best-effort migrations for older DBs --------- */
+  // users
   tryAlter(`ALTER TABLE users ADD COLUMN gwei_boost_gwei REAL DEFAULT 0.0;`);
   tryAlter(`ALTER TABLE users ADD COLUMN gas_pct REAL DEFAULT 0.0;`);
   tryAlter(`ALTER TABLE users ADD COLUMN default_gas_pct REAL DEFAULT 0.0;`);
@@ -92,6 +94,21 @@ export async function initDb() {
   tryAlter(`ALTER TABLE users ADD COLUMN sell_pct REAL DEFAULT 100.0;`);
   tryAlter(`ALTER TABLE users ADD COLUMN auto_buy_enabled INTEGER DEFAULT 0;`);
   tryAlter(`ALTER TABLE users ADD COLUMN auto_buy_amount_pls REAL DEFAULT 0.01;`);
+
+  // trades: add route + created_at if they were missing
+  tryAlter(`ALTER TABLE trades ADD COLUMN route TEXT;`);
+  tryAlter(`ALTER TABLE trades ADD COLUMN created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'));`);
+
+  // limit_orders: if table existed from an earlier version, ensure the new columns are present
+  tryAlter(`ALTER TABLE limit_orders ADD COLUMN amount_pls_wei TEXT DEFAULT NULL;`);
+  tryAlter(`ALTER TABLE limit_orders ADD COLUMN sell_pct REAL DEFAULT NULL;`);
+  tryAlter(`ALTER TABLE limit_orders ADD COLUMN trigger_type TEXT;`);
+  tryAlter(`ALTER TABLE limit_orders ADD COLUMN trigger_value REAL;`);
+  tryAlter(`ALTER TABLE limit_orders ADD COLUMN status TEXT NOT NULL DEFAULT 'OPEN';`);
+  tryAlter(`ALTER TABLE limit_orders ADD COLUMN last_error TEXT DEFAULT NULL;`);
+  tryAlter(`ALTER TABLE limit_orders ADD COLUMN tx_hash TEXT DEFAULT NULL;`);
+  tryAlter(`ALTER TABLE limit_orders ADD COLUMN created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'));`);
+  tryAlter(`ALTER TABLE limit_orders ADD COLUMN updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'));`);
 }
 
 /* ====================== TYPES ====================== */
@@ -137,14 +154,22 @@ export function recordTrade(
   getDb().prepare(`
     INSERT INTO trades (telegram_id, wallet_address, token_address, side, pls_in_wei, token_out_wei, route, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
-  `).run(telegramId, walletAddress, tokenAddress.toLowerCase(), side, plsInWei.toString(), tokenOutWei.toString(), route ?? null);
+  `).run(
+    telegramId,
+    walletAddress,
+    tokenAddress.toLowerCase(),
+    side,
+    plsInWei.toString(),
+    tokenOutWei.toString(),
+    route ?? null
+  );
 }
 
-/** Average entry (PLS/token) using executed BUYs only (SELLs reduce position proportionally). */
+/** Average entry (PLS/token) using executed BUYs (SELLs reduce position proportionally). */
 export function getAvgEntry(
   telegramId: number,
   tokenAddress: string
-): { avgPlsPerToken: number, totalPlsIn: bigint, netTokens: bigint } | null {
+): { avgPlsPerToken: number; totalPlsIn: bigint; netTokens: bigint } | null {
   const rows = getDb().prepare(`
     SELECT side, pls_in_wei, token_out_wei
     FROM trades
@@ -193,14 +218,14 @@ export function getPosition(telegramId: number, tokenAddress: string): bigint {
 /* =================== limit orders =================== */
 
 export function addLimitOrder(o: {
-  telegramId: number,
-  walletId: number,
-  token: string,
-  side: Side,
-  amountPlsWei?: bigint,
-  sellPct?: number,
-  trigger: Trigger,
-  value: number
+  telegramId: number;
+  walletId: number;
+  token: string;
+  side: Side;
+  amountPlsWei?: bigint;
+  sellPct?: number;
+  trigger: Trigger;
+  value: number;
 }) {
   const info = getDb().prepare(`
     INSERT INTO limit_orders
