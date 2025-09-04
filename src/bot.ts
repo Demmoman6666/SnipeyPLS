@@ -1,4 +1,3 @@
-// src/bot.ts
 import './boot.js';
 import { Telegraf, Markup } from 'telegraf';
 import { getConfig } from './config.js';
@@ -34,8 +33,9 @@ import {
   clearPendingTransactions,
   withdrawPls,
   pingRpc,
-  approveAllRouters,            // ⬅️ used for auto-approve + Sell ▸ Approve
+  approveAllRouters,
 } from './dex.js';
+import { recordTrade, getAvgEntry, getPosition } from './db.js';
 
 const cfg = getConfig();
 export const bot = new Telegraf(cfg.BOT_TOKEN, { handlerTimeout: 60_000 });
@@ -96,22 +96,7 @@ function warmTokenAsync(userId: number, address: string) {
   bestQuoteBuy(amt, address).catch(() => {});
 }
 
-/* --- track last buy for Net PnL (session memory) --- */
-type LastBuy = { avgPlsPerToken: number; lastPlsIn: number; ts: number };
-const lastBuy = new Map<string, LastBuy>();
-const keyLT = (uid: number, token: string) => `${uid}:${token.toLowerCase()}`;
-function setLastBuy(uid: number, token: string, amountInWei: bigint, amountOutWei: bigint, dec = 18) {
-  if (amountOutWei <= 0n) return;
-  const pls = Number(ethers.formatEther(amountInWei));
-  const tok = Number(ethers.formatUnits(amountOutWei, dec));
-  if (tok > 0) lastBuy.set(keyLT(uid, token), { avgPlsPerToken: pls / tok, lastPlsIn: pls, ts: Math.floor(Date.now()/1000) });
-}
-function getLastBuy(uid: number, token?: string) {
-  if (!token) return undefined;
-  return lastBuy.get(keyLT(uid, token));
-}
-
-/* --- Multi-wallet selection state (in-memory) --- */
+/* --- in-memory multi-wallet selection --- */
 const selectedWallets = new Map<number, Set<number>>();
 function getSelSet(uid: number) {
   let s = selectedWallets.get(uid);
@@ -208,7 +193,6 @@ async function renderWalletsList(ctx: any) {
     balances.some(b => !b.ok) ? '\n⚠️ Some balances didn’t load from the RPC. Use /rpc_check.' : ''
   ].filter(Boolean);
 
-  // Each row: [ Manage, "<X PLS>" (unclickable) ]
   const kb = rows.map((w, i) => [
     Markup.button.callback(`${w.id}. ${short(w.address)}`, `wallet_manage:${w.id}`),
     Markup.button.callback(`${fmtPls(balances[i].value)} PLS`, 'noop'),
@@ -242,8 +226,6 @@ async function renderWalletManage(ctx: any, walletId: number) {
 
 bot.action('wallets', async (ctx) => { await ctx.answerCbQuery(); return renderWalletsList(ctx); });
 bot.action(/^wallet_manage:(\d+)$/, async (ctx: any) => { await ctx.answerCbQuery(); return renderWalletManage(ctx, Number(ctx.match[1])); });
-
-// (removed wallet_set_active action)
 
 /* PK (masked + reveal) */
 bot.action(/^wallet_pk:(\d+)$/, async (ctx: any) => {
@@ -410,14 +392,13 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
   return renderBuyMenu(ctx);
 });
 
-/* Buy using selected wallets (or active if none selected) + auto-approve + record entry price */
+/* Buy using selected wallets (or active if none) + auto-approve + record entry */
 bot.action('buy_exec', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
   const active = getActiveWallet(ctx.from.id);
   if (!u?.token_address) return sendOrEdit(ctx, 'Set token first.', buyMenu(u?.gas_pct ?? 0));
 
-  // Selected wallets if any, else active wallet
   const selIds = Array.from(getSelSet(ctx.from.id));
   let wallets = selIds.length
     ? listWallets(ctx.from.id).filter(w => selIds.includes(w.id))
@@ -426,7 +407,6 @@ bot.action('buy_exec', async (ctx) => {
 
   const res: string[] = [];
   const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
-  const meta = await tokenMeta(u.token_address);
   const preQuote = await bestQuoteBuy(amountIn, u.token_address);
 
   for (const w of wallets) {
@@ -436,8 +416,10 @@ bot.action('buy_exec', async (ctx) => {
       const hash = (r as any)?.hash;
       res.push(`✅ ${w.name ?? ''} ${w.address.slice(0,6)}…${w.address.slice(-4)} → ${hash ?? '(pending)'}${hash ? `  ${otter(hash)}` : ''}`);
 
-      // record last buy (user+token)
-      if (preQuote?.amountOut) setLastBuy(ctx.from.id, u.token_address, amountIn, preQuote.amountOut, meta.decimals ?? 18);
+      // record BUY trade for PnL (use quote amounts)
+      if (preQuote?.amountOut) {
+        recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+      }
 
       // background infinite approve for all routers (skip WPLS)
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
@@ -459,7 +441,6 @@ bot.action('buy_exec_all', async (ctx) => {
 
   const res: string[] = [];
   const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
-  const meta = await tokenMeta(u.token_address);
   const preQuote = await bestQuoteBuy(amountIn, u.token_address);
 
   for (const row of rows) {
@@ -469,7 +450,9 @@ bot.action('buy_exec_all', async (ctx) => {
       const hash = (r as any)?.hash;
       res.push(`✅ ${short(row.address)} -> ${hash ?? '(pending)'}${hash ? `  ${otter(hash)}` : ''}`);
 
-      if (preQuote?.amountOut) setLastBuy(ctx.from.id, u.token_address, amountIn, preQuote.amountOut, meta.decimals ?? 18);
+      if (preQuote?.amountOut) {
+        recordTrade(ctx.from.id, row.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+      }
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(row), u.token_address, gas).catch(() => {});
       }
@@ -488,6 +471,7 @@ async function renderSellMenu(ctx: any) {
   let outLine = 'Amount out: —';
   let pnlLine = '';
   let infoLine = '';
+  let entryLine = '';
 
   if (w && u?.token_address) {
     try {
@@ -510,28 +494,22 @@ async function renderSellMenu(ctx: any) {
         if (best) {
           outLine = `Amount out: ${fmtPls(best.amountOut)} PLS   ·   Route: ${best.route.key}`;
 
-          // Net PnL against last buy
-          const entry = getLastBuy(ctx.from.id, u.token_address);
-          if (entry && entry.avgPlsPerToken > 0) {
+          // DB-backed average entry
+          const avg = getAvgEntry(ctx.from.id, u.token_address);
+          if (avg && avg.avgPlsPerToken > 0) {
             const amtTok = Number(ethers.formatUnits(amountIn, dec)); // tokens to sell
             const curPls = Number(ethers.formatEther(best.amountOut)); // PLS received
             const curAvg = curPls / Math.max(amtTok, 1e-18);
-            const diffPerTok = curAvg - entry.avgPlsPerToken;
-            const pnlPls = diffPerTok * amtTok;
-            const pnlPct = (curAvg / entry.avgPlsPerToken - 1) * 100;
+            const pnlPls = curPls - (avg.avgPlsPerToken * amtTok);
+            const pnlPct = (curAvg / avg.avgPlsPerToken - 1) * 100;
             pnlLine = `Net PnL: ${pnlPls >= 0 ? '🟢' : '🔴'} ${NF.format(pnlPls)} PLS  (${NF.format(pnlPct)}%)`;
+            entryLine = `Entry avg: ${NF.format(avg.avgPlsPerToken)} PLS/token  ·  Total PLS in: ${fmtDec(ethers.formatEther(avg.totalPlsIn))}`;
           } else {
             pnlLine = `Net PnL: — (no entry recorded yet)`;
           }
         }
       } else {
         outLine = 'Amount out: 0';
-      }
-
-      // Show last buy size if known
-      const entry = getLastBuy(ctx.from.id, u.token_address);
-      if (entry) {
-        pnlLine += `${pnlLine ? '\n' : ''}Last buy: ${NF.format(entry.lastPlsIn)} PLS  ·  Entry: ${NF.format(entry.avgPlsPerToken)} PLS/token`;
       }
     } catch { /* keep defaults */ }
   }
@@ -543,6 +521,7 @@ async function renderSellMenu(ctx: any) {
     `Sell percent: ${NF.format(pct)}%`,
     balLine,
     outLine,
+    entryLine,
     pnlLine,
     infoLine,
   ].filter(Boolean).join('\n');
@@ -583,9 +562,19 @@ bot.action('sell_exec', async (ctx) => {
     const pct = u?.sell_pct ?? 100;
     const amount = (bal * BigInt(Math.round(pct))) / 100n;
     if (amount <= 0n) return sendOrEdit(ctx, 'Nothing to sell.', sellMenu());
+
+    // quote for recording trade
+    const q = await bestQuoteSell(amount, u.token_address);
+
     const gas = await computeGas(ctx.from.id);
     const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
     const hash = (r as any)?.hash;
+
+    // record SELL trade for PnL (pls_in_wei = PLS received; token_out_wei = tokens spent)
+    if (q?.amountOut) {
+      recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
+    }
+
     await ctx.reply(hash ? `Sell sent! ${otter(hash)}` : 'Sell sent! (pending)');
   } catch (e: any) { await ctx.reply('Sell failed: ' + e.message); }
   return renderSellMenu(ctx);
@@ -715,7 +704,7 @@ bot.on('text', async (ctx, next) => {
       if (!/^0x[a-fA-F0-9]{40}$/.test(to) || !amtStr) return ctx.reply('Expected: `address amount_pls`');
       const amount = Number(amtStr);
       if (!Number.isFinite(amount) || amount <= 0) return ctx.reply('Amount must be positive.');
-      const w = getWalletById(ctx.from.id, p.walletId); if (!w) { pending.delete(ctx.from.id); return ctx.reply('Wallet not found.'); }
+      const w = getWalletById(ctx.from.id, (p as any).walletId); if (!w) { pending.delete(ctx.from.id); return ctx.reply('Wallet not found.'); }
       try {
         const gas = await computeGas(ctx.from.id);
         const receipt = await withdrawPls(getPrivateKey(w), to, ethers.parseEther(String(amount)), gas);
@@ -723,7 +712,7 @@ bot.on('text', async (ctx, next) => {
         await ctx.reply(hash ? `Withdraw sent! ${otter(hash)}` : 'Withdraw sent! (pending)');
       } catch (e: any) { await ctx.reply('Withdraw failed: ' + e.message); }
       pending.delete(ctx.from.id);
-      return renderWalletManage(ctx, p.walletId);
+      return renderWalletManage(ctx, (p as any).walletId);
     }
 
     if (p.type === 'set_gl') {
