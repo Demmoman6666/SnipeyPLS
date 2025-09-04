@@ -327,7 +327,6 @@ async function renderBuyMenu(ctx: any) {
       const meta = await tokenMeta(u.token_address);
       tokenLine = `Token: ${u.token_address} (${meta.symbol || meta.name || 'TOKEN'})`;
 
-      // Quote best route for Amount out
       const best = await bestQuoteBuy(ethers.parseEther(String(amt)), u.token_address);
       if (best) {
         const dec = meta.decimals ?? 18;
@@ -350,7 +349,7 @@ async function renderBuyMenu(ctx: any) {
     outLine,
   ].join('\n');
 
-  // Build wallet toggle rows (W1..Wn)
+  // Wallet toggles (W1..Wn)
   const rows = listWallets(ctx.from.id);
   const sel = getSelSet(ctx.from.id);
   const walletButtons = chunk(
@@ -393,16 +392,6 @@ bot.action('pair_info', async (ctx) => {
   return ctx.reply(`Base pair is WPLS:\n${W}`);
 });
 
-bot.action('choose_wallet', async (ctx) => {
-  await ctx.answerCbQuery();
-  const rows = listWallets(ctx.from.id);
-  if (!rows.length) return sendOrEdit(ctx, 'No wallets yet. /wallet_new or /wallet_import');
-  const buttons = rows.map(w => [Markup.button.callback(`${w.id}. ${w.name} ${short(w.address)}`, `select_wallet:${w.id}`)]);
-  buttons.push([Markup.button.callback('⬅️ Back', 'menu_buy')]);
-  return sendOrEdit(ctx, 'Select a wallet:', Markup.inlineKeyboard(buttons));
-});
-bot.action(/^select_wallet:(\d+)$/, async (ctx: any) => { await ctx.answerCbQuery(); try { setActiveWallet(ctx.from.id, String(Number(ctx.match[1]))); } catch {} return renderBuyMenu(ctx); });
-
 /* Toggle wallet in selection set */
 bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
@@ -423,7 +412,7 @@ bot.action('buy_exec', async (ctx) => {
   let wallets = selIds.length
     ? listWallets(ctx.from.id).filter(w => selIds.includes(w.id))
     : (active ? [active] : []);
-  if (!wallets.length) return sendOrEdit(ctx, 'Select a wallet first.', buyMenu(u?.gas_pct ?? 0));
+  if (!wallets.length) return sendOrEdit(ctx, 'Select a wallet first (Wallets page).', buyMenu(u?.gas_pct ?? 0));
 
   const res: string[] = [];
   for (const w of wallets) {
@@ -510,7 +499,6 @@ bot.action('sell_exec', async (ctx) => {
   const u = getUserSettings(ctx.from.id); const w = getActiveWallet(ctx.from.id);
   if (!w || !u?.token_address) return sendOrEdit(ctx, 'Need active wallet and token set.', sellMenu());
   try {
-    // ERC-20 sells need allowances; do those via a separate UI if needed.
     const c = erc20(u.token_address);
     const bal = await c.balanceOf(w.address);
     const pct = u?.sell_pct ?? 100;
@@ -571,7 +559,6 @@ bot.command('set_token', async (ctx) => {
   return renderBuyMenu(ctx);
 });
 bot.command('set_gas', async (ctx) => {
-  // legacy; map to new settings
   const parts = ctx.message.text.split(/\s+/);
   if (parts.length < 3) return ctx.reply('Usage: /set_gas <gwei_booster> <gas_limit>');
   const booster = Number(parts[1]), limit = Number(parts[2]);
