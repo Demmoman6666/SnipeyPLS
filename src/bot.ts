@@ -1,3 +1,4 @@
+// src/bot.ts
 import './boot.js';
 import { Telegraf, Markup } from 'telegraf';
 import { getConfig } from './config.js';
@@ -35,7 +36,7 @@ import {
   pingRpc,
   approveAllRouters,
 } from './dex.js';
-import { recordTrade, getAvgEntry, getPosition } from './db.js';
+import { recordTrade, getAvgEntry } from './db.js';
 
 const cfg = getConfig();
 export const bot = new Telegraf(cfg.BOT_TOKEN, { handlerTimeout: 60_000 });
@@ -47,6 +48,16 @@ const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const fmtDec = (s: string) => { const [i, d] = s.split('.'); return d ? `${fmtInt(i)}.${d}` : fmtInt(i); };
 const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
+/* pretty numbers for UI */
+function trimDecStr(s: string, max = 6) {
+  const [i, d = ''] = s.split('.');
+  const d2 = d.slice(0, max).replace(/0+$/, '');
+  return d2 ? `${fmtInt(i)}.${d2}` : fmtInt(i);
+}
+function fmtUnits(wei: bigint, dec = 18, max = 6) {
+  return trimDecStr(ethers.formatUnits(wei, dec), max);
+}
+const NF2 = new Intl.NumberFormat('en-GB', { maximumFractionDigits: 2 });
 
 function canEdit(ctx: any) { return Boolean(ctx?.callbackQuery?.message?.message_id); }
 async function sendOrEdit(ctx: any, text: string, extra?: any) {
@@ -193,6 +204,7 @@ async function renderWalletsList(ctx: any) {
     balances.some(b => !b.ok) ? '\n⚠️ Some balances didn’t load from the RPC. Use /rpc_check.' : ''
   ].filter(Boolean);
 
+  // Row: [Manage, "<X PLS>" (unclickable)]
   const kb = rows.map((w, i) => [
     Markup.button.callback(`${w.id}. ${short(w.address)}`, `wallet_manage:${w.id}`),
     Markup.button.callback(`${fmtPls(balances[i].value)} PLS`, 'noop'),
@@ -466,66 +478,77 @@ bot.action('buy_exec_all', async (ctx) => {
 async function renderSellMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
   const w = getActiveWallet(ctx.from.id);
-  const pct = u?.sell_pct ?? 100;
-  let balLine = 'Token balance: —';
-  let outLine = 'Amount out: —';
-  let pnlLine = '';
-  let infoLine = '';
-  let entryLine = '';
 
-  if (w && u?.token_address) {
-    try {
-      const meta = await tokenMeta(u.token_address);
-      const dec = meta.decimals ?? 18;
-      const c = erc20(u.token_address);
-      const [bal, fee, block] = await Promise.all([
-        c.balanceOf(w.address),
-        provider.getFeeData(),
-        provider.getBlockNumber(),
-      ]);
+  const lines: string[] = [
+    '🔴 SELL',
+    '',
+    `👛 Wallet: ${w ? short(w.address) : '—'}`,
+    `🪙 Token: ${u?.token_address ? short(u.token_address) : '—'}`,
+  ];
 
-      const gasGwei = Number(ethers.formatUnits(fee.gasPrice ?? fee.maxFeePerGas ?? 0n, 'gwei'));
-      infoLine = `Block: ${fmtInt(String(block))}  |  Gas: ${NF.format(gasGwei)} gwei`;
-
-      balLine = `Token balance: ${fmtDec(ethers.formatUnits(bal, dec))} ${meta.symbol || 'TOKEN'}`;
-      const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
-      if (amountIn > 0n) {
-        const best = await bestQuoteSell(amountIn, u.token_address);
-        if (best) {
-          outLine = `Amount out: ${fmtPls(best.amountOut)} PLS   ·   Route: ${best.route.key}`;
-
-          // DB-backed average entry
-          const avg = getAvgEntry(ctx.from.id, u.token_address);
-          if (avg && avg.avgPlsPerToken > 0) {
-            const amtTok = Number(ethers.formatUnits(amountIn, dec)); // tokens to sell
-            const curPls = Number(ethers.formatEther(best.amountOut)); // PLS received
-            const curAvg = curPls / Math.max(amtTok, 1e-18);
-            const pnlPls = curPls - (avg.avgPlsPerToken * amtTok);
-            const pnlPct = (curAvg / avg.avgPlsPerToken - 1) * 100;
-            pnlLine = `Net PnL: ${pnlPls >= 0 ? '🟢' : '🔴'} ${NF.format(pnlPls)} PLS  (${NF.format(pnlPct)}%)`;
-            entryLine = `Entry avg: ${NF.format(avg.avgPlsPerToken)} PLS/token  ·  Total PLS in: ${fmtDec(ethers.formatEther(avg.totalPlsIn))}`;
-          } else {
-            pnlLine = `Net PnL: — (no entry recorded yet)`;
-          }
-        }
-      } else {
-        outLine = 'Amount out: 0';
-      }
-    } catch { /* keep defaults */ }
+  if (!w || !u?.token_address) {
+    lines.push('', 'Set a wallet and token first.');
+    return sendOrEdit(ctx, lines.join('\n'), sellMenu());
   }
 
-  const lines = [
-    'SELL MENU',
-    '',
-    `Wallet: ${w ? short(w.address) : '— (Select)'} | Token: ${u?.token_address ? short(u.token_address) : '—'}`,
-    `Sell percent: ${NF.format(pct)}%`,
-    balLine,
-    outLine,
-    entryLine,
-    pnlLine,
-    infoLine,
-  ].filter(Boolean).join('\n');
-  return sendOrEdit(ctx, lines, sellMenu());
+  try {
+    const meta = await tokenMeta(u.token_address);
+    const dec = meta.decimals ?? 18;
+    const symbol = meta.symbol || 'TOKEN';
+
+    const c = erc20(u.token_address);
+    const [bal, fee, block] = await Promise.all([
+      c.balanceOf(w.address),
+      provider.getFeeData(),
+      provider.getBlockNumber(),
+    ]);
+
+    const gasNumGwei = Number(ethers.formatUnits(fee.gasPrice ?? fee.maxFeePerGas ?? 0n, 'gwei'));
+    const gasNice = Number.isFinite(gasNumGwei) ? NF.format(gasNumGwei) : '—';
+
+    const pct = u?.sell_pct ?? 100;
+    const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
+
+    lines.push(
+      `🎯 Sell: ${NF2.format(pct)}%`,
+      `💰 Balance: ${fmtUnits(bal, dec)} ${symbol}`,
+    );
+
+    if (amountIn > 0n) {
+      const best = await bestQuoteSell(amountIn, u.token_address);
+      if (best) {
+        const receivePls = trimDecStr(ethers.formatEther(best.amountOut), 6);
+        lines.push(
+          `➡️ You receive: ${receivePls} PLS`,
+          `🔁 Route: ${best.route.key}`
+        );
+
+        const avg = getAvgEntry(ctx.from.id, u.token_address);
+        if (avg && avg.avgPlsPerToken > 0) {
+          const amtTokNum = Number(ethers.formatUnits(amountIn, dec));
+          const curPlsNum = Number(ethers.formatEther(best.amountOut));
+          const curAvg = amtTokNum > 0 ? curPlsNum / amtTokNum : 0;
+          const pnlPls = curPlsNum - (avg.avgPlsPerToken * amtTokNum);
+          const pnlPct = avg.avgPlsPerToken ? ((curAvg / avg.avgPlsPerToken) - 1) * 100 : 0;
+          const up = pnlPls >= 0;
+          lines.push(`📊 PnL: ${up ? '🟢' : '🔴'} ${NF.format(Math.abs(pnlPls))} PLS  (${NF2.format(pnlPct)}%)`);
+          lines.push(`🧾 Entry avg: ${NF.format(avg.avgPlsPerToken)} PLS/token  ·  Total PLS in: ${fmtDec(ethers.formatEther(avg.totalPlsIn))}`);
+        } else {
+          lines.push('📊 PnL: — (no entry recorded yet)');
+        }
+      } else {
+        lines.push('➡️ Quote unavailable (no route)');
+      }
+    } else {
+      lines.push('➡️ Amount to sell: 0');
+    }
+
+    lines.push(`⛓ Block: ${fmtInt(String(block))}  |  ⛽ Gas: ${gasNice} gwei`);
+  } catch {
+    lines.push('', 'Could not fetch balances/quotes right now.');
+  }
+
+  return sendOrEdit(ctx, lines.join('\n'), sellMenu());
 }
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
@@ -563,15 +586,13 @@ bot.action('sell_exec', async (ctx) => {
     const amount = (bal * BigInt(Math.round(pct))) / 100n;
     if (amount <= 0n) return sendOrEdit(ctx, 'Nothing to sell.', sellMenu());
 
-    // quote for recording trade
     const q = await bestQuoteSell(amount, u.token_address);
-
     const gas = await computeGas(ctx.from.id);
     const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
     const hash = (r as any)?.hash;
 
-    // record SELL trade for PnL (pls_in_wei = PLS received; token_out_wei = tokens spent)
     if (q?.amountOut) {
+      // SELL recorded as PLS-in received, token-out spent
       recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
     }
 
@@ -627,7 +648,7 @@ bot.command('set_token', async (ctx) => {
   return renderBuyMenu(ctx);
 });
 bot.command('set_gas', async (ctx) => {
-  const parts = ctx.message.text.split(/\s+/);
+  const parts = ctx.message.text split(/\s+/);
   if (parts.length < 3) return ctx.reply('Usage: /set_gas <gwei_booster> <gas_limit>');
   const booster = Number(parts[1]), limit = Number(parts[2]);
   if (!Number.isFinite(booster) || !Number.isFinite(limit)) return ctx.reply('Invalid numbers.');
