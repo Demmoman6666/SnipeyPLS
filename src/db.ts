@@ -11,7 +11,7 @@ export function getDb() {
   return db;
 }
 
-function tryAlter(sql: string) {
+function tryExec(sql: string) {
   try { db.exec(sql); } catch { /* ignore if already applied / old sqlite */ }
 }
 
@@ -22,13 +22,14 @@ export async function initDb() {
   db = new Database(path.join(dataDir, 'pulsebot.sqlite'));
   db.pragma('journal_mode = wal');
 
+  // Core schema
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       telegram_id INTEGER PRIMARY KEY,
       active_wallet_id INTEGER DEFAULT NULL,
       token_address TEXT DEFAULT NULL,
 
-      -- legacy (kept for compatibility)
+      -- legacy
       max_priority_fee_gwei REAL DEFAULT 0.1,
       max_fee_gwei REAL DEFAULT 0.2,
 
@@ -53,7 +54,7 @@ export async function initDb() {
       enc_privkey BLOB NOT NULL
     );
 
-    -- Executed trades to build avg entry / PnL
+    -- Executed trades (for avg entry / PnL)
     CREATE TABLE IF NOT EXISTS trades (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       telegram_id INTEGER NOT NULL,
@@ -63,7 +64,7 @@ export async function initDb() {
       pls_in_wei TEXT NOT NULL,
       token_out_wei TEXT NOT NULL,
       route TEXT,
-      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+      created_at INTEGER
     );
 
     -- Limit orders
@@ -80,35 +81,25 @@ export async function initDb() {
       status TEXT NOT NULL DEFAULT 'OPEN' CHECK(status IN ('OPEN','FILLED','CANCELLED','ERROR')),
       last_error TEXT DEFAULT NULL,
       tx_hash TEXT DEFAULT NULL,
-      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-      updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
     );
   `);
 
-  /* --------- best-effort migrations for older DBs --------- */
-  // users
-  tryAlter(`ALTER TABLE users ADD COLUMN gwei_boost_gwei REAL DEFAULT 0.0;`);
-  tryAlter(`ALTER TABLE users ADD COLUMN gas_pct REAL DEFAULT 0.0;`);
-  tryAlter(`ALTER TABLE users ADD COLUMN default_gas_pct REAL DEFAULT 0.0;`);
-  tryAlter(`ALTER TABLE users ADD COLUMN buy_amount_pls REAL DEFAULT 0.01;`);
-  tryAlter(`ALTER TABLE users ADD COLUMN sell_pct REAL DEFAULT 100.0;`);
-  tryAlter(`ALTER TABLE users ADD COLUMN auto_buy_enabled INTEGER DEFAULT 0;`);
-  tryAlter(`ALTER TABLE users ADD COLUMN auto_buy_amount_pls REAL DEFAULT 0.01;`);
+  // ---------- Best-effort migrations (covers existing DBs) ----------
+  tryExec(`ALTER TABLE users ADD COLUMN gwei_boost_gwei REAL DEFAULT 0.0;`);
+  tryExec(`ALTER TABLE users ADD COLUMN gas_pct REAL DEFAULT 0.0;`);
+  tryExec(`ALTER TABLE users ADD COLUMN default_gas_pct REAL DEFAULT 0.0;`);
+  tryExec(`ALTER TABLE users ADD COLUMN buy_amount_pls REAL DEFAULT 0.01;`);
+  tryExec(`ALTER TABLE users ADD COLUMN sell_pct REAL DEFAULT 100.0;`);
+  tryExec(`ALTER TABLE users ADD COLUMN auto_buy_enabled INTEGER DEFAULT 0;`);
+  tryExec(`ALTER TABLE users ADD COLUMN auto_buy_amount_pls REAL DEFAULT 0.01;`);
 
-  // trades: add route + created_at if they were missing
-  tryAlter(`ALTER TABLE trades ADD COLUMN route TEXT;`);
-  tryAlter(`ALTER TABLE trades ADD COLUMN created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'));`);
-
-  // limit_orders: if table existed from an earlier version, ensure the new columns are present
-  tryAlter(`ALTER TABLE limit_orders ADD COLUMN amount_pls_wei TEXT DEFAULT NULL;`);
-  tryAlter(`ALTER TABLE limit_orders ADD COLUMN sell_pct REAL DEFAULT NULL;`);
-  tryAlter(`ALTER TABLE limit_orders ADD COLUMN trigger_type TEXT;`);
-  tryAlter(`ALTER TABLE limit_orders ADD COLUMN trigger_value REAL;`);
-  tryAlter(`ALTER TABLE limit_orders ADD COLUMN status TEXT NOT NULL DEFAULT 'OPEN';`);
-  tryAlter(`ALTER TABLE limit_orders ADD COLUMN last_error TEXT DEFAULT NULL;`);
-  tryAlter(`ALTER TABLE limit_orders ADD COLUMN tx_hash TEXT DEFAULT NULL;`);
-  tryAlter(`ALTER TABLE limit_orders ADD COLUMN created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'));`);
-  tryAlter(`ALTER TABLE limit_orders ADD COLUMN updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'));`);
+  // trades route/created_at (your error was from these missing)
+  tryExec(`ALTER TABLE trades ADD COLUMN route TEXT;`);
+  tryExec(`ALTER TABLE trades ADD COLUMN created_at INTEGER;`);
+  // backfill created_at if null
+  tryExec(`UPDATE trades SET created_at = COALESCE(created_at, strftime('%s','now')) WHERE created_at IS NULL;`);
 }
 
 /* ====================== TYPES ====================== */
@@ -165,11 +156,15 @@ export function recordTrade(
   );
 }
 
-/** Average entry (PLS/token) using executed BUYs (SELLs reduce position proportionally). */
+/** Average entry (PLS/token).
+ * BUY adds position; SELL reduces it proportionally.
+ * Note: token_out_wei are in token's base units (decimals). We assume 18 if unknown in callers.
+ */
 export function getAvgEntry(
   telegramId: number,
-  tokenAddress: string
-): { avgPlsPerToken: number; totalPlsIn: bigint; netTokens: bigint } | null {
+  tokenAddress: string,
+  tokenDecimals = 18
+): { avgPlsPerToken: number, totalPlsIn: bigint, netTokens: bigint } | null {
   const rows = getDb().prepare(`
     SELECT side, pls_in_wei, token_out_wei
     FROM trades
@@ -197,7 +192,11 @@ export function getAvgEntry(
   }
 
   if (netTokens <= 0n) return null;
-  const avg = Number(ethers.formatEther(totalPlsIn)) / Number(ethers.formatUnits(netTokens, 18));
+
+  // avg = (PLS / token) using correct decimals
+  const pls = Number(ethers.formatEther(totalPlsIn));
+  const toks = Number(ethers.formatUnits(netTokens, tokenDecimals));
+  const avg = toks > 0 ? pls / toks : 0;
   return { avgPlsPerToken: avg, totalPlsIn, netTokens };
 }
 
@@ -218,14 +217,14 @@ export function getPosition(telegramId: number, tokenAddress: string): bigint {
 /* =================== limit orders =================== */
 
 export function addLimitOrder(o: {
-  telegramId: number;
-  walletId: number;
-  token: string;
-  side: Side;
-  amountPlsWei?: bigint;
-  sellPct?: number;
-  trigger: Trigger;
-  value: number;
+  telegramId: number,
+  walletId: number,
+  token: string,
+  side: Side,
+  amountPlsWei?: bigint,
+  sellPct?: number,
+  trigger: Trigger,
+  value: number
 }) {
   const info = getDb().prepare(`
     INSERT INTO limit_orders
@@ -244,13 +243,13 @@ export function addLimitOrder(o: {
   return Number(info.lastInsertRowid);
 }
 
-export function listLimitOrders(telegramId: number): LimitOrderRow[] {
+export function listLimitOrders(telegramId: number) {
   return getDb()
     .prepare(`SELECT * FROM limit_orders WHERE telegram_id = ? ORDER BY id DESC`)
     .all(telegramId) as any as LimitOrderRow[];
 }
 
-export function getOpenLimitOrders(): LimitOrderRow[] {
+export function getOpenLimitOrders() {
   return getDb()
     .prepare(`SELECT * FROM limit_orders WHERE status = 'OPEN'`)
     .all() as any as LimitOrderRow[];
