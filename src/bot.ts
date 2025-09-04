@@ -106,7 +106,8 @@ async function upsertPinnedPosition(ctx: any) {
     const existing = pinnedPosMsg.get(uid);
     if (existing) {
       try {
-        await bot.telegram.editMessageText(chatId, existing, undefined as any, text, { parse_mode: 'Markdown', ...kb } as any);
+        // FIX: use 4-arg overload (no inlineMessageId) to avoid string|null type issues
+        await bot.telegram.editMessageText(chatId, existing, text, { parse_mode: 'Markdown', ...kb } as any);
         await bot.telegram.pinChatMessage(chatId, existing, { disable_notification: true } as any);
         return;
       } catch { /* if deleted, send a new one */ }
@@ -433,10 +434,19 @@ bot.action('pair_info', async (ctx) => {
   return ctx.reply(`Base pair is WPLS:\n${W}`);
 });
 
+/* Toggle wallet in selection set */
+bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const id = Number(ctx.match[1]);
+  const s = getSelSet(ctx.from.id);
+  if (s.has(id)) s.delete(id); else s.add(id);
+  return renderBuyMenu(ctx);
+});
+
 /* ----- Tx notifications: pending -> success (delete pending) ----- */
 async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string) {
   if (!hash) return;
-  // Pending message: ONLY the simplified text (no link)
+  // Pending: simple tick only
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
     await provider.waitForTransaction(hash);
@@ -445,11 +455,11 @@ async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: str
     const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
     await ctx.reply(`✅ ${title} — ${link}`);
   } catch {
-    // leave pending if it fails/times out (optional: edit to failed)
+    // leave pending if it fails/times out
   }
 }
 
-/* ---------- BUY EXEC ---------- */
+/* Buy using selected wallets (or active) + auto-approve + record entry + pin card */
 bot.action('buy_exec', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
@@ -482,15 +492,13 @@ bot.action('buy_exec', async (ctx) => {
     }
   }
 
-  // Update/Pin position card for this token
   await upsertPinnedPosition(ctx);
   return renderBuyMenu(ctx);
 });
 
 bot.action('buy_exec_all', async (ctx) => {
   await ctx.answerCbQuery();
-  const rows = listWallets(ctx.from.id);
-  const u = getUserSettings(ctx.from.id);
+  const rows = listWallets(ctx.from.id); const u = getUserSettings(ctx.from.id);
   if (!rows.length) return showMenu(ctx, 'No wallets.', buyMenu(u?.gas_pct ?? 0));
   if (!u?.token_address) return showMenu(ctx, 'Set token first.', buyMenu(u?.gas_pct ?? 0));
 
@@ -513,7 +521,6 @@ bot.action('buy_exec_all', async (ctx) => {
       await ctx.reply(`❌ Buy failed for ${short(row.address)}: ${e.message}`);
     }
   }
-
   await upsertPinnedPosition(ctx);
   return renderBuyMenu(ctx);
 });
@@ -614,13 +621,10 @@ async function renderSellMenu(ctx: any) {
         })()
       ]);
 
-      // balance
       balLine = `• *Balance:* ${fmtDec(ethers.formatUnits(bal, dec))} ${metaSymbol}`;
 
-      // estimate out
       if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  _(Route: ${best.route.key})_`;
 
-      // P&L (decimals-aware)
       const avg = getAvgEntry(ctx.from.id, u.token_address, dec);
       if (avg && best) {
         const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
@@ -981,7 +985,6 @@ async function checkLimitsOnce() {
   const rows = getOpenLimitOrders();
   if (!rows.length) return;
 
-  // cache shared prices
   const usd = await plsUSD();
 
   for (const r of rows) {
