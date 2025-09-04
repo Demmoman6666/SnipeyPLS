@@ -1,42 +1,10 @@
-// src/dex.ts
 import { ethers } from 'ethers';
 import { getConfig } from './config.js';
 
 const cfg = getConfig();
 
-/* ---------------- Provider (multi-RPC racing) ---------------- */
-
-function parseFallbacks(): string[] {
-  const raw =
-    process.env.RPC_FALLBACKS ??
-    process.env.rpc_fallback ?? // support your existing env name too
-    '';
-  return raw
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
-}
-
-function mkJsonRpc(url: string) {
-  return new ethers.JsonRpcProvider(url, cfg.CHAIN_ID);
-}
-
-function mkRacingProvider(): ethers.Provider {
-  const urls = [cfg.RPC_URL, ...parseFallbacks()].filter(Boolean);
-  if (urls.length <= 1) return mkJsonRpc(urls[0]!);
-
-  const configs = urls.map((u, i) => ({
-    provider: mkJsonRpc(u),
-    priority: i + 1,
-    weight: 1,
-    stallTimeout: 900, // 700–1200ms is a good range
-  }));
-
-  // quorum = 1 (first healthy answer wins)
-  return new ethers.FallbackProvider(configs, 1);
-}
-
-export const provider: ethers.Provider = mkRacingProvider();
+// -------- Provider (single; keep-alive is handled by undici in boot.ts) --------
+export const provider = new ethers.JsonRpcProvider(cfg.RPC_URL, cfg.CHAIN_ID);
 
 /* ---------------- ABIs ---------------- */
 
@@ -49,13 +17,13 @@ const V2_ROUTER_ABI = [
 
 // V3 Quoter & Router (UniswapV3-style)
 const V3_QUOTER_ABI = [
-  'function quoteExactInputSingle(address tokenIn,address tokenOut,uint24 fee,uint256 amountIn,uint160 sqrtPriceLimitX96) returns (uint256 amountOut)',
+  'function quoteExactInputSingle(address tokenIn,address tokenOut,uint24 fee,uint256 amountIn,uint160 sqrtPriceLimitX96) returns (uint256 amountOut)'
 ];
 const V3_ROUTER_ABI = [
   'function exactInputSingle(tuple(address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 deadline,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)',
 ];
 
-// ERC20 (+ bytes32 fallbacks)
+// ERC20
 const ERC20_ABI = [
   'function decimals() view returns (uint8)',
   'function symbol() view returns (string)',
@@ -76,7 +44,6 @@ export type GasOpts = {
   maxFeePerGas: bigint;
   gasLimit: bigint;
 };
-
 const now = () => Math.floor(Date.now() / 1000);
 const deadline = () => now() + 600;
 
@@ -88,28 +55,59 @@ function ov(g: GasOpts, extra?: Partial<GasOpts>) {
     gasLimit: merged.gasLimit,
   };
 }
+const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
+/* ---------------- Token metadata (robust + cached) ---------------- */
+
+const metaCache = new Map<string, { decimals: number; symbol: string; name: string }>();
 
 export function erc20(address: string, signer?: ethers.Signer) {
   return new ethers.Contract(address, ERC20_ABI, signer ?? provider);
 }
 
 export async function tokenMeta(address: string): Promise<{ decimals: number; symbol: string; name: string }> {
+  const key = address.toLowerCase();
+  const cached = metaCache.get(key);
+  if (cached) return cached;
+
   const c = new ethers.Contract(address, ERC20_ABI, provider);
+
+  // decimals
   const decimals = await c.decimals().catch(() => 18);
 
-  let symbol = await c.symbol().catch(async () => {
-    const b = new ethers.Contract(address, ERC20_BYTES32_ABI, provider);
-    const raw = await b.symbol().catch(() => null);
-    try { return raw ? ethers.decodeBytes32String(raw as string) : 'TOKEN'; } catch { return 'TOKEN'; }
-  });
+  // symbol (string → bytes32 → fallback)
+  let symbol: string | undefined;
+  try {
+    const s: string = await c.symbol();
+    if (s && typeof s === 'string' && s.length <= 24) symbol = s;
+  } catch {
+    try {
+      const b = new ethers.Contract(address, ERC20_BYTES32_ABI, provider);
+      const raw: string = await b.symbol();
+      symbol = raw ? ethers.decodeBytes32String(raw) : undefined;
+    } catch { /* ignore */ }
+  }
 
-  let name = await c.name().catch(async () => {
-    const b = new ethers.Contract(address, ERC20_BYTES32_ABI, provider);
-    const raw = await b.name().catch(() => null);
-    try { return raw ? ethers.decodeBytes32String(raw as string) : 'Token'; } catch { return 'Token'; }
-  });
+  // name (string → bytes32 → fallback)
+  let name: string | undefined;
+  try {
+    const n: string = await c.name();
+    if (n && typeof n === 'string' && n.length <= 64) name = n;
+  } catch {
+    try {
+      const b = new ethers.Contract(address, ERC20_BYTES32_ABI, provider);
+      const raw: string = await b.name();
+      name = raw ? ethers.decodeBytes32String(raw) : undefined;
+    } catch { /* ignore */ }
+  }
 
-  return { decimals, symbol, name };
+  // sane fallbacks
+  if (!symbol || /^(token)$/i.test(symbol)) symbol = name || 'TOKEN';
+  if (!name) name = symbol || 'Token';
+
+  const meta = { decimals, symbol, name };
+  metaCache.set(key, meta);
+  return meta;
 }
 
 /* ---------------- Route discovery ---------------- */
@@ -130,14 +128,14 @@ function v3(key: string, router?: string, quoter?: string, fee?: number): RouteV
 function candidateRoutes(): Route[] {
   const routes: (Route | null)[] = [];
 
-  // V2 DEXes
-  routes.push(v2('PULSEX_V1', process.env.PULSEX_V1_ROUTER));         // 0x98bf...Acc02 (mainnet)
-  routes.push(v2('PULSEX_V2', process.env.PULSEX_V2_ROUTER ?? process.env.ROUTER_ADDRESS)); // keep your existing V2
-  routes.push(v2('9MM_V2', process.env.NINEMM_V2_ROUTER));             // optional
-  routes.push(v2('9INCH_V2', process.env.NINEINCH_V2_ROUTER));         // optional
+  // V2
+  routes.push(v2('PULSEX_V1', process.env.PULSEX_V1_ROUTER));
+  routes.push(v2('PULSEX_V2', process.env.ROUTER_ADDRESS)); // your legacy PLSX V2 env
+  routes.push(v2('9MM_V2', process.env.NINEMM_V2_ROUTER));
+  routes.push(v2('9INCH_V2', process.env.NINEINCH_V2_ROUTER));
 
-  // V3 (only if both router+quoter are provided)
-  const v3Fees = [500, 3000, 10000]; // 0.05%, 0.3%, 1%
+  // V3 (only if router+quoter present; we’ll stick to single-hop)
+  const v3Fees = [500, 3000, 10000];
   if (process.env.NINEMM_V3_ROUTER && process.env.NINEMM_V3_QUOTER) {
     for (const fee of v3Fees) routes.push(v3('9MM_V3', process.env.NINEMM_V3_ROUTER, process.env.NINEMM_V3_QUOTER, fee));
   }
@@ -148,20 +146,66 @@ function candidateRoutes(): Route[] {
   return routes.filter(Boolean) as Route[];
 }
 
-/* ---------------- Quoting ---------------- */
+/* ---------------- Quoting (multi-path for V2) ---------------- */
 
-async function quoteV2(amountIn: bigint, tokenIn: string, tokenOut: string, routerAddr: string): Promise<bigint | null> {
+const WPLS = process.env.WPLS_ADDRESS!;
+const STABLES = (process.env.STABLE_ADDRESS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+const PLSX = process.env.PLSX_ADDRESS?.trim();
+
+/** Build common V2 paths between two tokens. */
+function v2Paths(tokenIn: string, tokenOut: string): string[][] {
+  const paths: string[][] = [];
+  paths.push([tokenIn, tokenOut]); // direct
+  for (const s of STABLES) {
+    if (!eq(tokenIn, s) && !eq(tokenOut, s)) paths.push([tokenIn, s, tokenOut]);
+  }
+  if (PLSX && !eq(tokenIn, PLSX) && !eq(tokenOut, PLSX)) {
+    paths.push([tokenIn, PLSX, tokenOut]);
+  }
+  // de-dup
+  const seen = new Set<string>();
+  return paths.filter(p => {
+    const k = p.join('>');
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+async function quoteV2Best(
+  amountIn: bigint,
+  tokenIn: string,
+  tokenOut: string,
+  routerAddr: string
+): Promise<{ amountOut: bigint; path: string[] } | null> {
   try {
     const router = new ethers.Contract(routerAddr, V2_ROUTER_ABI, provider);
-    const path = [tokenIn, tokenOut];
-    const amounts = (await router.getAmountsOut(amountIn, path)) as unknown as bigint[];
-    return amounts?.[amounts.length - 1] ?? null;
+    let best: { amountOut: bigint; path: string[] } | null = null;
+    for (const path of v2Paths(tokenIn, tokenOut)) {
+      try {
+        const amts = (await router.getAmountsOut(amountIn, path)) as unknown as bigint[];
+        const out = amts?.[amts.length - 1];
+        if (out && (best == null || out > best.amountOut)) best = { amountOut: out, path };
+      } catch {
+        /* ignore this path */
+      }
+    }
+    return best;
   } catch {
     return null;
   }
 }
 
-async function quoteV3(amountIn: bigint, tokenIn: string, tokenOut: string, fee: number, quoterAddr: string): Promise<bigint | null> {
+async function quoteV3(
+  amountIn: bigint,
+  tokenIn: string,
+  tokenOut: string,
+  fee: number,
+  quoterAddr: string
+): Promise<bigint | null> {
   try {
     const quoter = new ethers.Contract(quoterAddr, V3_QUOTER_ABI, provider);
     const out = (await quoter.quoteExactInputSingle(tokenIn, tokenOut, fee, amountIn, 0)) as unknown as bigint;
@@ -174,20 +218,20 @@ async function quoteV3(amountIn: bigint, tokenIn: string, tokenOut: string, fee:
 export type BestQuote = {
   route: Route;
   amountOut: bigint;
+  path?: string[]; // for V2
 };
 
 /** Best quote for PLS→TOKEN (buy). */
 export async function bestQuoteBuy(amountInWei: bigint, tokenOut: string): Promise<BestQuote | null> {
-  const W = process.env.WPLS_ADDRESS!;
   const routes = candidateRoutes();
   if (!routes.length) return null;
 
   const results = await Promise.all(routes.map(async (r) => {
     if (r.kind === 'v2') {
-      const out = await quoteV2(amountInWei, W, tokenOut, r.router);
-      return out ? ({ route: r, amountOut: out } as BestQuote) : null;
+      const q = await quoteV2Best(amountInWei, WPLS, tokenOut, r.router);
+      return q ? ({ route: r, amountOut: q.amountOut, path: q.path } as BestQuote) : null;
     } else {
-      const out = await quoteV3(amountInWei, W, tokenOut, r.fee, r.quoter);
+      const out = await quoteV3(amountInWei, WPLS, tokenOut, r.fee, r.quoter);
       return out ? ({ route: r, amountOut: out } as BestQuote) : null;
     }
   }));
@@ -200,16 +244,15 @@ export async function bestQuoteBuy(amountInWei: bigint, tokenOut: string): Promi
 
 /** Best quote for TOKEN→PLS (sell). */
 export async function bestQuoteSell(amountInWei: bigint, tokenIn: string): Promise<BestQuote | null> {
-  const W = process.env.WPLS_ADDRESS!;
   const routes = candidateRoutes();
   if (!routes.length) return null;
 
   const results = await Promise.all(routes.map(async (r) => {
     if (r.kind === 'v2') {
-      const out = await quoteV2(amountInWei, tokenIn, W, r.router);
-      return out ? ({ route: r, amountOut: out } as BestQuote) : null;
+      const q = await quoteV2Best(amountInWei, tokenIn, WPLS, r.router);
+      return q ? ({ route: r, amountOut: q.amountOut, path: q.path } as BestQuote) : null;
     } else {
-      const out = await quoteV3(amountInWei, tokenIn, W, r.fee, r.quoter);
+      const out = await quoteV3(amountInWei, tokenIn, WPLS, r.fee, r.quoter);
       return out ? ({ route: r, amountOut: out } as BestQuote) : null;
     }
   }));
@@ -218,23 +261,6 @@ export async function bestQuoteSell(amountInWei: bigint, tokenIn: string): Promi
   if (!valid.length) return null;
   valid.sort((a, b) => (a.amountOut > b.amountOut ? -1 : 1));
   return valid[0]!;
-}
-
-/** Optional: quick debug of route quotes */
-export async function debugQuotesBuy(amountInWei: bigint, tokenOut: string) {
-  const W = process.env.WPLS_ADDRESS!;
-  const routes = candidateRoutes();
-  const out: Array<{ route: string; amountOut?: string }> = [];
-  for (const r of routes) {
-    let amt: bigint | null = null;
-    try {
-      amt = r.kind === 'v2'
-        ? await quoteV2(amountInWei, W, tokenOut, r.router)
-        : await quoteV3(amountInWei, W, tokenOut, r.fee, (r as RouteV3).quoter);
-    } catch {}
-    out.push({ route: r.key, amountOut: amt ? amt.toString() : undefined });
-  }
-  return out;
 }
 
 /* ---------------- Swaps (auto-route) ---------------- */
@@ -257,7 +283,7 @@ export async function buyAutoRoute(
 
   if (best.route.kind === 'v2') {
     const router = new ethers.Contract(best.route.router, V2_ROUTER_ABI, s);
-    const path = [process.env.WPLS_ADDRESS!, tokenOut];
+    const path = best.path && best.path.length >= 2 ? best.path : [WPLS, tokenOut];
     const tx = await router.swapExactETHForTokensSupportingFeeOnTransferTokens(
       minOutWei, path, me, deadline(), { ...ov(gas), value: amountInWei }
     );
@@ -265,7 +291,7 @@ export async function buyAutoRoute(
   } else {
     const router = new ethers.Contract(best.route.router, V3_ROUTER_ABI, s);
     const params = {
-      tokenIn: process.env.WPLS_ADDRESS!,
+      tokenIn: WPLS,
       tokenOut,
       fee: best.route.fee,
       recipient: me,
@@ -293,7 +319,7 @@ export async function sellAutoRoute(
 
   if (best.route.kind === 'v2') {
     const router = new ethers.Contract(best.route.router, V2_ROUTER_ABI, s);
-    const path = [tokenIn, process.env.WPLS_ADDRESS!];
+    const path = best.path && best.path.length >= 2 ? best.path : [tokenIn, WPLS];
     const tx = await router.swapExactTokensForETHSupportingFeeOnTransferTokens(
       amountInWei, minOutWei, path, me, deadline(), ov(gas)
     );
@@ -302,7 +328,7 @@ export async function sellAutoRoute(
     const router = new ethers.Contract(best.route.router, V3_ROUTER_ABI, s);
     const params = {
       tokenIn,
-      tokenOut: process.env.WPLS_ADDRESS!,
+      tokenOut: WPLS,
       fee: best.route.fee,
       recipient: me,
       deadline: BigInt(deadline()),
