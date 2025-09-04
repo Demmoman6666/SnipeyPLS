@@ -69,7 +69,7 @@ async function upsertPinnedPosition(ctx: any) {
   if (!u?.token_address || !w) return;
 
   // always pass a definite chat id
-  const chatId = (ctx.chat?.id ?? ctx.from?.id) as unknown as (number | string);
+  const chatId: number | string = (ctx.chat?.id ?? ctx.from?.id) as number | string;
 
   try {
     const meta = await tokenMeta(u.token_address);
@@ -103,26 +103,23 @@ async function upsertPinnedPosition(ctx: any) {
       [Markup.button.callback('🟢 Buy More', 'pin_buy'), Markup.button.callback('🔴 Sell', 'pin_sell')],
     ]);
 
-const existing = pinnedPosMsg.get(uid);
-if (existing) {
-  try {
-    // ✅ Use the 4-arg overload: (chatId, messageId, text, extra)
-    await bot.telegram.editMessageText(
-      chatId as unknown as number | string,
-      existing,
-      text,
-      { parse_mode: 'Markdown', ...kb } as any
-    );
-    await bot.telegram.pinChatMessage(
-      chatId as unknown as number | string,
-      existing,
-      { disable_notification: true } as any
-    );
-    return;
-  } catch {
-    // if it was deleted, fall through and send a new one
-  }
-}
+    const existing = pinnedPosMsg.get(uid);
+    if (existing) {
+      try {
+        // ✅ Correct 5-arg overload: (chatId, messageId, inlineMessageId, text, extra)
+        await bot.telegram.editMessageText(
+          chatId,
+          existing,
+          undefined,
+          text,
+          { parse_mode: 'Markdown', ...kb } as any
+        );
+        await bot.telegram.pinChatMessage(chatId, existing, { disable_notification: true } as any);
+        return;
+      } catch {
+        // if it was deleted, fall through and send a new one
+      }
+    }
 
     const m = await bot.telegram.sendMessage(chatId, text, { parse_mode: 'Markdown', ...kb } as any);
     pinnedPosMsg.set(uid, m.message_id);
