@@ -68,6 +68,9 @@ async function upsertPinnedPosition(ctx: any) {
   const w = getActiveWallet(uid);
   if (!u?.token_address || !w) return;
 
+  // ✅ Normalize ChatId so it’s never null/undefined for Telegram API calls
+  const chatId = ((ctx.chat?.id ?? ctx.from?.id) as unknown) as (string | number);
+
   try {
     const meta = await tokenMeta(u.token_address);
     const decimals = meta.decimals ?? 18;
@@ -103,19 +106,21 @@ async function upsertPinnedPosition(ctx: any) {
     const existing = pinnedPosMsg.get(uid);
     if (existing) {
       try {
-        await bot.telegram.editMessageText(ctx.chat.id, existing, undefined, text, { parse_mode: 'Markdown', ...kb });
-        // Ensure it's pinned (re-pin is ok)
-        await bot.telegram.pinChatMessage(ctx.chat.id, existing, { disable_notification: true } as any);
+        await bot.telegram.editMessageText(chatId, existing, undefined as any, text, { parse_mode: 'Markdown', ...kb } as any);
+        await bot.telegram.pinChatMessage(chatId, existing, { disable_notification: true } as any);
         return;
-      } catch { /* if edit failed (deleted), fallthrough to new */ }
+      } catch {
+        // if it was deleted, fall through and send a new one
+      }
     }
 
-    const m = await ctx.reply(text, { parse_mode: 'Markdown', ...kb });
+    const m = await bot.telegram.sendMessage(chatId, text, { parse_mode: 'Markdown', ...kb } as any);
     pinnedPosMsg.set(uid, m.message_id);
-    try { await bot.telegram.pinChatMessage(ctx.chat.id, m.message_id, { disable_notification: true } as any); } catch {}
-  } catch { /* ignore */ }
+    try { await bot.telegram.pinChatMessage(chatId, m.message_id, { disable_notification: true } as any); } catch {}
+  } catch {
+    /* ignore */
+  }
 }
-
 /* ---------- utilities ---------- */
 const BAL_TIMEOUT_MS = 8000;
 function withTimeout<T>(p: Promise<T>, ms = BAL_TIMEOUT_MS): Promise<T> {
