@@ -2,7 +2,7 @@
 import './boot.js';
 import { Telegraf, Markup } from 'telegraf';
 import { getConfig } from './config.js';
-import { mainMenu, buyMenu, buyGasPctMenu, sellMenu, settingsMenu } from './keyboards.js';
+import { mainMenu, buyMenu, buyGasPctMenu, sellMenu, settingsMenu, limitTriggerMenu } from './keyboards.js';
 import {
   listWallets,
   createWallet,
@@ -36,7 +36,16 @@ import {
   pingRpc,
   approveAllRouters,
 } from './dex.js';
-import { recordTrade, getAvgEntry } from './db.js';
+import {
+  recordTrade,
+  getAvgEntry,
+  addLimitOrder,
+  listLimitOrders,
+  getOpenLimitOrders,
+  cancelLimitOrder,
+  markLimitFilled,
+  markLimitError,
+} from './db.js';
 
 const cfg = getConfig();
 export const bot = new Telegraf(cfg.BOT_TOKEN, { handlerTimeout: 60_000 });
@@ -48,16 +57,7 @@ const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const fmtDec = (s: string) => { const [i, d] = s.split('.'); return d ? `${fmtInt(i)}.${d}` : fmtInt(i); };
 const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
-/* pretty numbers for UI */
-function trimDecStr(s: string, max = 6) {
-  const [i, d = ''] = s.split('.');
-  const d2 = d.slice(0, max).replace(/0+$/, '');
-  return d2 ? `${fmtInt(i)}.${d2}` : fmtInt(i);
-}
-function fmtUnits(wei: bigint, dec = 18, max = 6) {
-  return trimDecStr(ethers.formatUnits(wei, dec), max);
-}
-const NF2 = new Intl.NumberFormat('en-GB', { maximumFractionDigits: 2 });
+const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
 function canEdit(ctx: any) { return Boolean(ctx?.callbackQuery?.message?.message_id); }
 async function sendOrEdit(ctx: any, text: string, extra?: any) {
@@ -120,7 +120,19 @@ function chunk<T>(arr: T[], size = 6): T[][] {
   return out;
 }
 
-/* pending prompts */
+/* --- parsing helpers --- */
+function parseNumHuman(s: string): number | null {
+  const t = s.trim().toLowerCase().replace(/[, ]/g, '');
+  const m = t.match(/^([0-9]*\.?[0-9]+)\s*([kmb])?$/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n)) return null;
+  const suf = m[2];
+  const mul = suf === 'k' ? 1e3 : suf === 'm' ? 1e6 : suf === 'b' ? 1e9 : 1;
+  return n * mul;
+}
+
+/* ---------- pending prompts ---------- */
 type Pending =
   | { type: 'set_amount' }
   | { type: 'set_token' }
@@ -130,8 +142,22 @@ type Pending =
   | { type: 'set_gl' }
   | { type: 'set_gb' }
   | { type: 'set_defpct' }
-  | { type: 'auto_amt' };
+  | { type: 'auto_amt' }
+  | { type: 'lb_amt' }                    // limit buy amount (PLS)
+  | { type: 'ls_pct' }                    // limit sell percent (0..100)
+  | { type: 'limit_value' };              // generic trigger value input
 const pending = new Map<number, Pending>();
+
+/* store the draft limit order while building */
+type Draft = {
+  side: 'BUY' | 'SELL';
+  walletId: number;
+  token: string;
+  amountPlsWei?: bigint;
+  sellPct?: number;
+  trigger?: 'PLS' | 'USD' | 'MCAP' | 'MULT';
+};
+const draft = new Map<number, Draft>();
 
 /* ---------- /start ---------- */
 bot.start(async (ctx) => { await ctx.reply('Main Menu', mainMenu()); });
@@ -204,7 +230,6 @@ async function renderWalletsList(ctx: any) {
     balances.some(b => !b.ok) ? '\n⚠️ Some balances didn’t load from the RPC. Use /rpc_check.' : ''
   ].filter(Boolean);
 
-  // Row: [Manage, "<X PLS>" (unclickable)]
   const kb = rows.map((w, i) => [
     Markup.button.callback(`${w.id}. ${short(w.address)}`, `wallet_manage:${w.id}`),
     Markup.button.callback(`${fmtPls(balances[i].value)} PLS`, 'noop'),
@@ -428,12 +453,9 @@ bot.action('buy_exec', async (ctx) => {
       const hash = (r as any)?.hash;
       res.push(`✅ ${w.name ?? ''} ${w.address.slice(0,6)}…${w.address.slice(-4)} → ${hash ?? '(pending)'}${hash ? `  ${otter(hash)}` : ''}`);
 
-      // record BUY trade for PnL (use quote amounts)
       if (preQuote?.amountOut) {
         recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
       }
-
-      // background infinite approve for all routers (skip WPLS)
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
       }
@@ -474,81 +496,132 @@ bot.action('buy_exec_all', async (ctx) => {
   return renderBuyMenu(ctx);
 });
 
-/* ---------- SELL MENU ---------- */
+/* ---------- LIMIT ORDERS: create/list/cancel ---------- */
+bot.action('limit_buy', async (ctx) => {
+  await ctx.answerCbQuery();
+  const u = getUserSettings(ctx.from.id);
+  const w = getActiveWallet(ctx.from.id);
+  if (!u?.token_address) return sendOrEdit(ctx, 'Set token first.', buyMenu(u?.gas_pct ?? 0));
+  if (!w) return sendOrEdit(ctx, 'Select a wallet first.', buyMenu(u?.gas_pct ?? 0));
+  draft.set(ctx.from.id, { side: 'BUY', walletId: w.id, token: u.token_address });
+  pending.set(ctx.from.id, { type: 'lb_amt' });
+  return sendOrEdit(ctx, 'Send *limit buy amount* in PLS (e.g., `0.5`, `1.2`):', { parse_mode: 'Markdown' });
+});
+
+bot.action('limit_sell', async (ctx) => {
+  await ctx.answerCbQuery();
+  const u = getUserSettings(ctx.from.id);
+  const w = getActiveWallet(ctx.from.id);
+  if (!u?.token_address) return sendOrEdit(ctx, 'Set token first.', sellMenu());
+  if (!w) return sendOrEdit(ctx, 'Select a wallet first.', sellMenu());
+  draft.set(ctx.from.id, { side: 'SELL', walletId: w.id, token: u.token_address });
+  pending.set(ctx.from.id, { type: 'ls_pct' });
+  return sendOrEdit(ctx, 'What *percent* of your token to sell when triggered? (e.g., `25`, `50`, `100`)', { parse_mode: 'Markdown' });
+});
+
+bot.action(/^limit_trig:(PLS|USD|MCAP|MULT)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const d = draft.get(ctx.from.id);
+  if (!d) return sendOrEdit(ctx, 'Start a Limit Buy/Sell first.', mainMenu());
+  const trig = ctx.match[1] as 'PLS'|'USD'|'MCAP'|'MULT';
+  d.trigger = trig;
+  draft.set(ctx.from.id, d);
+
+  const ask = trig === 'PLS' ? 'Enter target **PLS price** per token (e.g., `0.0035`):'
+            : trig === 'USD' ? 'Enter target **USD price** per token (supports `k`/`m`, e.g., `0.0012`):'
+            : trig === 'MCAP' ? 'Enter target **Market Cap in USD** (supports `k`/`m`, e.g., `100k`, `1m`):'
+            : 'Enter **multiplier** (e.g., `2` for 2× entry price):';
+  pending.set(ctx.from.id, { type: 'limit_value' });
+  return sendOrEdit(ctx, ask, { parse_mode: 'Markdown' });
+});
+
+bot.action('limit_list', async (ctx) => {
+  await ctx.answerCbQuery();
+  const rows = listLimitOrders(ctx.from.id);
+  if (!rows.length) return sendOrEdit(ctx, 'No limit orders yet.');
+  const lines = rows.map(r => {
+    const base = `#${r.id} ${r.side} ${short(r.token_address)}  ${r.trigger_type}=${NF.format(r.trigger_value)}  [${r.status}]`;
+    if (r.side === 'BUY' && r.amount_pls_wei) return `${base}  amt=${fmtDec(ethers.formatEther(BigInt(r.amount_pls_wei)))} PLS`;
+    if (r.side === 'SELL' && r.sell_pct != null) return `${base}  ${r.sell_pct}%`;
+    return base;
+  });
+  const kb = rows
+    .filter(r => r.status === 'OPEN')
+    .map(r => [Markup.button.callback(`❌ Cancel #${r.id}`, `limit_cancel:${r.id}`)]);
+  kb.push([Markup.button.callback('⬅️ Back', 'main_back')]);
+  return sendOrEdit(ctx, lines.join('\n'), Markup.inlineKeyboard(kb));
+});
+
+bot.action(/^limit_cancel:(\d+)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const id = Number(ctx.match[1]);
+  const changed = cancelLimitOrder(ctx.from.id, id);
+  return sendOrEdit(ctx, changed ? `Limit #${id} cancelled.` : `Couldn’t cancel #${id}.`, mainMenu());
+});
+
+/* ---------- SELL MENU (with tidy PnL block) ---------- */
 async function renderSellMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
   const w = getActiveWallet(ctx.from.id);
+  const pct = u?.sell_pct ?? 100;
+  let balLine = 'Token balance: —';
+  let outLine = 'Amount out: —';
+  let pnlLine = '';
+  let infoLine = '';
+  let entryLine = '';
 
-  const lines: string[] = [
-    '🔴 SELL',
-    '',
-    `👛 Wallet: ${w ? short(w.address) : '—'}`,
-    `🪙 Token: ${u?.token_address ? short(u.token_address) : '—'}`,
-  ];
+  if (w && u?.token_address) {
+    try {
+      const meta = await tokenMeta(u.token_address);
+      const dec = meta.decimals ?? 18;
+      const c = erc20(u.token_address);
+      const [bal, fee, block] = await Promise.all([
+        c.balanceOf(w.address),
+        provider.getFeeData(),
+        provider.getBlockNumber(),
+      ]);
 
-  if (!w || !u?.token_address) {
-    lines.push('', 'Set a wallet and token first.');
-    return sendOrEdit(ctx, lines.join('\n'), sellMenu());
-  }
+      const gasGwei = Number(ethers.formatUnits(fee.gasPrice ?? fee.maxFeePerGas ?? 0n, 'gwei'));
+      infoLine = `Block: ${fmtInt(String(block))}  |  Gas: ${NF.format(gasGwei)} gwei`;
 
-  try {
-    const meta = await tokenMeta(u.token_address);
-    const dec = meta.decimals ?? 18;
-    const symbol = meta.symbol || 'TOKEN';
+      balLine = `Token balance: ${fmtDec(ethers.formatUnits(bal, dec))} ${meta.symbol || 'TOKEN'}`;
+      const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
+      if (amountIn > 0n) {
+        const best = await bestQuoteSell(amountIn, u.token_address);
+        if (best) {
+          outLine = `Amount out: ${fmtPls(best.amountOut)} PLS   ·   Route: ${best.route.key}`;
 
-    const c = erc20(u.token_address);
-    const [bal, fee, block] = await Promise.all([
-      c.balanceOf(w.address),
-      provider.getFeeData(),
-      provider.getBlockNumber(),
-    ]);
-
-    const gasNumGwei = Number(ethers.formatUnits(fee.gasPrice ?? fee.maxFeePerGas ?? 0n, 'gwei'));
-    const gasNice = Number.isFinite(gasNumGwei) ? NF.format(gasNumGwei) : '—';
-
-    const pct = u?.sell_pct ?? 100;
-    const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
-
-    lines.push(
-      `🎯 Sell: ${NF2.format(pct)}%`,
-      `💰 Balance: ${fmtUnits(bal, dec)} ${symbol}`,
-    );
-
-    if (amountIn > 0n) {
-      const best = await bestQuoteSell(amountIn, u.token_address);
-      if (best) {
-        const receivePls = trimDecStr(ethers.formatEther(best.amountOut), 6);
-        lines.push(
-          `➡️ You receive: ${receivePls} PLS`,
-          `🔁 Route: ${best.route.key}`
-        );
-
-        const avg = getAvgEntry(ctx.from.id, u.token_address);
-        if (avg && avg.avgPlsPerToken > 0) {
-          const amtTokNum = Number(ethers.formatUnits(amountIn, dec));
-          const curPlsNum = Number(ethers.formatEther(best.amountOut));
-          const curAvg = amtTokNum > 0 ? curPlsNum / amtTokNum : 0;
-          const pnlPls = curPlsNum - (avg.avgPlsPerToken * amtTokNum);
-          const pnlPct = avg.avgPlsPerToken ? ((curAvg / avg.avgPlsPerToken) - 1) * 100 : 0;
-          const up = pnlPls >= 0;
-          lines.push(`📊 PnL: ${up ? '🟢' : '🔴'} ${NF.format(Math.abs(pnlPls))} PLS  (${NF2.format(pnlPct)}%)`);
-          lines.push(`🧾 Entry avg: ${NF.format(avg.avgPlsPerToken)} PLS/token  ·  Total PLS in: ${fmtDec(ethers.formatEther(avg.totalPlsIn))}`);
-        } else {
-          lines.push('📊 PnL: — (no entry recorded yet)');
+          const avg = getAvgEntry(ctx.from.id, u.token_address);
+          if (avg && avg.avgPlsPerToken > 0) {
+            const amtTok = Number(ethers.formatUnits(amountIn, dec));
+            const curPls = Number(ethers.formatEther(best.amountOut));
+            const curAvg = curPls / Math.max(amtTok, 1e-18);
+            const pnlPls = curPls - (avg.avgPlsPerToken * amtTok);
+            const pnlPct = (curAvg / avg.avgPlsPerToken - 1) * 100;
+            pnlLine = `Net PnL: ${pnlPls >= 0 ? '🟢' : '🔴'} ${NF.format(pnlPls)} PLS  (${NF.format(pnlPct)}%)`;
+            entryLine = `Entry avg: ${NF.format(avg.avgPlsPerToken)} PLS/token  ·  Total PLS in: ${fmtDec(ethers.formatEther(avg.totalPlsIn))}`;
+          } else {
+            pnlLine = `Net PnL: — (no entry recorded yet)`;
+          }
         }
       } else {
-        lines.push('➡️ Quote unavailable (no route)');
+        outLine = 'Amount out: 0';
       }
-    } else {
-      lines.push('➡️ Amount to sell: 0');
-    }
-
-    lines.push(`⛓ Block: ${fmtInt(String(block))}  |  ⛽ Gas: ${gasNice} gwei`);
-  } catch {
-    lines.push('', 'Could not fetch balances/quotes right now.');
+    } catch { /* keep defaults */ }
   }
 
-  return sendOrEdit(ctx, lines.join('\n'), sellMenu());
+  const lines = [
+    'SELL MENU',
+    '',
+    `Wallet: ${w ? short(w.address) : '— (Select)'} | Token: ${u?.token_address ? short(u.token_address) : '—'}`,
+    `Sell percent: ${NF.format(pct)}%`,
+    balLine,
+    outLine,
+    entryLine,
+    pnlLine,
+    infoLine,
+  ].filter(Boolean).join('\n');
+  return sendOrEdit(ctx, lines, sellMenu());
 }
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
@@ -592,7 +665,6 @@ bot.action('sell_exec', async (ctx) => {
     const hash = (r as any)?.hash;
 
     if (q?.amountOut) {
-      // SELL recorded as PLS-in received, token-out spent
       recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
     }
 
@@ -683,7 +755,7 @@ bot.command('balances', async (ctx) => {
   return ctx.reply(`Wallet ${addr}\n\nPLS: ${fmtPls(plsBal)}\nToken: ${token}`);
 });
 
-/* ---------- TEXT: prompts + auto-buy ---------- */
+/* ---------- TEXT: prompts (including limit order building) ---------- */
 bot.on('text', async (ctx, next) => {
   const p = pending.get(ctx.from.id);
   if (p) {
@@ -764,15 +836,59 @@ bot.on('text', async (ctx, next) => {
       pending.delete(ctx.from.id); return renderSettings(ctx);
     }
 
+    /* limit order building */
+    if (p.type === 'lb_amt') {
+      const v = Number(msg);
+      if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number of PLS (e.g., 0.5).');
+      const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Buy.'); }
+      d.amountPlsWei = ethers.parseEther(String(v));
+      draft.set(ctx.from.id, d);
+      pending.delete(ctx.from.id);
+      return sendOrEdit(ctx, 'Choose a trigger:', limitTriggerMenu('BUY'));
+    }
+
+    if (p.type === 'ls_pct') {
+      const v = Number(msg);
+      if (!Number.isFinite(v) || v <= 0 || v > 100) return ctx.reply('Send a percent between 1 and 100.');
+      const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Sell.'); }
+      d.sellPct = v;
+      draft.set(ctx.from.id, d);
+      pending.delete(ctx.from.id);
+      return sendOrEdit(ctx, 'Choose a trigger:', limitTriggerMenu('SELL'));
+    }
+
+    if (p.type === 'limit_value') {
+      const d = draft.get(ctx.from.id);
+      if (!d || !d.trigger) { pending.delete(ctx.from.id); return ctx.reply('Start a Limit order first.'); }
+      const val = parseNumHuman(msg);
+      if (val == null || !(val > 0)) return ctx.reply('Send a positive number (supports `k`/`m`).');
+
+      const id = addLimitOrder({
+        telegramId: ctx.from.id,
+        walletId: d.walletId,
+        token: d.token,
+        side: d.side,
+        amountPlsWei: d.side === 'BUY' ? (d.amountPlsWei ?? ethers.parseEther('0')) : undefined,
+        sellPct: d.side === 'SELL' ? (d.sellPct ?? 100) : undefined,
+        trigger: d.trigger,
+        value: val
+      });
+
+      draft.delete(ctx.from.id);
+      pending.delete(ctx.from.id);
+      await ctx.reply(`Limit ${d.side} #${id} created: ${d.trigger} @ ${NF.format(val)} ${d.side === 'BUY' ? `for ${fmtDec(ethers.formatEther((d.amountPlsWei ?? 0n))) } PLS` : `${d.sellPct}%`}`);
+      if (d.side === 'BUY') return renderBuyMenu(ctx);
+      return renderSellMenu(ctx);
+    }
+
     return;
   }
 
-  // Auto-detect token address
+  // Auto-detect token address pasted
   const text = String(ctx.message.text).trim();
   if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
     setToken(ctx.from.id, text);
     warmTokenAsync(ctx.from.id, text);
-
     const u = getUserSettings(ctx.from.id);
     if (u?.auto_buy_enabled) {
       const w = getActiveWallet(ctx.from.id);
@@ -794,12 +910,119 @@ bot.on('text', async (ctx, next) => {
   return next();
 });
 
-/* ---------- shortcuts from main ---------- */
+/* ---------- shortcuts ---------- */
 bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); return sendOrEdit(ctx, 'Main Menu', mainMenu()); });
 bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return sendOrEdit(ctx, 'Use /price after setting a token.', mainMenu()); });
 bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return sendOrEdit(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
 
 // no-op pill handler
 bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
+
+/* ---------- LIMIT ENGINE ---------- */
+
+async function pricePLSPerToken(token: string): Promise<number | null> {
+  try {
+    const meta = await tokenMeta(token);
+    const dec = meta.decimals ?? 18;
+    const one = ethers.parseUnits('1', dec);
+    const q = await bestQuoteSell(one, token);
+    if (!q) return null;
+    return Number(ethers.formatEther(q.amountOut)); // PLS per 1 token
+  } catch { return null; }
+}
+
+async function plsUSD(): Promise<number | null> {
+  try {
+    if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) return null;
+    const meta = await tokenMeta(STABLE);
+    const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE); // 1 WPLS -> stable
+    if (!q) return null;
+    return Number(ethers.formatUnits(q.amountOut, meta.decimals ?? 18)); // USD-ish per 1 PLS
+  } catch { return null; }
+}
+
+async function totalSupply(token: string): Promise<bigint | null> {
+  try { return await erc20(token).totalSupply(); } catch { return null; }
+}
+
+const LIMIT_CHECK_MS = Number(process.env.LIMIT_CHECK_MS ?? 15000);
+
+async function checkLimitsOnce() {
+  const rows = getOpenLimitOrders();
+  if (!rows.length) return;
+
+  // cache shared prices
+  const plsUsd = await plsUSD();
+
+  for (const r of rows) {
+    try {
+      // compute live metrics
+      const pPLS = await pricePLSPerToken(r.token_address);
+      if (pPLS == null) continue;
+
+      let should = false;
+
+      if (r.trigger_type === 'PLS') {
+        should = (r.side === 'BUY') ? (pPLS <= r.trigger_value) : (pPLS >= r.trigger_value);
+      } else if (r.trigger_type === 'USD') {
+        if (plsUsd == null) continue;
+        const pUSD = pPLS * plsUsd;
+        should = (r.side === 'BUY') ? (pUSD <= r.trigger_value) : (pUSD >= r.trigger_value);
+      } else if (r.trigger_type === 'MCAP') {
+        if (plsUsd == null) continue;
+        const sup = await totalSupply(r.token_address);
+        if (!sup) continue;
+        const pUSD = pPLS * plsUsd;
+        const meta = await tokenMeta(r.token_address);
+        const mcap = Number(ethers.formatUnits(sup, meta.decimals ?? 18)) * pUSD;
+        should = (r.side === 'BUY') ? (mcap <= r.trigger_value) : (mcap >= r.trigger_value);
+      } else if (r.trigger_type === 'MULT') {
+        const avg = getAvgEntry(r.telegram_id, r.token_address);
+        if (!avg) continue;
+        const target = avg.avgPlsPerToken * r.trigger_value;
+        should = pPLS >= target;
+      }
+
+      if (!should) continue;
+
+      // execute
+      const w = getWalletById(r.telegram_id, r.wallet_id);
+      if (!w) { markLimitError(r.id, 'wallet missing'); continue; }
+      const gas = await computeGas(r.telegram_id);
+
+      if (r.side === 'BUY') {
+        const amt = BigInt(r.amount_pls_wei);
+        if (amt <= 0n) { markLimitError(r.id, 'amount zero'); continue; }
+        const rec = await buyAutoRoute(getPrivateKey(w), r.token_address, amt, 0n, gas);
+        const hash = (rec as any)?.hash;
+        markLimitFilled(r.id, hash);
+        try {
+          const pre = await bestQuoteBuy(amt, r.token_address);
+          if (pre?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'BUY', amt, pre.amountOut, pre.route.key);
+        } catch {}
+        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${hash ? otter(hash) : ''}`);
+      } else {
+        // SELL
+        const c = erc20(r.token_address);
+        const bal = await c.balanceOf(w.address);
+        const pct = Math.max(1, Math.min(100, Number(r.sell_pct ?? 100)));
+        const amount = (bal * BigInt(Math.round(pct))) / 100n;
+        if (amount <= 0n) { markLimitError(r.id, 'balance zero'); continue; }
+
+        const q = await bestQuoteSell(amount, r.token_address);
+        const rec = await sellAutoRoute(getPrivateKey(w), r.token_address, amount, 0n, gas);
+        const hash = (rec as any)?.hash;
+        markLimitFilled(r.id, hash);
+        if (q?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'SELL', q.amountOut, amount, q.route.key);
+        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit SELL filled #${r.id}\n${hash ? otter(hash) : ''}`);
+      }
+    } catch (e: any) {
+      markLimitError(r.id, e?.message ?? String(e));
+    }
+  }
+}
+
+// kick off loop
+setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
 
 export {};
