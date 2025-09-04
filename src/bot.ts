@@ -42,26 +42,17 @@ export const bot = new Telegraf(cfg.BOT_TOKEN, { handlerTimeout: 60_000 });
 /* ---------- helpers ---------- */
 const NF = new Intl.NumberFormat('en-GB', { maximumFractionDigits: 6 });
 const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
-const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ','); // group integers
-const fmtDec = (s: string) => {
-  const [i, d] = s.split('.');
-  return d ? `${fmtInt(i)}.${d}` : fmtInt(i);
-};
+const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+const fmtDec = (s: string) => { const [i, d] = s.split('.'); return d ? `${fmtInt(i)}.${d}` : fmtInt(i); };
 const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
-const otter = (hash?: string) =>
-  hash ? `https://otter.pulsechain.com/tx/${hash}` : '';
+const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 
 function canEdit(ctx: any) { return Boolean(ctx?.callbackQuery?.message?.message_id); }
 async function sendOrEdit(ctx: any, text: string, extra?: any) {
   if (canEdit(ctx)) {
     try { return await ctx.editMessageText(text, extra); }
-    catch {
-      try { await ctx.deleteMessage(ctx.callbackQuery.message.message_id); } catch {}
-      return await ctx.reply(text, extra);
-    }
-  } else {
-    return await ctx.reply(text, extra);
-  }
+    catch { try { await ctx.deleteMessage(ctx.callbackQuery.message.message_id); } catch {} return await ctx.reply(text, extra); }
+  } else return await ctx.reply(text, extra);
 }
 
 /* balances with timeout */
@@ -102,6 +93,19 @@ function warmTokenAsync(userId: number, address: string) {
   tokenMeta(address).catch(() => {});
   const amt = ethers.parseEther(String(getUserSettings(userId)?.buy_amount_pls ?? 0.01));
   bestQuoteBuy(amt, address).catch(() => {});
+}
+
+/* --- Multi-wallet selection state (in-memory) --- */
+const selectedWallets = new Map<number, Set<number>>();
+function getSelSet(uid: number) {
+  let s = selectedWallets.get(uid);
+  if (!s) { s = new Set<number>(); selectedWallets.set(uid, s); }
+  return s;
+}
+function chunk<T>(arr: T[], size = 6): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }
 
 /* pending prompts */
@@ -329,9 +333,7 @@ async function renderBuyMenu(ctx: any) {
         const dec = meta.decimals ?? 18;
         outLine = `Amount out: ${fmtDec(ethers.formatUnits(best.amountOut, dec))} ${meta.symbol || 'TOKEN'}   ·   Route: ${best.route.key}`;
       }
-    } catch {
-      // keep defaults
-    }
+    } catch { /* keep defaults */ }
   }
 
   const lines = [
@@ -348,7 +350,17 @@ async function renderBuyMenu(ctx: any) {
     outLine,
   ].join('\n');
 
-  return sendOrEdit(ctx, lines, buyMenu(Math.round(pct)));
+  // Build wallet toggle rows (W1..Wn)
+  const rows = listWallets(ctx.from.id);
+  const sel = getSelSet(ctx.from.id);
+  const walletButtons = chunk(
+    rows.map((w, i) =>
+      Markup.button.callback(`${sel.has(w.id) ? '✅ ' : ''}W${i + 1}`, `wallet_toggle:${w.id}`)
+    ),
+    6
+  );
+
+  return sendOrEdit(ctx, lines, buyMenu(Math.round(pct), walletButtons));
 }
 
 bot.action('menu_buy', async (ctx) => { await ctx.answerCbQuery(); return renderBuyMenu(ctx); });
@@ -391,20 +403,49 @@ bot.action('choose_wallet', async (ctx) => {
 });
 bot.action(/^select_wallet:(\d+)$/, async (ctx: any) => { await ctx.answerCbQuery(); try { setActiveWallet(ctx.from.id, String(Number(ctx.match[1]))); } catch {} return renderBuyMenu(ctx); });
 
-bot.action('buy_exec', async (ctx) => {
+/* Toggle wallet in selection set */
+bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
-  const u = getUserSettings(ctx.from.id); const w = getActiveWallet(ctx.from.id);
-  if (!w) return sendOrEdit(ctx, 'Select a wallet first.', buyMenu(u?.gas_pct ?? 0));
-  if (!u?.token_address) return sendOrEdit(ctx, 'Set token first.', buyMenu(u?.gas_pct ?? 0));
-  try {
-    const gas = await computeGas(ctx.from.id);
-    const receipt = await buyAutoRoute(getPrivateKey(w), u.token_address, ethers.parseEther(String(u?.buy_amount_pls ?? 0.01)), 0n, gas);
-    const hash = (receipt as any)?.hash;
-    const link = otter(hash);
-    await ctx.reply(link ? `Buy sent! Tx: ${hash}\n${link}` : `Buy sent! Tx pending.`);
-  } catch (e: any) { await ctx.reply('Buy failed: ' + e.message); }
+  const id = Number(ctx.match[1]);
+  const s = getSelSet(ctx.from.id);
+  if (s.has(id)) s.delete(id); else s.add(id);
   return renderBuyMenu(ctx);
 });
+
+bot.action('buy_exec', async (ctx) => {
+  await ctx.answerCbQuery();
+  const u = getUserSettings(ctx.from.id);
+  const active = getActiveWallet(ctx.from.id);
+  if (!u?.token_address) return sendOrEdit(ctx, 'Set token first.', buyMenu(u?.gas_pct ?? 0));
+
+  // Selected wallets if any, else active wallet
+  const selIds = Array.from(getSelSet(ctx.from.id));
+  let wallets = selIds.length
+    ? listWallets(ctx.from.id).filter(w => selIds.includes(w.id))
+    : (active ? [active] : []);
+  if (!wallets.length) return sendOrEdit(ctx, 'Select a wallet first.', buyMenu(u?.gas_pct ?? 0));
+
+  const res: string[] = [];
+  for (const w of wallets) {
+    try {
+      const gas = await computeGas(ctx.from.id);
+      const r = await buyAutoRoute(
+        getPrivateKey(w),
+        u.token_address,
+        ethers.parseEther(String(u?.buy_amount_pls ?? 0.01)),
+        0n,
+        gas
+      );
+      const hash = (r as any)?.hash;
+      res.push(`✅ ${w.name ?? ''} ${w.address.slice(0,6)}…${w.address.slice(-4)} → ${hash ?? '(pending)'}${hash ? `  ${otter(hash)}` : ''}`);
+    } catch (e: any) {
+      res.push(`❌ ${w.name ?? ''} ${w.address.slice(0,6)}…${w.address.slice(-4)} → ${e.message}`);
+    }
+  }
+  await ctx.reply(res.join('\n'));
+  return renderBuyMenu(ctx);
+});
+
 bot.action('buy_exec_all', async (ctx) => {
   await ctx.answerCbQuery();
   const rows = listWallets(ctx.from.id); const u = getUserSettings(ctx.from.id);
@@ -469,7 +510,7 @@ bot.action('sell_exec', async (ctx) => {
   const u = getUserSettings(ctx.from.id); const w = getActiveWallet(ctx.from.id);
   if (!w || !u?.token_address) return sendOrEdit(ctx, 'Need active wallet and token set.', sellMenu());
   try {
-    // NOTE: For ERC-20 sells you still need allowances; do those via a separate UI if needed.
+    // ERC-20 sells need allowances; do those via a separate UI if needed.
     const c = erc20(u.token_address);
     const bal = await c.balanceOf(w.address);
     const pct = u?.sell_pct ?? 100;
@@ -526,10 +567,7 @@ bot.command('set_token', async (ctx) => {
   const [_, address] = ctx.message.text.split(/\s+/, 2);
   if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) return ctx.reply('Usage: /set_token <0xAddress>');
   setToken(ctx.from.id, address);
-
-  // 🔥 warm caches for symbol/decimals and best route
   warmTokenAsync(ctx.from.id, address);
-
   return renderBuyMenu(ctx);
 });
 bot.command('set_gas', async (ctx) => {
@@ -548,9 +586,7 @@ bot.command('price', async (ctx) => {
     const best = await bestQuoteBuy(ethers.parseEther('1'), u.token_address);
     if (!best) return ctx.reply('No route available for price.');
     const meta = await tokenMeta(u.token_address);
-    return ctx.reply(
-      `1 WPLS -> ${fmtDec(ethers.formatUnits(best.amountOut, meta.decimals ?? 18))} ${meta.symbol || 'TOKEN'}   ·   Route: ${best.route.key}`
-    );
+    return ctx.reply(`1 WPLS -> ${fmtDec(ethers.formatUnits(best.amountOut, meta.decimals ?? 18))} ${meta.symbol || 'TOKEN'}   ·   Route: ${best.route.key}`);
   } catch (e: any) { return ctx.reply('Price failed: ' + e.message); }
 });
 bot.command('balances', async (ctx) => {
@@ -588,10 +624,7 @@ bot.on('text', async (ctx, next) => {
     if (p.type === 'set_token') {
       if (!/^0x[a-fA-F0-9]{40}$/.test(msg)) return ctx.reply('That does not look like a token address.');
       setToken(ctx.from.id, msg);
-
-      // 🔥 warm caches
       warmTokenAsync(ctx.from.id, msg);
-
       pending.delete(ctx.from.id);
       return renderBuyMenu(ctx);
     }
@@ -662,8 +695,6 @@ bot.on('text', async (ctx, next) => {
   const text = String(ctx.message.text).trim();
   if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
     setToken(ctx.from.id, text);
-
-    // 🔥 warm caches
     warmTokenAsync(ctx.from.id, text);
 
     const u = getUserSettings(ctx.from.id);
