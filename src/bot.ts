@@ -32,8 +32,8 @@ const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
 /* ---------- message lifecycle: delete previous menus, manage pin ---------- */
-const lastMenuMsg = new Map<number, number>();          // user -> last (non-pinned) menu message id
-const pinnedPosMsg = new Map<number, number>();         // user -> pinned "POSITION" message id
+const lastMenuMsg = new Map<number, number>();  // user -> last (non-pinned) menu message id
+const pinnedPosMsg = new Map<number, number>(); // user -> pinned "POSITION" message id
 
 function canEdit(ctx: any) { return Boolean(ctx?.callbackQuery?.message?.message_id); }
 
@@ -68,8 +68,8 @@ async function upsertPinnedPosition(ctx: any) {
   const w = getActiveWallet(uid);
   if (!u?.token_address || !w) return;
 
-  // ✅ Normalize ChatId so it’s never null/undefined for Telegram API calls
-  const chatId = ((ctx.chat?.id ?? ctx.from?.id) as unknown) as (string | number);
+  // Always pass a definite chat id to Telegram methods
+  const chatId = (ctx.chat?.id ?? ctx.from?.id) as unknown as (number | string);
 
   try {
     const meta = await tokenMeta(u.token_address);
@@ -79,7 +79,7 @@ async function upsertPinnedPosition(ctx: any) {
     const q = bal > 0n ? await bestQuoteSell(bal, u.token_address) : null;
 
     const avg = getAvgEntry(uid, u.token_address, decimals);
-    let pnlLine = 'Unrealized PnL: —';
+    let pnlLine = '—';
     if (avg && q?.amountOut) {
       const curPls = Number(ethers.formatEther(q.amountOut));
       const curTok = Number(ethers.formatUnits(bal, decimals));
@@ -91,7 +91,7 @@ async function upsertPinnedPosition(ctx: any) {
 
     const text = [
       '📌 *POSITION*',
-      `Token: ${u.token_address} ${meta.symbol ? `(${meta.symbol})` : ''}`,
+      `Token: ${u.token_address}${meta.symbol ? ` (${meta.symbol})` : ''}`,
       `Wallet: ${short(w.address)}`,
       `Holdings: ${fmtDec(ethers.formatUnits(bal, decimals))} ${meta.symbol || 'TOKEN'}`,
       q?.amountOut ? `Est. value: ${fmtPls(q.amountOut)} PLS  ·  Route: ${q.route.key}` : 'Est. value: —',
@@ -121,6 +121,7 @@ async function upsertPinnedPosition(ctx: any) {
     /* ignore */
   }
 }
+
 /* ---------- utilities ---------- */
 const BAL_TIMEOUT_MS = 8000;
 function withTimeout<T>(p: Promise<T>, ms = BAL_TIMEOUT_MS): Promise<T> {
@@ -448,13 +449,13 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
 /* ----- Tx notifications: pending link -> success & delete pending ----- */
 async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string) {
   if (!hash) return;
-  const pending = await ctx.reply(`${kind} pending… ${otter(hash)}`);
+  const pendingMsg = await ctx.reply(`${kind} pending… ${otter(hash)}`);
   try {
     await provider.waitForTransaction(hash);
-    try { await ctx.deleteMessage(pending.message_id); } catch {}
+    try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
     await ctx.reply(`${kind} success! ${otter(hash)}`);
   } catch {
-    // let pending stay (or you can edit to failed)
+    // leave pending message if it fails / times out
   }
 }
 
@@ -474,7 +475,6 @@ bot.action('buy_exec', async (ctx) => {
   const res: string[] = [];
   const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
   const preQuote = await bestQuoteBuy(amountIn, u.token_address);
-  const meta = await tokenMeta(u.token_address);
 
   for (const w of wallets) {
     try {
@@ -532,6 +532,9 @@ bot.action('buy_exec_all', async (ctx) => {
 });
 
 /* ---------- LIMITS (create/list/cancel) ---------- */
+type Draft = { side: 'BUY' | 'SELL'; walletId: number; token: string; amountPlsWei?: bigint; sellPct?: number; trigger?: 'PLS'|'USD'|'MCAP'|'MULT'; };
+const draft = new Map<number, Draft>();
+
 bot.action('limit_buy', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
@@ -782,9 +785,6 @@ bot.command('balances', async (ctx) => {
 });
 
 /* ---------- TEXT: prompts (including limit building) ---------- */
-type Draft = { side: 'BUY' | 'SELL'; walletId: number; token: string; amountPlsWei?: bigint; sellPct?: number; trigger?: 'PLS'|'USD'|'MCAP'|'MULT'; };
-const draft = new Map<number, Draft>();
-
 bot.on('text', async (ctx, next) => {
   const p = pending.get(ctx.from.id);
   if (p) {
@@ -898,7 +898,7 @@ bot.on('text', async (ctx, next) => {
         side: d.side,
         amountPlsWei: d.side === 'BUY' ? (d.amountPlsWei ?? ethers.parseEther('0')) : undefined,
         sellPct: d.side === 'SELL' ? (d.sellPct ?? 100) : undefined,
-        trigger: d.trigger,
+        trigger: d.trigger!,
         value: val
       });
 
@@ -948,7 +948,7 @@ bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return showMe
 // no-op pill handler
 bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
 
-/* ---------- LIMIT ENGINE (unchanged logic, trimmed) ---------- */
+/* ---------- LIMIT ENGINE ---------- */
 async function pricePLSPerToken(token: string): Promise<number | null> {
   try {
     const meta = await tokenMeta(token);
@@ -956,39 +956,53 @@ async function pricePLSPerToken(token: string): Promise<number | null> {
     const one = ethers.parseUnits('1', dec);
     const q = await bestQuoteSell(one, token);
     if (!q) return null;
-    return Number(ethers.formatEther(q.amountOut));
+    return Number(ethers.formatEther(q.amountOut)); // PLS per 1 token
   } catch { return null; }
 }
+
 async function plsUSD(): Promise<number | null> {
   try {
     if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) return null;
     const meta = await tokenMeta(STABLE);
-    const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE);
+    const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE); // 1 WPLS -> stable
     if (!q) return null;
-    return Number(ethers.formatUnits(q.amountOut, meta.decimals ?? 18));
+    return Number(ethers.formatUnits(q.amountOut, meta.decimals ?? 18)); // USD-ish per 1 PLS
   } catch { return null; }
 }
-async function totalSupply(token: string): Promise<bigint | null> { try { return await erc20(token).totalSupply(); } catch { return null; } }
+
+async function totalSupply(token: string): Promise<bigint | null> {
+  try { return await erc20(token).totalSupply(); } catch { return null; }
+}
 
 const LIMIT_CHECK_MS = Number(process.env.LIMIT_CHECK_MS ?? 15000);
+
 async function checkLimitsOnce() {
   const rows = getOpenLimitOrders();
   if (!rows.length) return;
+
+  // cache shared prices
   const usd = await plsUSD();
 
   for (const r of rows) {
     try {
+      // compute live metrics
       const pPLS = await pricePLSPerToken(r.token_address);
       if (pPLS == null) continue;
+
       let should = false;
 
-      if (r.trigger_type === 'PLS') should = (r.side === 'BUY') ? (pPLS <= r.trigger_value) : (pPLS >= r.trigger_value);
-      else if (r.trigger_type === 'USD') { if (usd == null) continue; const pUSD = pPLS * usd; should = (r.side === 'BUY') ? (pUSD <= r.trigger_value) : (pUSD >= r.trigger_value); }
-      else if (r.trigger_type === 'MCAP') {
+      if (r.trigger_type === 'PLS') {
+        should = (r.side === 'BUY') ? (pPLS <= r.trigger_value) : (pPLS >= r.trigger_value);
+      } else if (r.trigger_type === 'USD') {
         if (usd == null) continue;
-        const sup = await totalSupply(r.token_address); if (!sup) continue;
-        const meta = await tokenMeta(r.token_address);
         const pUSD = pPLS * usd;
+        should = (r.side === 'BUY') ? (pUSD <= r.trigger_value) : (pUSD >= r.trigger_value);
+      } else if (r.trigger_type === 'MCAP') {
+        if (usd == null) continue;
+        const sup = await totalSupply(r.token_address);
+        if (!sup) continue;
+        const pUSD = pPLS * usd;
+        const meta = await tokenMeta(r.token_address);
         const mcap = Number(ethers.formatUnits(sup, meta.decimals ?? 18)) * pUSD;
         should = (r.side === 'BUY') ? (mcap <= r.trigger_value) : (mcap >= r.trigger_value);
       } else if (r.trigger_type === 'MULT') {
@@ -1000,6 +1014,7 @@ async function checkLimitsOnce() {
 
       if (!should) continue;
 
+      // execute
       const w = getWalletById(r.telegram_id, r.wallet_id);
       if (!w) { markLimitError(r.id, 'wallet missing'); continue; }
       const gas = await computeGas(r.telegram_id);
@@ -1016,6 +1031,7 @@ async function checkLimitsOnce() {
         } catch {}
         await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${hash ? otter(hash) : ''}`);
       } else {
+        // SELL
         const c = erc20(r.token_address);
         const bal = await c.balanceOf(w.address);
         const pct = Math.max(1, Math.min(100, Number(r.sell_pct ?? 100)));
@@ -1034,6 +1050,8 @@ async function checkLimitsOnce() {
     }
   }
 }
+
+// kick off loop
 setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
 
 export {};
