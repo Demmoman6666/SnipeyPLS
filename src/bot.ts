@@ -45,6 +45,7 @@ import {
   cancelLimitOrder,
   markLimitFilled,
   markLimitError,
+  type LimitOrderRow,
 } from './db.js';
 
 const cfg = getConfig();
@@ -524,6 +525,9 @@ bot.action(/^limit_trig:(PLS|USD|MCAP|MULT)$/, async (ctx: any) => {
   const d = draft.get(ctx.from.id);
   if (!d) return sendOrEdit(ctx, 'Start a Limit Buy/Sell first.', mainMenu());
   const trig = ctx.match[1] as 'PLS'|'USD'|'MCAP'|'MULT';
+  if (d.side === 'BUY' && trig === 'MULT') {
+    return sendOrEdit(ctx, 'Multiplier is for SELL only. Choose PLS / USD / MCAP.', limitTriggerMenu('BUY'));
+  }
   d.trigger = trig;
   draft.set(ctx.from.id, d);
 
@@ -537,7 +541,7 @@ bot.action(/^limit_trig:(PLS|USD|MCAP|MULT)$/, async (ctx: any) => {
 
 bot.action('limit_list', async (ctx) => {
   await ctx.answerCbQuery();
-  const rows = listLimitOrders(ctx.from.id);
+  const rows: LimitOrderRow[] = listLimitOrders(ctx.from.id);
   if (!rows.length) return sendOrEdit(ctx, 'No limit orders yet.');
   const lines = rows.map(r => {
     const base = `#${r.id} ${r.side} ${short(r.token_address)}  ${r.trigger_type}=${NF.format(r.trigger_value)}  [${r.status}]`;
@@ -948,7 +952,7 @@ async function totalSupply(token: string): Promise<bigint | null> {
 const LIMIT_CHECK_MS = Number(process.env.LIMIT_CHECK_MS ?? 15000);
 
 async function checkLimitsOnce() {
-  const rows = getOpenLimitOrders();
+  const rows: LimitOrderRow[] = getOpenLimitOrders();
   if (!rows.length) return;
 
   // cache shared prices
@@ -991,7 +995,7 @@ async function checkLimitsOnce() {
       const gas = await computeGas(r.telegram_id);
 
       if (r.side === 'BUY') {
-        const amt = BigInt(r.amount_pls_wei);
+        const amt = BigInt(r.amount_pls_wei ?? '0');
         if (amt <= 0n) { markLimitError(r.id, 'amount zero'); continue; }
         const rec = await buyAutoRoute(getPrivateKey(w), r.token_address, amt, 0n, gas);
         const hash = (rec as any)?.hash;
