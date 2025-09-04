@@ -84,7 +84,7 @@ export async function initDb() {
     );
   `);
 
-  // Migrations
+  // Migrations (best-effort)
   tryAlter(`ALTER TABLE users ADD COLUMN gwei_boost_gwei REAL DEFAULT 0.0;`);
   tryAlter(`ALTER TABLE users ADD COLUMN gas_pct REAL DEFAULT 0.0;`);
   tryAlter(`ALTER TABLE users ADD COLUMN default_gas_pct REAL DEFAULT 0.0;`);
@@ -145,13 +145,12 @@ export function getAvgEntry(
   telegramId: number,
   tokenAddress: string
 ): { avgPlsPerToken: number, totalPlsIn: bigint, netTokens: bigint } | null {
-  const stmt = getDb().prepare<TradeRow>(`
+  const rows = getDb().prepare(`
     SELECT side, pls_in_wei, token_out_wei
     FROM trades
     WHERE telegram_id = ? AND token_address = ?
     ORDER BY id ASC
-  `);
-  const rows = stmt.all(telegramId, tokenAddress.toLowerCase());
+  `).all(telegramId, tokenAddress.toLowerCase()) as any as TradeRow[];
 
   let totalPlsIn = 0n;
   let netTokens = 0n;
@@ -178,11 +177,10 @@ export function getAvgEntry(
 }
 
 export function getPosition(telegramId: number, tokenAddress: string): bigint {
-  const stmt = getDb().prepare<TradeRow>(`
+  const rows = getDb().prepare(`
     SELECT side, token_out_wei FROM trades
     WHERE telegram_id = ? AND token_address = ?
-  `);
-  const rows = stmt.all(telegramId, tokenAddress.toLowerCase());
+  `).all(telegramId, tokenAddress.toLowerCase()) as any as TradeRow[];
 
   let net = 0n;
   for (const r of rows) {
@@ -204,12 +202,11 @@ export function addLimitOrder(o: {
   trigger: Trigger,
   value: number
 }) {
-  const stmt = getDb().prepare(`
+  const info = getDb().prepare(`
     INSERT INTO limit_orders
     (telegram_id, wallet_id, token_address, side, amount_pls_wei, sell_pct, trigger_type, trigger_value, status, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', strftime('%s','now'), strftime('%s','now'))
-  `);
-  const info = stmt.run(
+  `).run(
     o.telegramId,
     o.walletId,
     o.token.toLowerCase(),
@@ -224,14 +221,14 @@ export function addLimitOrder(o: {
 
 export function listLimitOrders(telegramId: number): LimitOrderRow[] {
   return getDb()
-    .prepare<LimitOrderRow>(`SELECT * FROM limit_orders WHERE telegram_id = ? ORDER BY id DESC`)
-    .all(telegramId);
+    .prepare(`SELECT * FROM limit_orders WHERE telegram_id = ? ORDER BY id DESC`)
+    .all(telegramId) as any as LimitOrderRow[];
 }
 
 export function getOpenLimitOrders(): LimitOrderRow[] {
   return getDb()
-    .prepare<LimitOrderRow>(`SELECT * FROM limit_orders WHERE status = 'OPEN'`)
-    .all();
+    .prepare(`SELECT * FROM limit_orders WHERE status = 'OPEN'`)
+    .all() as any as LimitOrderRow[];
 }
 
 export function cancelLimitOrder(telegramId: number, id: number) {
