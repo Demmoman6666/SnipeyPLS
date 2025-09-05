@@ -28,14 +28,8 @@ const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
 const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const fmtDec = (s: string) => { const [i, d] = s.split('.'); return d ? `${fmtInt(i)}.${d}` : fmtInt(i); };
 const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
-// accepts null/undefined safely
-const otter = (hash?: string | null) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
+const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
-
-// strict hash check (0x + 64 hex)
-function ensureHash(h: unknown): h is string {
-  return typeof h === 'string' && /^0x[0-9a-fA-F]{64}$/.test(h);
-}
 
 /* ---------- message lifecycle: delete previous menus, manage pin ---------- */
 const lastMenuMsg = new Map<number, number>();  // user -> last (non-pinned) menu message id
@@ -446,16 +440,16 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
 });
 
 /* ----- Tx notifications: pending -> success (delete pending) ----- */
-async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string | null) {
-  if (!ensureHash(hash)) return;              // nothing valid to wait on
-  const txHash: string = hash;                // narrowed to plain string
-
+async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string) {
+  if (!hash) return;
+  // Pending: simple tick only
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
-    await provider.waitForTransaction(txHash);
+    await provider.waitForTransaction(hash);
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
+    const link = otter(hash);
     const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
-    await ctx.reply(`✅ ${title} ${otter(txHash)}`);
+    await ctx.reply(`✅ ${title} ${link}`);
   } catch {
     // leave pending if it fails/times out
   }
@@ -481,10 +475,10 @@ bot.action('buy_exec', async (ctx) => {
     try {
       const gas = await computeGas(ctx.from.id);
       const r = await buyAutoRoute(getPrivateKey(w), u.token_address, amountIn, 0n, gas);
-      const hash = (r as any)?.hash as string | null | undefined;
+      const hash = (r as any)?.hash;
 
       if (preQuote?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-      notifyPendingThenSuccess(ctx, 'Buy', hash);
+      if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
@@ -511,10 +505,10 @@ bot.action('buy_exec_all', async (ctx) => {
     try {
       const gas = await computeGas(ctx.from.id);
       const r = await buyAutoRoute(getPrivateKey(row), u.token_address, amountIn, 0n, gas);
-      const hash = (r as any)?.hash as string | null | undefined;
+      const hash = (r as any)?.hash;
 
       if (preQuote?.amountOut) recordTrade(ctx.from.id, row.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-      notifyPendingThenSuccess(ctx, 'Buy', hash);
+      if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(row), u.token_address, gas).catch(() => {});
@@ -609,17 +603,20 @@ async function renderSellMenu(ctx: any) {
 
   if (w && u?.token_address) {
     try {
-      const meta = await tokenMeta(u.token_address);
+      // ✅ capture a narrowed local to avoid string|null leaking into nested async
+      const tokenAddr = u.token_address as string;
+
+      const meta = await tokenMeta(tokenAddr);
       const dec = meta.decimals ?? 18;
       metaSymbol = meta.symbol || meta.name || 'TOKEN';
 
-      const c = erc20(u.token_address);
+      const c = erc20(tokenAddr);
       const [bal, best] = await Promise.all([
         c.balanceOf(w.address),
         (async () => {
           const amt = await c.balanceOf(w.address);
           const sellAmt = (amt * BigInt(Math.round(pct))) / 100n;
-          return (sellAmt > 0n) ? bestQuoteSell(sellAmt, u.token_address) : null;
+          return (sellAmt > 0n) ? bestQuoteSell(sellAmt, tokenAddr) : null;
         })()
       ]);
 
@@ -627,7 +624,7 @@ async function renderSellMenu(ctx: any) {
 
       if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  _(Route: ${best.route.key})_`;
 
-      const avg = getAvgEntry(ctx.from.id, u.token_address, dec);
+      const avg = getAvgEntry(ctx.from.id, tokenAddr, dec);
       if (avg && best) {
         const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
         const amtTok = Number(ethers.formatUnits(amountIn, dec));
@@ -657,10 +654,11 @@ async function renderSellMenu(ctx: any) {
   await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenu() });
 }
 
-/* --- Robust entry points for Sell menu (cover multiple button IDs) --- */
-bot.action('sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
-bot.action('sell_menu', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
+bot.action('sell_pct_25', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 25); return renderSellMenu(ctx); });
+bot.action('sell_pct_50', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 50); return renderSellMenu(ctx); });
+bot.action('sell_pct_75', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 75); return renderSellMenu(ctx); });
+bot.action('sell_pct_100', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 100); return renderSellMenu(ctx); });
 
 /* Sell ▸ Approve */
 bot.action('sell_approve', async (ctx) => {
@@ -694,10 +692,10 @@ bot.action('sell_exec', async (ctx) => {
     const q = await bestQuoteSell(amount, u.token_address);      // for recording
     const gas = await computeGas(ctx.from.id);
     const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
-    const hash = (r as any)?.hash as string | null | undefined;
+    const hash = (r as any)?.hash;
 
     if (q?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
-    notifyPendingThenSuccess(ctx, 'Sell', hash);
+    if (hash) notifyPendingThenSuccess(ctx, 'Sell', hash);
 
   } catch (e: any) { await ctx.reply('Sell failed: ' + e.message); }
   await upsertPinnedPosition(ctx);
@@ -836,8 +834,8 @@ bot.on('text', async (ctx, next) => {
       try {
         const gas = await computeGas(ctx.from.id);
         const receipt = await withdrawPls(getPrivateKey(w), to, ethers.parseEther(String(amount)), gas);
-        const hash = (receipt as any)?.hash as string | null | undefined;
-        await ctx.reply(ensureHash(hash) ? `Withdraw sent! ${otter(hash)}` : 'Withdraw sent! (pending)');
+        const hash = (receipt as any)?.hash;
+        await ctx.reply(hash ? `Withdraw sent! ${otter(hash)}` : 'Withdraw sent! (pending)');
       } catch (e: any) { await ctx.reply('Withdraw failed: ' + e.message); }
       pending.delete(ctx.from.id);
       return renderWalletManage(ctx, (p as any).walletId);
@@ -931,8 +929,8 @@ bot.on('text', async (ctx, next) => {
       try {
         const gas = await computeGas(ctx.from.id);
         const receipt = await buyAutoRoute(getPrivateKey(w), text, ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01)), 0n, gas);
-        const hash = (receipt as any)?.hash as string | null | undefined;
-        notifyPendingThenSuccess(ctx, 'Buy', hash);
+        const hash = (receipt as any)?.hash;
+        if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
       } catch (e: any) {
         await ctx.reply('Auto-buy failed: ' + e.message);
       }
@@ -1025,13 +1023,13 @@ async function checkLimitsOnce() {
         const amt = r.amount_pls_wei ? BigInt(r.amount_pls_wei) : 0n;
         if (amt <= 0n) { markLimitError(r.id, 'amount zero'); continue; }
         const rec = await buyAutoRoute(getPrivateKey(w), r.token_address, amt, 0n, gas);
-        const hash = (rec as any)?.hash as string | null | undefined;
-        markLimitFilled(r.id, ensureHash(hash) ? hash : null);
+        const hash = (rec as any)?.hash;
+        markLimitFilled(r.id, hash);
         try {
           const pre = await bestQuoteBuy(amt, r.token_address);
           if (pre?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'BUY', amt, pre.amountOut, pre.route.key);
         } catch {}
-        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${ensureHash(hash) ? otter(hash) : ''}`);
+        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${hash ? otter(hash) : ''}`);
       } else {
         const c = erc20(r.token_address);
         const bal = await c.balanceOf(w.address);
@@ -1041,10 +1039,10 @@ async function checkLimitsOnce() {
 
         const q = await bestQuoteSell(amount, r.token_address);
         const rec = await sellAutoRoute(getPrivateKey(w), r.token_address, amount, 0n, gas);
-        const hash = (rec as any)?.hash as string | null | undefined;
-        markLimitFilled(r.id, ensureHash(hash) ? hash : null);
+        const hash = (rec as any)?.hash;
+        markLimitFilled(r.id, hash);
         if (q?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'SELL', q.amountOut, amount, q.route.key);
-        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit SELL filled #${r.id}\n${ensureHash(hash) ? otter(hash) : ''}`);
+        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit SELL filled #${r.id}\n${hash ? otter(hash) : ''}`);
       }
     } catch (e: any) {
       markLimitError(r.id, e?.message ?? String(e));
