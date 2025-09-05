@@ -441,9 +441,8 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
 });
 
 /* ----- Tx notifications: pending -> success (delete pending) ----- */
-// 🔧 hash can be null from some routers; accept it here to avoid TS errors at call sites
-async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string | null) {
-  if (!hash) return; // narrows to string
+// 🔧 require a definite string so provider.waitForTransaction() types are happy
+async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash: string) {
   // Pending: simple tick only
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
@@ -1004,10 +1003,7 @@ async function checkLimitsOnce() {
         const mcap = Number(ethers.formatUnits(sup, meta.decimals ?? 18)) * pUSD;
         should = (r.side === 'BUY') ? (mcap <= r.trigger_value) : (mcap >= r.trigger_value);
       } else if (r.trigger_type === 'MULT') {
-        // ✅ use token decimals for accurate average
-        const meta = await tokenMeta(r.token_address);
-        const dec = meta.decimals ?? 18;
-        const avg = getAvgEntry(r.telegram_id, r.token_address, dec);
+        const avg = getAvgEntry(r.telegram_id, r.token_address);
         if (!avg) continue;
         const target = avg.avgPlsPerToken * r.trigger_value;
         should = pPLS >= target;
