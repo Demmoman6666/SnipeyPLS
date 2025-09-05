@@ -85,7 +85,7 @@ export async function initDb() {
     );
   `);
 
-  // Best-effort migrations
+  // ---------- Best-effort migrations (covers existing DBs) ----------
   tryExec(`ALTER TABLE users ADD COLUMN gwei_boost_gwei REAL DEFAULT 0.0;`);
   tryExec(`ALTER TABLE users ADD COLUMN gas_pct REAL DEFAULT 0.0;`);
   tryExec(`ALTER TABLE users ADD COLUMN default_gas_pct REAL DEFAULT 0.0;`);
@@ -100,6 +100,7 @@ export async function initDb() {
 }
 
 /* ====================== TYPES ====================== */
+
 export type Side = 'BUY' | 'SELL';
 export type Trigger = 'PLS' | 'USD' | 'MCAP' | 'MULT';
 export type LimitStatus = 'OPEN' | 'FILLED' | 'CANCELLED' | 'ERROR';
@@ -128,6 +129,7 @@ export interface LimitOrderRow {
 }
 
 /* ================ trades / avg entry ================= */
+
 export function recordTrade(
   telegramId: number,
   walletAddress: string,
@@ -151,7 +153,10 @@ export function recordTrade(
   );
 }
 
-/** Average entry (PLS/token). */
+/** Average entry (PLS/token).
+ * BUY adds position; SELL reduces it proportionally.
+ * Note: token_out_wei are in token's base units (decimals). We assume 18 if unknown in callers.
+ */
 export function getAvgEntry(
   telegramId: number,
   tokenAddress: string,
@@ -206,6 +211,7 @@ export function getPosition(telegramId: number, tokenAddress: string): bigint {
 }
 
 /* =================== limit orders =================== */
+
 export function addLimitOrder(o: {
   telegramId: number,
   walletId: number,
