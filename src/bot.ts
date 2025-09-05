@@ -449,7 +449,7 @@ async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: str
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
     const link = otter(hash);
     const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
-    await ctx.reply(`✅ ${title} — ${link}`);
+    await ctx.reply(`✅ ${title} ${link}`);
   } catch {
     // leave pending if it fails/times out
   }
@@ -603,17 +603,20 @@ async function renderSellMenu(ctx: any) {
 
   if (w && u?.token_address) {
     try {
-      const meta = await tokenMeta(u.token_address);
+      // ✅ capture a narrowed local to avoid string|null leaking into nested async
+      const tokenAddr = u.token_address as string;
+
+      const meta = await tokenMeta(tokenAddr);
       const dec = meta.decimals ?? 18;
       metaSymbol = meta.symbol || meta.name || 'TOKEN';
 
-      const c = erc20(u.token_address);
+      const c = erc20(tokenAddr);
       const [bal, best] = await Promise.all([
         c.balanceOf(w.address),
         (async () => {
           const amt = await c.balanceOf(w.address);
           const sellAmt = (amt * BigInt(Math.round(pct))) / 100n;
-          return (sellAmt > 0n) ? bestQuoteSell(sellAmt, u.token_address) : null;
+          return (sellAmt > 0n) ? bestQuoteSell(sellAmt, tokenAddr) : null;
         })()
       ]);
 
@@ -621,7 +624,7 @@ async function renderSellMenu(ctx: any) {
 
       if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  _(Route: ${best.route.key})_`;
 
-      const avg = getAvgEntry(ctx.from.id, u.token_address, dec);
+      const avg = getAvgEntry(ctx.from.id, tokenAddr, dec);
       if (avg && best) {
         const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
         const amtTok = Number(ethers.formatUnits(amountIn, dec));
