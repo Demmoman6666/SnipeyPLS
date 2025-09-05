@@ -27,6 +27,7 @@ const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
 const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const fmtDec = (s: string) => { const [i, d] = s.split('.'); return d ? `${fmtInt(i)}.${d}` : fmtInt(i); };
 const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
+// accept undefined/null safely
 const otter = (hash?: string | null) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
@@ -38,6 +39,7 @@ function canEdit(ctx: any) { return Boolean(ctx?.callbackQuery?.message?.message
 async function showMenu(ctx: any, text: string, extra?: any) {
   const uid = ctx.from.id;
   const pinned = pinnedPosMsg.get(uid);
+
   if (canEdit(ctx)) {
     try {
       await ctx.editMessageText(text, extra);
@@ -45,6 +47,7 @@ async function showMenu(ctx: any, text: string, extra?: any) {
       return;
     } catch {}
   }
+
   const prev = lastMenuMsg.get(uid);
   if (prev && (!pinned || prev !== pinned)) {
     try { await ctx.deleteMessage(prev); } catch {}
@@ -53,7 +56,7 @@ async function showMenu(ctx: any, text: string, extra?: any) {
   lastMenuMsg.set(uid, m.message_id);
 }
 
-/** pin/replace a POSITION card */
+/** Post or replace a pinned "POSITION" card */
 async function upsertPinnedPosition(ctx: any) {
   const uid = ctx.from.id;
   const u = getUserSettings(uid);
@@ -61,6 +64,7 @@ async function upsertPinnedPosition(ctx: any) {
   if (!u?.token_address || !w) return;
 
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
+
   try {
     const meta = await tokenMeta(u.token_address);
     const decimals = meta.decimals ?? 18;
@@ -94,9 +98,7 @@ async function upsertPinnedPosition(ctx: any) {
     ]);
 
     const existing = pinnedPosMsg.get(uid);
-    if (existing) {
-      try { await bot.telegram.deleteMessage(chatId, existing); } catch {}
-    }
+    if (existing) { try { await bot.telegram.deleteMessage(chatId, existing); } catch {} }
 
     const m = await bot.telegram.sendMessage(chatId, text, { parse_mode: 'Markdown', ...kb } as any);
     pinnedPosMsg.set(uid, m.message_id);
@@ -128,15 +130,14 @@ async function computeGas(telegramId: number, extraPct = 0): Promise<{
   const pct = (u?.gas_pct ?? 0) + extraPct;
   const mul = 1 + (pct / 100);
   const effMax = (baseMax + boost) * mul;
-  const effPri = (basePri + boost) * mul;
   return {
-    maxPriorityFeePerGas: ethers.parseUnits(effPri.toFixed(9), 'gwei'),
+    maxPriorityFeePerGas: ethers.parseUnits(((basePri + boost) * mul).toFixed(9), 'gwei'),
     maxFeePerGas: ethers.parseUnits(effMax.toFixed(9), 'gwei'),
     gasLimit: BigInt(u?.gas_limit ?? 250000),
   };
 }
 
-/* warm token meta + best route quote */
+/* warm caches */
 function warmTokenAsync(userId: number, address: string) {
   tokenMeta(address).catch(() => {});
   const amt = ethers.parseEther(String(getUserSettings(userId)?.buy_amount_pls ?? 0.01));
@@ -148,7 +149,7 @@ const selectedWallets = new Map<number, Set<number>>();
 function getSelSet(uid: number) { let s = selectedWallets.get(uid); if (!s) { s = new Set<number>(); selectedWallets.set(uid, s); } return s; }
 function chunk<T>(arr: T[], size = 6): T[][] { const out: T[][] = []; for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size)); return out; }
 
-/* --- parsing helper --- */
+/* small parser */
 function parseNumHuman(s: string): number | null {
   const t = s.trim().toLowerCase().replace(/[, ]/g, '');
   const m = t.match(/^([0-9]*\.?[0-9]+)\s*([kmb])?$/);
@@ -184,37 +185,11 @@ async function renderSettings(ctx: any) {
 }
 
 bot.action('settings', async (ctx) => { await ctx.answerCbQuery(); return renderSettings(ctx); });
-
-bot.action('set_gl', async (ctx) => {
-  await ctx.answerCbQuery();
-  pending.set(ctx.from.id, { type: 'set_gl' });
-  return showMenu(ctx, 'Send new *Gas Limit* (e.g., `300000`).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
-});
-bot.action('set_gb', async (ctx) => {
-  await ctx.answerCbQuery();
-  pending.set(ctx.from.id, { type: 'set_gb' });
-  return showMenu(ctx, 'Send new *Gwei Booster* in gwei (e.g., `0.2`).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
-});
-bot.action('set_defpct', async (ctx) => {
-  await ctx.answerCbQuery();
-  pending.set(ctx.from.id, { type: 'set_defpct' });
-  return showMenu(ctx, 'Send *Default Gas %* over market (e.g., `10`).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
-});
-bot.action('auto_toggle', async (ctx) => {
-  await ctx.answerCbQuery();
-  const u = getUserSettings(ctx.from.id);
-  setAutoBuyEnabled(ctx.from.id, !(u?.auto_buy_enabled ?? 0));
-  return renderSettings(ctx);
-});
-bot.action('auto_amt', async (ctx) => {
-  await ctx.answerCbQuery();
-  pending.set(ctx.from.id, { type: 'auto_amt' });
-  return showMenu(ctx, 'Send *Auto-buy amount* in PLS (e.g., `0.5`).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
-});
+bot.action('set_gl', async (ctx) => { await ctx.answerCbQuery(); pending.set(ctx.from.id, { type: 'set_gl' }); return showMenu(ctx, 'Send new *Gas Limit* (e.g., `300000`).', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) }); });
+bot.action('set_gb', async (ctx) => { await ctx.answerCbQuery(); pending.set(ctx.from.id, { type: 'set_gb' }); return showMenu(ctx, 'Send new *Gwei Booster* in gwei (e.g., `0.2`).', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) }); });
+bot.action('set_defpct', async (ctx) => { await ctx.answerCbQuery(); pending.set(ctx.from.id, { type: 'set_defpct' }); return showMenu(ctx, 'Send *Default Gas %* over market (e.g., `10`).', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) }); });
+bot.action('auto_toggle', async (ctx) => { await ctx.answerCbQuery(); const u = getUserSettings(ctx.from.id); setAutoBuyEnabled(ctx.from.id, !(u?.auto_buy_enabled ?? 0)); return renderSettings(ctx); });
+bot.action('auto_amt', async (ctx) => { await ctx.answerCbQuery(); pending.set(ctx.from.id, { type: 'auto_amt' }); return showMenu(ctx, 'Send *Auto-buy amount* in PLS (e.g., `0.5`).', { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) }); });
 
 /* ---------- Wallets: list/manage ---------- */
 async function renderWalletsList(ctx: any) {
@@ -404,18 +379,8 @@ bot.action('buy_set_token', async (ctx) => {
 });
 
 bot.action('gas_pct_open', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Choose gas % over market:', buyGasPctMenu()); });
-bot.action(/^gas_pct_set:(-?\d+)$/, async (ctx: any) => {
-  await ctx.answerCbQuery();
-  const v = Number(ctx.match[1]);
-  setGasPercent(ctx.from.id, v);
-  return renderBuyMenu(ctx);
-});
-
-bot.action('pair_info', async (ctx) => {
-  await ctx.answerCbQuery();
-  const W = process.env.WPLS_ADDRESS!;
-  return ctx.reply(`Base pair is WPLS:\n${W}`);
-});
+bot.action(/^gas_pct_set:(-?\d+)$/, async (ctx: any) => { await ctx.answerCbQuery(); const v = Number(ctx.match[1]); setGasPercent(ctx.from.id, v); return renderBuyMenu(ctx); });
+bot.action('pair_info', async (ctx) => { await ctx.answerCbQuery(); const W = process.env.WPLS_ADDRESS!; return ctx.reply(`Base pair is WPLS:\n${W}`); });
 
 /* Toggle wallet in selection set */
 bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
@@ -426,9 +391,9 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
   return renderBuyMenu(ctx);
 });
 
-/* ----- Tx notifications: tolerate null hash ----- */
-async function notifyPendingThenSuccess(ctx: any, kind: 'Buy' | 'Sell', hash?: string | null) {
-  if (!hash) return; // only proceed if we actually have a hash
+/* ----- Tx notifications: tolerate null hash & avoid type errors ----- */
+async function notifyTx(ctx: any, kind: 'Buy' | 'Sell', hash?: string | null) {
+  if (!hash || typeof hash !== 'string') return;
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
     await provider.waitForTransaction(hash);
@@ -461,7 +426,7 @@ bot.action('buy_exec', async (ctx) => {
       const hash = (r as any)?.hash;
 
       if (preQuote?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-      if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
+      if (hash) notifyTx(ctx, 'Buy', hash);
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
@@ -491,7 +456,7 @@ bot.action('buy_exec_all', async (ctx) => {
       const hash = (r as any)?.hash;
 
       if (preQuote?.amountOut) recordTrade(ctx.from.id, row.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-      if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
+      if (hash) notifyTx(ctx, 'Buy', hash);
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(row), u.token_address, gas).catch(() => {});
@@ -634,7 +599,7 @@ async function renderSellMenu(ctx: any) {
   await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenu() });
 }
 
-/* --- Sell menu entry points --- */
+/* Sell menu entries */
 bot.action('sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
 bot.action('sell_menu', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
@@ -674,14 +639,14 @@ bot.action('sell_exec', async (ctx) => {
     const hash = (r as any)?.hash;
 
     if (q?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
-    if (hash) notifyPendingThenSuccess(ctx, 'Sell', hash);
+    if (hash) notifyTx(ctx, 'Sell', hash);
 
   } catch (e: any) { await ctx.reply('Sell failed: ' + e.message); }
   await upsertPinnedPosition(ctx);
   return renderSellMenu(ctx);
 });
 
-/* ----- pinned position buttons ----- */
+/* Pinned buttons */
 bot.action('pin_buy', async (ctx) => { await ctx.answerCbQuery(); return renderBuyMenu(ctx); });
 bot.action('pin_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
 
@@ -767,7 +732,7 @@ bot.command('balances', async (ctx) => {
   return ctx.reply(`Wallet ${addr}\n\nPLS: ${fmtPls(plsBal)}\nToken: ${token}`);
 });
 
-/* ---------- TEXT: prompts ---------- */
+/* ---------- TEXT: prompts (incl. limit building) ---------- */
 bot.on('text', async (ctx, next) => {
   const p = pending.get(ctx.from.id);
   if (p) {
@@ -895,7 +860,7 @@ bot.on('text', async (ctx, next) => {
     return;
   }
 
-  // Auto-detect token address
+  // Auto-detect token address pasted into chat
   const text = String(ctx.message.text).trim();
   if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
     setToken(ctx.from.id, text);
@@ -909,7 +874,7 @@ bot.on('text', async (ctx, next) => {
         const gas = await computeGas(ctx.from.id);
         const receipt = await buyAutoRoute(getPrivateKey(w), text, ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01)), 0n, gas);
         const hash = (receipt as any)?.hash;
-        if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
+        if (hash) notifyTx(ctx, 'Buy', hash);
       } catch (e: any) {
         await ctx.reply('Auto-buy failed: ' + e.message);
       }
@@ -927,7 +892,6 @@ bot.on('text', async (ctx, next) => {
 bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Main Menu', mainMenu()); });
 bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
 bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
-
 bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
 
 /* ---------- LIMIT ENGINE ---------- */
@@ -946,7 +910,7 @@ async function plsUSD(): Promise<number | null> {
   try {
     if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) return null;
     const meta = await tokenMeta(STABLE);
-    const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE);
+    const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE); // 1 WPLS -> stable
     if (!q) return null;
     return Number(ethers.formatUnits(q.amountOut, meta.decimals ?? 18)); // USD-ish per 1 PLS
   } catch { return null; }
