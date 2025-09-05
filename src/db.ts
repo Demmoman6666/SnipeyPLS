@@ -84,7 +84,7 @@ export async function initDb() {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
-  ");
+  `);
 
   // ---------- Best-effort migrations (covers existing DBs) ----------
   tryExec(`ALTER TABLE users ADD COLUMN gwei_boost_gwei REAL DEFAULT 0.0;`);
@@ -263,8 +263,7 @@ export function cancelLimitOrder(telegramId: number, id: number) {
   `).run(id, telegramId).changes;
 }
 
-// ✅ Accept string | null | undefined and normalize to NULL in DB
-export function markLimitFilled(id: number, txHash?: string | null) {
+export function markLimitFilled(id: number, txHash?: string) {
   return getDb().prepare(`
     UPDATE limit_orders
     SET status = 'FILLED', tx_hash = ?, updated_at = strftime('%s','now')
