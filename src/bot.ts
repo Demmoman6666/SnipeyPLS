@@ -1004,7 +1004,10 @@ async function checkLimitsOnce() {
         const mcap = Number(ethers.formatUnits(sup, meta.decimals ?? 18)) * pUSD;
         should = (r.side === 'BUY') ? (mcap <= r.trigger_value) : (mcap >= r.trigger_value);
       } else if (r.trigger_type === 'MULT') {
-        const avg = getAvgEntry(r.telegram_id, r.token_address);
+        // ✅ use token decimals for accurate average
+        const meta = await tokenMeta(r.token_address);
+        const dec = meta.decimals ?? 18;
+        const avg = getAvgEntry(r.telegram_id, r.token_address, dec);
         if (!avg) continue;
         const target = avg.avgPlsPerToken * r.trigger_value;
         should = pPLS >= target;
