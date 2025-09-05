@@ -603,20 +603,17 @@ async function renderSellMenu(ctx: any) {
 
   if (w && u?.token_address) {
     try {
-      // ✅ capture a narrowed local to avoid string|null leaking into nested async
-      const tokenAddr = u.token_address as string;
-
-      const meta = await tokenMeta(tokenAddr);
+      const meta = await tokenMeta(u.token_address);
       const dec = meta.decimals ?? 18;
       metaSymbol = meta.symbol || meta.name || 'TOKEN';
 
-      const c = erc20(tokenAddr);
+      const c = erc20(u.token_address);
       const [bal, best] = await Promise.all([
         c.balanceOf(w.address),
         (async () => {
           const amt = await c.balanceOf(w.address);
           const sellAmt = (amt * BigInt(Math.round(pct))) / 100n;
-          return (sellAmt > 0n) ? bestQuoteSell(sellAmt, tokenAddr) : null;
+          return (sellAmt > 0n) ? bestQuoteSell(sellAmt, u.token_address) : null;
         })()
       ]);
 
@@ -624,7 +621,7 @@ async function renderSellMenu(ctx: any) {
 
       if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  _(Route: ${best.route.key})_`;
 
-      const avg = getAvgEntry(ctx.from.id, tokenAddr, dec);
+      const avg = getAvgEntry(ctx.from.id, u.token_address, dec);
       if (avg && best) {
         const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
         const amtTok = Number(ethers.formatUnits(amountIn, dec));
@@ -654,11 +651,10 @@ async function renderSellMenu(ctx: any) {
   await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenu() });
 }
 
+/* --- Robust entry points for Sell menu (cover multiple button IDs) --- */
+bot.action('sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
+bot.action('sell_menu', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
-bot.action('sell_pct_25', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 25); return renderSellMenu(ctx); });
-bot.action('sell_pct_50', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 50); return renderSellMenu(ctx); });
-bot.action('sell_pct_75', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 75); return renderSellMenu(ctx); });
-bot.action('sell_pct_100', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 100); return renderSellMenu(ctx); });
 
 /* Sell ▸ Approve */
 bot.action('sell_approve', async (ctx) => {
