@@ -263,7 +263,7 @@ export function cancelLimitOrder(telegramId: number, id: number) {
   `).run(id, telegramId).changes;
 }
 
-export function markLimitFilled(id: number, txHash?: string) {
+export function markLimitFilled(id: number, txHash?: string | null) {
   return getDb().prepare(`
     UPDATE limit_orders
     SET status = 'FILLED', tx_hash = ?, updated_at = strftime('%s','now')
