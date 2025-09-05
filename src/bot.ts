@@ -28,13 +28,13 @@ const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
 const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const fmtDec = (s: string) => { const [i, d] = s.split('.'); return d ? `${fmtInt(i)}.${d}` : fmtInt(i); };
 const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
-// allow null too so callers can safely pass possibly-null hashes
+// accepts null/undefined safely
 const otter = (hash?: string | null) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
-// type guard to narrow unknown/nullable hash values
-function ensureHash(x: unknown): x is string {
-  return typeof x === 'string' && x.length > 0;
+// type guard – ONLY treat h as string if it’s a 0x…64 hex
+function ensureHash(h: unknown): h is string {
+  return typeof h === 'string' && /^0x[0-9a-fA-F]{64}$/.test(h);
 }
 
 /* ---------- message lifecycle: delete previous menus, manage pin ---------- */
@@ -100,7 +100,7 @@ async function upsertPinnedPosition(ctx: any) {
       `Token: ${u.token_address}${meta.symbol ? ` (${meta.symbol})` : ''}`,
       `Wallet: ${short(w.address)}`,
       `Holdings: ${fmtDec(ethers.formatUnits(bal, decimals))} ${meta.symbol || 'TOKEN'}`,
-      q?.amountOut ? `Est. value: ${fmtPls(q.amountOut)} PLS  ·  Route: ${q?.route?.key ?? '—'}` : 'Est. value: —',
+      q?.amountOut ? `Est. value: ${fmtPls(q.amountOut)} PLS  ·  Route: ${q.route.key}` : 'Est. value: —',
       avg ? `Entry: ${NF.format(avg.avgPlsPerToken)} PLS/token` : 'Entry: —',
       `Unrealized PnL: ${pnlLine}`,
     ].join('\n');
@@ -446,7 +446,7 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
 });
 
 /* ----- Tx notifications: pending -> success (delete pending) ----- */
-async function notifyPendingThenSuccess(ctx: any, kind: 'Buy' | 'Sell', hash: string) {
+async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash: string) {
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
     await provider.waitForTransaction(hash);
@@ -833,8 +833,8 @@ bot.on('text', async (ctx, next) => {
       try {
         const gas = await computeGas(ctx.from.id);
         const receipt = await withdrawPls(getPrivateKey(w), to, ethers.parseEther(String(amount)), gas);
-        const hash = (receipt as any)?.hash as string | null | undefined;
-        await ctx.reply(hash ? `Withdraw sent! ${otter(hash)}` : 'Withdraw sent! (pending)');
+        const hashUnknown = (receipt as any)?.hash as unknown;
+        await ctx.reply(ensureHash(hashUnknown) ? `Withdraw sent! ${otter(hashUnknown)}` : 'Withdraw sent! (pending)');
       } catch (e: any) { await ctx.reply('Withdraw failed: ' + e.message); }
       pending.delete(ctx.from.id);
       return renderWalletManage(ctx, (p as any).walletId);
@@ -1022,13 +1022,13 @@ async function checkLimitsOnce() {
         const amt = r.amount_pls_wei ? BigInt(r.amount_pls_wei) : 0n;
         if (amt <= 0n) { markLimitError(r.id, 'amount zero'); continue; }
         const rec = await buyAutoRoute(getPrivateKey(w), r.token_address, amt, 0n, gas);
-        const hash = (rec as any)?.hash as string | null | undefined;
-        markLimitFilled(r.id, hash ?? null);
+        const hashUnknown = (rec as any)?.hash as unknown;
+        markLimitFilled(r.id, ensureHash(hashUnknown) ? hashUnknown : null);
         try {
           const pre = await bestQuoteBuy(amt, r.token_address);
           if (pre?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'BUY', amt, pre.amountOut, pre.route.key);
         } catch {}
-        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${hash ? otter(hash) : ''}`);
+        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${ensureHash(hashUnknown) ? otter(hashUnknown) : ''}`);
       } else {
         const c = erc20(r.token_address);
         const bal = await c.balanceOf(w.address);
@@ -1038,10 +1038,10 @@ async function checkLimitsOnce() {
 
         const q = await bestQuoteSell(amount, r.token_address);
         const rec = await sellAutoRoute(getPrivateKey(w), r.token_address, amount, 0n, gas);
-        const hash = (rec as any)?.hash as string | null | undefined;
-        markLimitFilled(r.id, hash ?? null);
+        const hashUnknown = (rec as any)?.hash as unknown;
+        markLimitFilled(r.id, ensureHash(hashUnknown) ? hashUnknown : null);
         if (q?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'SELL', q.amountOut, amount, q.route.key);
-        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit SELL filled #${r.id}\n${hash ? otter(hash) : ''}`);
+        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit SELL filled #${r.id}\n${ensureHash(hashUnknown) ? otter(hashUnknown) : ''}`);
       }
     } catch (e: any) {
       markLimitError(r.id, e?.message ?? String(e));
