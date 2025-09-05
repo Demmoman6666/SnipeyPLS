@@ -1,3 +1,4 @@
+// src/bot.ts
 import './boot.js';
 import { Telegraf, Markup } from 'telegraf';
 import { getConfig } from './config.js';
