@@ -32,7 +32,7 @@ const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string | null) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
-// strict tx hash check (0x + 64 hex chars)
+// strict hash check (0x + 64 hex)
 function ensureHash(h: unknown): h is string {
   return typeof h === 'string' && /^0x[0-9a-fA-F]{64}$/.test(h);
 }
@@ -446,10 +446,9 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
 });
 
 /* ----- Tx notifications: pending -> success (delete pending) ----- */
-// SAFE notifier: accepts undefined/null, no-ops if not a real hash
 async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string | null) {
-  if (!ensureHash(hash)) return;         // nothing to wait on (or malformed)
-  const txHash: string = hash;           // now definitely a string
+  if (!ensureHash(hash)) return;              // nothing valid to wait on
+  const txHash: string = hash;                // narrowed to plain string
 
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
@@ -458,7 +457,7 @@ async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: str
     const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
     await ctx.reply(`✅ ${title} ${otter(txHash)}`);
   } catch {
-    // leave the pending tick if it fails/times out
+    // leave pending if it fails/times out
   }
 }
 
