@@ -32,6 +32,11 @@ const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string | null) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
+// type guard to narrow unknown/nullable hash values
+function ensureHash(x: unknown): x is string {
+  return typeof x === 'string' && x.length > 0;
+}
+
 /* ---------- message lifecycle: delete previous menus, manage pin ---------- */
 const lastMenuMsg = new Map<number, number>();  // user -> last (non-pinned) menu message id
 const pinnedPosMsg = new Map<number, number>(); // user -> pinned "POSITION" message id
@@ -95,7 +100,7 @@ async function upsertPinnedPosition(ctx: any) {
       `Token: ${u.token_address}${meta.symbol ? ` (${meta.symbol})` : ''}`,
       `Wallet: ${short(w.address)}`,
       `Holdings: ${fmtDec(ethers.formatUnits(bal, decimals))} ${meta.symbol || 'TOKEN'}`,
-      q?.amountOut ? `Est. value: ${fmtPls(q.amountOut)} PLS  ·  Route: ${q.route.key}` : 'Est. value: —',
+      q?.amountOut ? `Est. value: ${fmtPls(q.amountOut)} PLS  ·  Route: ${q?.route?.key ?? '—'}` : 'Est. value: —',
       avg ? `Entry: ${NF.format(avg.avgPlsPerToken)} PLS/token` : 'Entry: —',
       `Unrealized PnL: ${pnlLine}`,
     ].join('\n');
@@ -441,21 +446,13 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
 });
 
 /* ----- Tx notifications: pending -> success (delete pending) ----- */
-// Accept possibly-null/undefined hash and no-op if falsy to avoid TS "string | null" errors at call sites.
-async function notifyPendingThenSuccess(
-  ctx: any,
-  kind: 'Buy' | 'Sell',
-  hash: string | null | undefined
-) {
-  if (!hash) return;
-  const txHash: string = hash;
-
+async function notifyPendingThenSuccess(ctx: any, kind: 'Buy' | 'Sell', hash: string) {
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
-    await provider.waitForTransaction(txHash);
+    await provider.waitForTransaction(hash);
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
     const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
-    await ctx.reply(`✅ ${title} ${otter(txHash)}`);
+    await ctx.reply(`✅ ${title} ${otter(hash)}`);
   } catch {
     // leave pending if it fails/times out
   }
@@ -481,10 +478,10 @@ bot.action('buy_exec', async (ctx) => {
     try {
       const gas = await computeGas(ctx.from.id);
       const r = await buyAutoRoute(getPrivateKey(w), u.token_address, amountIn, 0n, gas);
-      const hash = (r as any)?.hash as string | null | undefined;
+      const hashUnknown = (r as any)?.hash as unknown;
 
       if (preQuote?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-      if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
+      if (ensureHash(hashUnknown)) notifyPendingThenSuccess(ctx, 'Buy', hashUnknown);
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
@@ -511,10 +508,10 @@ bot.action('buy_exec_all', async (ctx) => {
     try {
       const gas = await computeGas(ctx.from.id);
       const r = await buyAutoRoute(getPrivateKey(row), u.token_address, amountIn, 0n, gas);
-      const hash = (r as any)?.hash as string | null | undefined;
+      const hashUnknown = (r as any)?.hash as unknown;
 
       if (preQuote?.amountOut) recordTrade(ctx.from.id, row.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-      if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
+      if (ensureHash(hashUnknown)) notifyPendingThenSuccess(ctx, 'Buy', hashUnknown);
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(row), u.token_address, gas).catch(() => {});
@@ -694,10 +691,10 @@ bot.action('sell_exec', async (ctx) => {
     const q = await bestQuoteSell(amount, u.token_address);      // for recording
     const gas = await computeGas(ctx.from.id);
     const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
-    const hash = (r as any)?.hash as string | null | undefined;
+    const hashUnknown = (r as any)?.hash as unknown;
 
     if (q?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
-    if (hash) notifyPendingThenSuccess(ctx, 'Sell', hash);
+    if (ensureHash(hashUnknown)) notifyPendingThenSuccess(ctx, 'Sell', hashUnknown);
 
   } catch (e: any) { await ctx.reply('Sell failed: ' + e.message); }
   await upsertPinnedPosition(ctx);
@@ -931,8 +928,8 @@ bot.on('text', async (ctx, next) => {
       try {
         const gas = await computeGas(ctx.from.id);
         const receipt = await buyAutoRoute(getPrivateKey(w), text, ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01)), 0n, gas);
-        const hash = (receipt as any)?.hash as string | null | undefined;
-        if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
+        const hashUnknown = (receipt as any)?.hash as unknown;
+        if (ensureHash(hashUnknown)) notifyPendingThenSuccess(ctx, 'Buy', hashUnknown);
       } catch (e: any) {
         await ctx.reply('Auto-buy failed: ' + e.message);
       }
