@@ -32,49 +32,42 @@ const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string | null) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
-// type guard – ONLY treat h as string if it’s a 0x…64 hex
+// strict hash check (0x + 64 hex)
 function ensureHash(h: unknown): h is string {
   return typeof h === 'string' && /^0x[0-9a-fA-F]{64}$/.test(h);
 }
 
 /* ---------- message lifecycle: delete previous menus, manage pin ---------- */
-const lastMenuMsg = new Map<number, number>();  // user -> last (non-pinned) menu message id
-const pinnedPosMsg = new Map<number, number>(); // user -> pinned "POSITION" message id
+const lastMenuMsg = new Map<number, number>();
+const pinnedPosMsg = new Map<number, number>();
 
 function canEdit(ctx: any) { return Boolean(ctx?.callbackQuery?.message?.message_id); }
 
-/** Show a menu, deleting the prior menu message for this user (if any). */
 async function showMenu(ctx: any, text: string, extra?: any) {
   const uid = ctx.from.id;
   const pinned = pinnedPosMsg.get(uid);
-
-  // If we can edit (button taps), just edit and keep id
   if (canEdit(ctx)) {
     try {
       await ctx.editMessageText(text, extra);
       lastMenuMsg.set(uid, ctx.callbackQuery.message.message_id);
       return;
-    } catch { /* fallthrough to reply */ }
+    } catch {}
   }
-
-  // delete previous menu (but never the pinned id)
   const prev = lastMenuMsg.get(uid);
   if (prev && (!pinned || prev !== pinned)) {
     try { await ctx.deleteMessage(prev); } catch {}
   }
-
   const m = await ctx.reply(text, extra);
   lastMenuMsg.set(uid, m.message_id);
 }
 
-/** Post or replace a pinned "POSITION" card (delete + re-send to avoid edit overload typing) */
+/** Post or replace a pinned "POSITION" card */
 async function upsertPinnedPosition(ctx: any) {
   const uid = ctx.from.id;
   const u = getUserSettings(uid);
   const w = getActiveWallet(uid);
   if (!u?.token_address || !w) return;
 
-  // always pass a definite chat id
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
 
   try {
@@ -109,7 +102,6 @@ async function upsertPinnedPosition(ctx: any) {
       [Markup.button.callback('🟢 Buy More', 'pin_buy'), Markup.button.callback('🔴 Sell', 'pin_sell')],
     ]);
 
-    // delete old pinned message if we tracked one
     const existing = pinnedPosMsg.get(uid);
     if (existing) {
       try { await bot.telegram.deleteMessage(chatId, existing); } catch {}
@@ -446,15 +438,19 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
 });
 
 /* ----- Tx notifications: pending -> success (delete pending) ----- */
-async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash: string) {
+// <-- THIS is the critical change: accept possibly-null and guard inside
+async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string | null) {
+  if (!ensureHash(hash)) return;         // nothing to wait on (or malformed)
+  const txHash: string = hash;           // now definitely a string
+
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
-    await provider.waitForTransaction(hash);
+    await provider.waitForTransaction(txHash);
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
     const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
-    await ctx.reply(`✅ ${title} ${otter(hash)}`);
+    await ctx.reply(`✅ ${title} ${otter(txHash)}`);
   } catch {
-    // leave pending if it fails/times out
+    // leave the pending tick if it fails/times out
   }
 }
 
@@ -478,10 +474,10 @@ bot.action('buy_exec', async (ctx) => {
     try {
       const gas = await computeGas(ctx.from.id);
       const r = await buyAutoRoute(getPrivateKey(w), u.token_address, amountIn, 0n, gas);
-      const hashUnknown = (r as any)?.hash as unknown;
+      const hash = (r as any)?.hash as string | null | undefined;
 
       if (preQuote?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-      if (ensureHash(hashUnknown)) notifyPendingThenSuccess(ctx, 'Buy', hashUnknown);
+      notifyPendingThenSuccess(ctx, 'Buy', hash);
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
@@ -508,10 +504,10 @@ bot.action('buy_exec_all', async (ctx) => {
     try {
       const gas = await computeGas(ctx.from.id);
       const r = await buyAutoRoute(getPrivateKey(row), u.token_address, amountIn, 0n, gas);
-      const hashUnknown = (r as any)?.hash as unknown;
+      const hash = (r as any)?.hash as string | null | undefined;
 
       if (preQuote?.amountOut) recordTrade(ctx.from.id, row.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-      if (ensureHash(hashUnknown)) notifyPendingThenSuccess(ctx, 'Buy', hashUnknown);
+      notifyPendingThenSuccess(ctx, 'Buy', hash);
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(row), u.token_address, gas).catch(() => {});
@@ -691,10 +687,10 @@ bot.action('sell_exec', async (ctx) => {
     const q = await bestQuoteSell(amount, u.token_address);      // for recording
     const gas = await computeGas(ctx.from.id);
     const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
-    const hashUnknown = (r as any)?.hash as unknown;
+    const hash = (r as any)?.hash as string | null | undefined;
 
     if (q?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
-    if (ensureHash(hashUnknown)) notifyPendingThenSuccess(ctx, 'Sell', hashUnknown);
+    notifyPendingThenSuccess(ctx, 'Sell', hash);
 
   } catch (e: any) { await ctx.reply('Sell failed: ' + e.message); }
   await upsertPinnedPosition(ctx);
@@ -833,8 +829,8 @@ bot.on('text', async (ctx, next) => {
       try {
         const gas = await computeGas(ctx.from.id);
         const receipt = await withdrawPls(getPrivateKey(w), to, ethers.parseEther(String(amount)), gas);
-        const hashUnknown = (receipt as any)?.hash as unknown;
-        await ctx.reply(ensureHash(hashUnknown) ? `Withdraw sent! ${otter(hashUnknown)}` : 'Withdraw sent! (pending)');
+        const hash = (receipt as any)?.hash as string | null | undefined;
+        await ctx.reply(ensureHash(hash) ? `Withdraw sent! ${otter(hash)}` : 'Withdraw sent! (pending)');
       } catch (e: any) { await ctx.reply('Withdraw failed: ' + e.message); }
       pending.delete(ctx.from.id);
       return renderWalletManage(ctx, (p as any).walletId);
@@ -928,8 +924,8 @@ bot.on('text', async (ctx, next) => {
       try {
         const gas = await computeGas(ctx.from.id);
         const receipt = await buyAutoRoute(getPrivateKey(w), text, ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01)), 0n, gas);
-        const hashUnknown = (receipt as any)?.hash as unknown;
-        if (ensureHash(hashUnknown)) notifyPendingThenSuccess(ctx, 'Buy', hashUnknown);
+        const hash = (receipt as any)?.hash as string | null | undefined;
+        notifyPendingThenSuccess(ctx, 'Buy', hash);
       } catch (e: any) {
         await ctx.reply('Auto-buy failed: ' + e.message);
       }
@@ -948,7 +944,6 @@ bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); return showM
 bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
 bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
 
-// no-op pill handler
 bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
 
 /* ---------- LIMIT ENGINE ---------- */
@@ -1022,13 +1017,13 @@ async function checkLimitsOnce() {
         const amt = r.amount_pls_wei ? BigInt(r.amount_pls_wei) : 0n;
         if (amt <= 0n) { markLimitError(r.id, 'amount zero'); continue; }
         const rec = await buyAutoRoute(getPrivateKey(w), r.token_address, amt, 0n, gas);
-        const hashUnknown = (rec as any)?.hash as unknown;
-        markLimitFilled(r.id, ensureHash(hashUnknown) ? hashUnknown : null);
+        const hash = (rec as any)?.hash as string | null | undefined;
+        markLimitFilled(r.id, ensureHash(hash) ? hash : null);
         try {
           const pre = await bestQuoteBuy(amt, r.token_address);
           if (pre?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'BUY', amt, pre.amountOut, pre.route.key);
         } catch {}
-        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${ensureHash(hashUnknown) ? otter(hashUnknown) : ''}`);
+        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${ensureHash(hash) ? otter(hash) : ''}`);
       } else {
         const c = erc20(r.token_address);
         const bal = await c.balanceOf(w.address);
@@ -1038,10 +1033,10 @@ async function checkLimitsOnce() {
 
         const q = await bestQuoteSell(amount, r.token_address);
         const rec = await sellAutoRoute(getPrivateKey(w), r.token_address, amount, 0n, gas);
-        const hashUnknown = (rec as any)?.hash as unknown;
-        markLimitFilled(r.id, ensureHash(hashUnknown) ? hashUnknown : null);
+        const hash = (rec as any)?.hash as string | null | undefined;
+        markLimitFilled(r.id, ensureHash(hash) ? hash : null);
         if (q?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'SELL', q.amountOut, amount, q.route.key);
-        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit SELL filled #${r.id}\n${ensureHash(hashUnknown) ? otter(hashUnknown) : ''}`);
+        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit SELL filled #${r.id}\n${ensureHash(hash) ? otter(hash) : ''}`);
       }
     } catch (e: any) {
       markLimitError(r.id, e?.message ?? String(e));
