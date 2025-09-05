@@ -57,8 +57,16 @@ async function showMenu(ctx: any, text: string, extra?: any) {
     try { await ctx.deleteMessage(prev); } catch {}
   }
 
-  const m = await ctx.reply(text, extra);
-  lastMenuMsg.set(uid, m.message_id);
+  // robust send: if Telegram Markdown chokes, fall back to plain text without extras
+  try {
+    const m = await ctx.reply(text, extra as any);
+    lastMenuMsg.set(uid, m.message_id);
+  } catch {
+    try {
+      const m = await ctx.reply(text);
+      lastMenuMsg.set(uid, m.message_id);
+    } catch { /* final fallback: swallow */ }
+  }
 }
 
 /** Post or replace a pinned "POSITION" card (delete + re-send to avoid edit overload typing) */
@@ -585,73 +593,93 @@ bot.action(/^limit_cancel:(\d+)$/, async (ctx: any) => {
   return showMenu(ctx, changed ? `Limit #${id} cancelled.` : `Couldn’t cancel #${id}.`, mainMenu());
 });
 
-/* ---------- SELL MENU (clean UI) ---------- */
+/* ---------- SELL MENU (clean UI, hardened Markdown) ---------- */
 async function renderSellMenu(ctx: any) {
-  const u = getUserSettings(ctx.from.id);
-  const w = getActiveWallet(ctx.from.id);
-  const pct = u?.sell_pct ?? 100;
+  try {
+    const u = getUserSettings(ctx.from.id);
+    const w = getActiveWallet(ctx.from.id);
+    const pct = u?.sell_pct ?? 100;
 
-  let header = '🟥 *SELL MENU*';
-  let walletLine = `*Wallet:* ${w ? '`' + short(w.address) + '`' : '—'}`;
-  let tokenLine  = `*Token:* ${u?.token_address ? '`' + short(u.token_address) + '`' : '—'}`;
+    let header = '🟥 *SELL MENU*';
+    let walletLine = `*Wallet:* ${w ? '`' + short(w.address) + '`' : '—'}`;
+    let tokenLine  = `*Token:* ${u?.token_address ? '`' + short(u.token_address) + '`' : '—'}`;
 
-  let balLine = '• *Balance:* —';
-  let outLine = '• *Est. Out:* —';
-  let entryLine = '• *Entry:* —';
-  let pnlLine = '• *Net PnL:* —';
-  let metaSymbol = 'TOKEN';
+    let balLine = '• *Balance:* —';
+    let outLine = '• *Est. Out:* —';
+    let entryLine = '• *Entry:* —';
+    let pnlLine = '• *Net PnL:* —';
+    let metaSymbol = 'TOKEN';
 
-  if (w && u?.token_address) {
-    try {
-      // ✅ capture a narrowed local to avoid string|null leaking into nested async
-      const tokenAddr = u.token_address as string;
+    if (w && u?.token_address) {
+      try {
+        const tokenAddr = u.token_address as string;
 
-      const meta = await tokenMeta(tokenAddr);
-      const dec = meta.decimals ?? 18;
-      metaSymbol = meta.symbol || meta.name || 'TOKEN';
+        const meta = await tokenMeta(tokenAddr);
+        const dec = meta.decimals ?? 18;
+        metaSymbol = meta.symbol || meta.name || 'TOKEN';
 
-      const c = erc20(tokenAddr);
-      const [bal, best] = await Promise.all([
-        c.balanceOf(w.address),
-        (async () => {
-          const amt = await c.balanceOf(w.address);
-          const sellAmt = (amt * BigInt(Math.round(pct))) / 100n;
-          return (sellAmt > 0n) ? bestQuoteSell(sellAmt, tokenAddr) : null;
-        })()
-      ]);
+        const c = erc20(tokenAddr);
+        const [bal, best] = await Promise.all([
+          c.balanceOf(w.address),
+          (async () => {
+            const amt = await c.balanceOf(w.address);
+            const sellAmt = (amt * BigInt(Math.round(pct))) / 100n;
+            return (sellAmt > 0n) ? bestQuoteSell(sellAmt, tokenAddr) : null;
+          })()
+        ]);
 
-      balLine = `• *Balance:* ${fmtDec(ethers.formatUnits(bal, dec))} ${metaSymbol}`;
+        balLine = `• *Balance:* ${fmtDec(ethers.formatUnits(bal, dec))} ${metaSymbol}`;
 
-      if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  _(Route: ${best.route.key})_`;
+        if (best) {
+          // show route key inside code ticks to avoid Telegram Markdown parse errors
+          const routeKey = (best.route?.key ?? '').toString();
+          outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  \`${routeKey}\``;
+        }
 
-      const avg = getAvgEntry(ctx.from.id, tokenAddr, dec);
-      if (avg && best) {
-        const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
-        const amtTok = Number(ethers.formatUnits(amountIn, dec));
-        const curPls = Number(ethers.formatEther(best.amountOut));
-        const curAvg = amtTok > 0 ? curPls / amtTok : 0;
-        const pnlPls = curPls - (avg.avgPlsPerToken * amtTok);
-        const pnlPct = avg.avgPlsPerToken > 0 ? (curAvg / avg.avgPlsPerToken - 1) * 100 : 0;
+        const avg = getAvgEntry(ctx.from.id, tokenAddr, dec);
+        if (avg && best) {
+          const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
+          const amtTok = Number(ethers.formatUnits(amountIn, dec));
+          const curPls = Number(ethers.formatEther(best.amountOut));
+          const curAvg = amtTok > 0 ? curPls / amtTok : 0;
+          const pnlPls = curPls - (avg.avgPlsPerToken * amtTok);
+          const pnlPct = avg.avgPlsPerToken > 0 ? (curAvg / avg.avgPlsPerToken - 1) * 100 : 0;
 
-        entryLine = `• *Entry:* ${NF.format(avg.avgPlsPerToken)} PLS / ${metaSymbol}`;
-        pnlLine   = `• *Net PnL:* ${pnlPls >= 0 ? '🟢' : '🔴'} ${NF.format(pnlPls)} PLS  (${NF.format(pnlPct)}%)`;
-      }
-    } catch { /* keep defaults */ }
+          entryLine = `• *Entry:* ${NF.format(avg.avgPlsPerToken)} PLS / ${metaSymbol}`;
+          pnlLine   = `• *Net PnL:* ${pnlPls >= 0 ? '🟢' : '🔴'} ${NF.format(pnlPls)} PLS  (${NF.format(pnlPct)}%)`;
+        }
+      } catch { /* keep defaults */ }
+    }
+
+    const text = [
+      header,
+      '',
+      `${walletLine}    |    ${tokenLine}`,
+      `*Sell %:* ${NF.format(pct)}%`,
+      '',
+      balLine,
+      outLine,
+      entryLine,
+      pnlLine,
+    ].join('\n');
+
+    await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenu() });
+  } catch {
+    // ultra-safe fallback (no Markdown)
+    const u = getUserSettings(ctx.from.id);
+    const pct = u?.sell_pct ?? 100;
+    const text = [
+      'SELL MENU',
+      '',
+      `Sell %: ${NF.format(pct)}%`,
+      '',
+      'Balance: —',
+      'Est. Out: —',
+      'Entry: —',
+      'Net PnL: —',
+    ].join('\n');
+    await showMenu(ctx, text, sellMenu() as any);
   }
-
-  const text = [
-    header,
-    '',
-    `${walletLine}    |    ${tokenLine}`,
-    `*Sell %:* ${NF.format(pct)}%`,
-    '',
-    balLine,
-    outLine,
-    entryLine,
-    pnlLine,
-  ].join('\n');
-
-  await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenu() });
 }
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
