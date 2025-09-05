@@ -85,7 +85,7 @@ export async function initDb() {
     );
   `);
 
-  // ---------- Best-effort migrations ----------
+  // Best-effort migrations
   tryExec(`ALTER TABLE users ADD COLUMN gwei_boost_gwei REAL DEFAULT 0.0;`);
   tryExec(`ALTER TABLE users ADD COLUMN gas_pct REAL DEFAULT 0.0;`);
   tryExec(`ALTER TABLE users ADD COLUMN default_gas_pct REAL DEFAULT 0.0;`);
