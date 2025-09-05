@@ -28,7 +28,8 @@ const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
 const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const fmtDec = (s: string) => { const [i, d] = s.split('.'); return d ? `${fmtInt(i)}.${d}` : fmtInt(i); };
 const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
-const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
+// 🔧 allow null too so callers can safely pass possibly-null hashes
+const otter = (hash?: string | null) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
 /* ---------- message lifecycle: delete previous menus, manage pin ---------- */
@@ -440,16 +441,16 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
 });
 
 /* ----- Tx notifications: pending -> success (delete pending) ----- */
-async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string) {
-  if (!hash) return;
+// 🔧 hash can be null from some routers; accept it here to avoid TS errors at call sites
+async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string | null) {
+  if (!hash) return; // narrows to string
   // Pending: simple tick only
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
     await provider.waitForTransaction(hash);
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
-    const link = otter(hash);
     const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
-    await ctx.reply(`✅ ${title} ${link}`);
+    await ctx.reply(`✅ ${title} ${otter(hash)}`);
   } catch {
     // leave pending if it fails/times out
   }
