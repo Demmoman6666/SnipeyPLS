@@ -1,4 +1,3 @@
-// src/bot.ts
 import './boot.js';
 import { Telegraf, Markup } from 'telegraf';
 import { getConfig } from './config.js';
@@ -28,50 +27,40 @@ const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
 const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const fmtDec = (s: string) => { const [i, d] = s.split('.'); return d ? `${fmtInt(i)}.${d}` : fmtInt(i); };
 const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
-// 🔧 allow null too so callers can safely pass possibly-null hashes
 const otter = (hash?: string | null) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
-/* ---------- message lifecycle: delete previous menus, manage pin ---------- */
-const lastMenuMsg = new Map<number, number>();  // user -> last (non-pinned) menu message id
-const pinnedPosMsg = new Map<number, number>(); // user -> pinned "POSITION" message id
-
+/* ---------- message lifecycle ---------- */
+const lastMenuMsg = new Map<number, number>();
+const pinnedPosMsg = new Map<number, number>();
 function canEdit(ctx: any) { return Boolean(ctx?.callbackQuery?.message?.message_id); }
 
-/** Show a menu, deleting the prior menu message for this user (if any). */
 async function showMenu(ctx: any, text: string, extra?: any) {
   const uid = ctx.from.id;
   const pinned = pinnedPosMsg.get(uid);
-
-  // If we can edit (button taps), just edit and keep id
   if (canEdit(ctx)) {
     try {
       await ctx.editMessageText(text, extra);
       lastMenuMsg.set(uid, ctx.callbackQuery.message.message_id);
       return;
-    } catch { /* fallthrough to reply */ }
+    } catch {}
   }
-
-  // delete previous menu (but never the pinned id)
   const prev = lastMenuMsg.get(uid);
   if (prev && (!pinned || prev !== pinned)) {
     try { await ctx.deleteMessage(prev); } catch {}
   }
-
   const m = await ctx.reply(text, extra);
   lastMenuMsg.set(uid, m.message_id);
 }
 
-/** Post or replace a pinned "POSITION" card (delete + re-send to avoid edit overload typing) */
+/** pin/replace a POSITION card */
 async function upsertPinnedPosition(ctx: any) {
   const uid = ctx.from.id;
   const u = getUserSettings(uid);
   const w = getActiveWallet(uid);
   if (!u?.token_address || !w) return;
 
-  // always pass a definite chat id
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
-
   try {
     const meta = await tokenMeta(u.token_address);
     const decimals = meta.decimals ?? 18;
@@ -104,7 +93,6 @@ async function upsertPinnedPosition(ctx: any) {
       [Markup.button.callback('🟢 Buy More', 'pin_buy'), Markup.button.callback('🔴 Sell', 'pin_sell')],
     ]);
 
-    // delete old pinned message if we tracked one
     const existing = pinnedPosMsg.get(uid);
     if (existing) {
       try { await bot.telegram.deleteMessage(chatId, existing); } catch {}
@@ -113,7 +101,7 @@ async function upsertPinnedPosition(ctx: any) {
     const m = await bot.telegram.sendMessage(chatId, text, { parse_mode: 'Markdown', ...kb } as any);
     pinnedPosMsg.set(uid, m.message_id);
     try { await bot.telegram.pinChatMessage(chatId, m.message_id, { disable_notification: true } as any); } catch {}
-  } catch { /* ignore */ }
+  } catch {}
 }
 
 /* ---------- utilities ---------- */
@@ -129,7 +117,6 @@ async function getBalanceFast(address: string): Promise<{ value: bigint; ok: boo
   catch { return { value: 0n, ok: false }; }
 }
 
-/* compute effective gas from market + settings */
 async function computeGas(telegramId: number, extraPct = 0): Promise<{
   maxPriorityFeePerGas: bigint; maxFeePerGas: bigint; gasLimit: bigint;
 }> {
@@ -161,7 +148,7 @@ const selectedWallets = new Map<number, Set<number>>();
 function getSelSet(uid: number) { let s = selectedWallets.get(uid); if (!s) { s = new Set<number>(); selectedWallets.set(uid, s); } return s; }
 function chunk<T>(arr: T[], size = 6): T[][] { const out: T[][] = []; for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size)); return out; }
 
-/* --- parsing helpers --- */
+/* --- parsing helper --- */
 function parseNumHuman(s: string): number | null {
   const t = s.trim().toLowerCase().replace(/[, ]/g, '');
   const m = t.match(/^([0-9]*\.?[0-9]+)\s*([kmb])?$/);
@@ -355,7 +342,6 @@ bot.action('wallet_add', async (ctx) => {
 });
 
 /* ---------- BUY MENU ---------- */
-
 async function renderBuyMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
   const aw = getActiveWallet(ctx.from.id);
@@ -440,22 +426,19 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
   return renderBuyMenu(ctx);
 });
 
-/* ----- Tx notifications: pending -> success (delete pending) ----- */
-// 🔧 require a definite string so provider.waitForTransaction() types are happy
-async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash: string) {
-  // Pending: simple tick only
+/* ----- Tx notifications: tolerate null hash ----- */
+async function notifyPendingThenSuccess(ctx: any, kind: 'Buy' | 'Sell', hash?: string | null) {
+  if (!hash) return; // only proceed if we actually have a hash
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
     await provider.waitForTransaction(hash);
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
     const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
     await ctx.reply(`✅ ${title} ${otter(hash)}`);
-  } catch {
-    // leave pending if it fails/times out
-  }
+  } catch {}
 }
 
-/* Buy using selected wallets (or active) + auto-approve + record entry + pin card */
+/* Buy using selected wallets (or active) */
 bot.action('buy_exec', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
@@ -585,7 +568,7 @@ bot.action(/^limit_cancel:(\d+)$/, async (ctx: any) => {
   return showMenu(ctx, changed ? `Limit #${id} cancelled.` : `Couldn’t cancel #${id}.`, mainMenu());
 });
 
-/* ---------- SELL MENU (clean UI) ---------- */
+/* ---------- SELL MENU ---------- */
 async function renderSellMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
   const w = getActiveWallet(ctx.from.id);
@@ -633,7 +616,7 @@ async function renderSellMenu(ctx: any) {
         entryLine = `• *Entry:* ${NF.format(avg.avgPlsPerToken)} PLS / ${metaSymbol}`;
         pnlLine   = `• *Net PnL:* ${pnlPls >= 0 ? '🟢' : '🔴'} ${NF.format(pnlPls)} PLS  (${NF.format(pnlPct)}%)`;
       }
-    } catch { /* keep defaults */ }
+    } catch {}
   }
 
   const text = [
@@ -651,7 +634,7 @@ async function renderSellMenu(ctx: any) {
   await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenu() });
 }
 
-/* --- Robust entry points for Sell menu (cover multiple button IDs) --- */
+/* --- Sell menu entry points --- */
 bot.action('sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
 bot.action('sell_menu', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
@@ -685,7 +668,7 @@ bot.action('sell_exec', async (ctx) => {
     const amount = (bal * BigInt(Math.round(pct))) / 100n;
     if (amount <= 0n) return showMenu(ctx, 'Nothing to sell.', sellMenu());
 
-    const q = await bestQuoteSell(amount, u.token_address);      // for recording
+    const q = await bestQuoteSell(amount, u.token_address);
     const gas = await computeGas(ctx.from.id);
     const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
     const hash = (r as any)?.hash;
@@ -698,7 +681,7 @@ bot.action('sell_exec', async (ctx) => {
   return renderSellMenu(ctx);
 });
 
-/* ----- Pinned position: buttons ----- */
+/* ----- pinned position buttons ----- */
 bot.action('pin_buy', async (ctx) => { await ctx.answerCbQuery(); return renderBuyMenu(ctx); });
 bot.action('pin_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
 
@@ -720,7 +703,7 @@ bot.command('rpc_check', async (ctx) => {
   await ctx.reply(lines, { parse_mode: 'Markdown' });
 });
 
-/* ---------- Classic commands (kept) ---------- */
+/* ---------- Classic commands ---------- */
 bot.command('wallets', async (ctx) => renderWalletsList(ctx));
 bot.command('wallet_new', async (ctx) => {
   const [_, name] = ctx.message.text.split(/\s+/, 2);
@@ -784,7 +767,7 @@ bot.command('balances', async (ctx) => {
   return ctx.reply(`Wallet ${addr}\n\nPLS: ${fmtPls(plsBal)}\nToken: ${token}`);
 });
 
-/* ---------- TEXT: prompts (including limit building) ---------- */
+/* ---------- TEXT: prompts ---------- */
 bot.on('text', async (ctx, next) => {
   const p = pending.get(ctx.from.id);
   if (p) {
@@ -945,7 +928,6 @@ bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); return showM
 bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
 bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
 
-// no-op pill handler
 bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
 
 /* ---------- LIMIT ENGINE ---------- */
@@ -964,7 +946,7 @@ async function plsUSD(): Promise<number | null> {
   try {
     if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) return null;
     const meta = await tokenMeta(STABLE);
-    const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE); // 1 WPLS -> stable
+    const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE);
     if (!q) return null;
     return Number(ethers.formatUnits(q.amountOut, meta.decimals ?? 18)); // USD-ish per 1 PLS
   } catch { return null; }
