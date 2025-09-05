@@ -28,7 +28,7 @@ const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
 const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const fmtDec = (s: string) => { const [i, d] = s.split('.'); return d ? `${fmtInt(i)}.${d}` : fmtInt(i); };
 const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
-// allow null too so callers can safely pass possibly-null hashes
+// Safe with null too; returns empty string if no hash
 const otter = (hash?: string | null) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
@@ -441,17 +441,14 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
 });
 
 /* ----- Tx notifications: pending -> success (delete pending) ----- */
-/** Suggestion #2 implemented: accept nullable hash, guard, and only wait on a definite string */
-async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string | null) {
-  if (!hash) return; // nothing to wait on
-  const txHash = hash as string; // narrowed
-
+// NOTE: This function expects a definite string. Always guard before calling.
+async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash: string) {
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
-    await provider.waitForTransaction(txHash);
+    await provider.waitForTransaction(hash);
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
     const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
-    await ctx.reply(`✅ ${title} ${otter(txHash)}`);
+    await ctx.reply(`✅ ${title} ${otter(hash)}`);
   } catch {
     // leave pending if it fails/times out
   }
@@ -1027,7 +1024,7 @@ async function checkLimitsOnce() {
           const pre = await bestQuoteBuy(amt, r.token_address);
           if (pre?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'BUY', amt, pre.amountOut, pre.route.key);
         } catch {}
-        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${hash ? otter(hash) : ''}`);
+        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${otter(hash)}`);
       } else {
         const c = erc20(r.token_address);
         const bal = await c.balanceOf(w.address);
@@ -1040,7 +1037,7 @@ async function checkLimitsOnce() {
         const hash = (rec as any)?.hash as string | null | undefined;
         markLimitFilled(r.id, hash ?? null);
         if (q?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'SELL', q.amountOut, amount, q.route.key);
-        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit SELL filled #${r.id}\n${hash ? otter(hash) : ''}`);
+        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit SELL filled #${r.id}\n${otter(hash)}`);
       }
     } catch (e: any) {
       markLimitError(r.id, e?.message ?? String(e));
