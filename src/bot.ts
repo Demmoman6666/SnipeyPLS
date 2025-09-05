@@ -32,42 +32,49 @@ const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string | null) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
-// strict hash check (0x + 64 hex)
+// strict tx hash check (0x + 64 hex chars)
 function ensureHash(h: unknown): h is string {
   return typeof h === 'string' && /^0x[0-9a-fA-F]{64}$/.test(h);
 }
 
 /* ---------- message lifecycle: delete previous menus, manage pin ---------- */
-const lastMenuMsg = new Map<number, number>();
-const pinnedPosMsg = new Map<number, number>();
+const lastMenuMsg = new Map<number, number>();  // user -> last (non-pinned) menu message id
+const pinnedPosMsg = new Map<number, number>(); // user -> pinned "POSITION" message id
 
 function canEdit(ctx: any) { return Boolean(ctx?.callbackQuery?.message?.message_id); }
 
+/** Show a menu, deleting the prior menu message for this user (if any). */
 async function showMenu(ctx: any, text: string, extra?: any) {
   const uid = ctx.from.id;
   const pinned = pinnedPosMsg.get(uid);
+
+  // If we can edit (button taps), just edit and keep id
   if (canEdit(ctx)) {
     try {
       await ctx.editMessageText(text, extra);
       lastMenuMsg.set(uid, ctx.callbackQuery.message.message_id);
       return;
-    } catch {}
+    } catch { /* fallthrough to reply */ }
   }
+
+  // delete previous menu (but never the pinned id)
   const prev = lastMenuMsg.get(uid);
   if (prev && (!pinned || prev !== pinned)) {
     try { await ctx.deleteMessage(prev); } catch {}
   }
+
   const m = await ctx.reply(text, extra);
   lastMenuMsg.set(uid, m.message_id);
 }
 
-/** Post or replace a pinned "POSITION" card */
+/** Post or replace a pinned "POSITION" card (delete + re-send to avoid edit overload typing) */
 async function upsertPinnedPosition(ctx: any) {
   const uid = ctx.from.id;
   const u = getUserSettings(uid);
   const w = getActiveWallet(uid);
   if (!u?.token_address || !w) return;
 
+  // always pass a definite chat id
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
 
   try {
@@ -102,6 +109,7 @@ async function upsertPinnedPosition(ctx: any) {
       [Markup.button.callback('🟢 Buy More', 'pin_buy'), Markup.button.callback('🔴 Sell', 'pin_sell')],
     ]);
 
+    // delete old pinned message if we tracked one
     const existing = pinnedPosMsg.get(uid);
     if (existing) {
       try { await bot.telegram.deleteMessage(chatId, existing); } catch {}
@@ -438,7 +446,7 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
 });
 
 /* ----- Tx notifications: pending -> success (delete pending) ----- */
-// <-- THIS is the critical change: accept possibly-null and guard inside
+// SAFE notifier: accepts undefined/null, no-ops if not a real hash
 async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string | null) {
   if (!ensureHash(hash)) return;         // nothing to wait on (or malformed)
   const txHash: string = hash;           // now definitely a string
@@ -944,6 +952,7 @@ bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); return showM
 bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
 bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
 
+// no-op pill handler
 bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
 
 /* ---------- LIMIT ENGINE ---------- */
