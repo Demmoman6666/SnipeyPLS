@@ -392,14 +392,15 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
 });
 
 /* ----- Tx notifications: tolerate null hash & avoid type errors ----- */
-async function notifyTx(ctx: any, kind: 'Buy' | 'Sell', hash?: string | null) {
-  if (!hash || typeof hash !== 'string') return;
+async function notifyTx(ctx: any, kind: 'Buy' | 'Sell', hash?: unknown) {
+  const h = (typeof hash === 'string' && hash.length > 0) ? hash : null;
+  if (!h) return;
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
-    await provider.waitForTransaction(hash);
+    await provider.waitForTransaction(h);
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
     const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
-    await ctx.reply(`✅ ${title} ${otter(hash)}`);
+    await ctx.reply(`✅ ${title} ${otter(h)}`);
   } catch {}
 }
 
@@ -426,7 +427,7 @@ bot.action('buy_exec', async (ctx) => {
       const hash = (r as any)?.hash;
 
       if (preQuote?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-      if (hash) notifyTx(ctx, 'Buy', hash);
+      await notifyTx(ctx, 'Buy', hash);
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
@@ -456,7 +457,7 @@ bot.action('buy_exec_all', async (ctx) => {
       const hash = (r as any)?.hash;
 
       if (preQuote?.amountOut) recordTrade(ctx.from.id, row.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-      if (hash) notifyTx(ctx, 'Buy', hash);
+      await notifyTx(ctx, 'Buy', hash);
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(row), u.token_address, gas).catch(() => {});
@@ -639,7 +640,7 @@ bot.action('sell_exec', async (ctx) => {
     const hash = (r as any)?.hash;
 
     if (q?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
-    if (hash) notifyTx(ctx, 'Sell', hash);
+    await notifyTx(ctx, 'Sell', hash);
 
   } catch (e: any) { await ctx.reply('Sell failed: ' + e.message); }
   await upsertPinnedPosition(ctx);
@@ -874,7 +875,7 @@ bot.on('text', async (ctx, next) => {
         const gas = await computeGas(ctx.from.id);
         const receipt = await buyAutoRoute(getPrivateKey(w), text, ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01)), 0n, gas);
         const hash = (receipt as any)?.hash;
-        if (hash) notifyTx(ctx, 'Buy', hash);
+        await notifyTx(ctx, 'Buy', hash);
       } catch (e: any) {
         await ctx.reply('Auto-buy failed: ' + e.message);
       }
@@ -902,7 +903,7 @@ async function pricePLSPerToken(token: string): Promise<number | null> {
     const one = ethers.parseUnits('1', dec);
     const q = await bestQuoteSell(one, token);
     if (!q) return null;
-    return Number(ethers.formatEther(q.amountOut)); // PLS per 1 token
+    return Number(ethers.formatEther(q.amountOut));
   } catch { return null; }
 }
 
@@ -910,9 +911,9 @@ async function plsUSD(): Promise<number | null> {
   try {
     if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) return null;
     const meta = await tokenMeta(STABLE);
-    const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE); // 1 WPLS -> stable
+    const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE);
     if (!q) return null;
-    return Number(ethers.formatUnits(q.amountOut, meta.decimals ?? 18)); // USD-ish per 1 PLS
+    return Number(ethers.formatUnits(q.amountOut, meta.decimals ?? 18));
   } catch { return null; }
 }
 
