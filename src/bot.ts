@@ -28,7 +28,7 @@ const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
 const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const fmtDec = (s: string) => { const [i, d] = s.split('.'); return d ? `${fmtInt(i)}.${d}` : fmtInt(i); };
 const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
-// Safe with null too; returns empty string if no hash
+// allow null too so callers can safely pass possibly-null hashes
 const otter = (hash?: string | null) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
@@ -441,14 +441,21 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
 });
 
 /* ----- Tx notifications: pending -> success (delete pending) ----- */
-// NOTE: This function expects a definite string. Always guard before calling.
-async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash: string) {
+// Accept possibly-null/undefined hash and no-op if falsy to avoid TS "string | null" errors at call sites.
+async function notifyPendingThenSuccess(
+  ctx: any,
+  kind: 'Buy' | 'Sell',
+  hash: string | null | undefined
+) {
+  if (!hash) return;
+  const txHash: string = hash;
+
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
-    await provider.waitForTransaction(hash);
+    await provider.waitForTransaction(txHash);
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
     const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
-    await ctx.reply(`✅ ${title} ${otter(hash)}`);
+    await ctx.reply(`✅ ${title} ${otter(txHash)}`);
   } catch {
     // leave pending if it fails/times out
   }
@@ -477,7 +484,7 @@ bot.action('buy_exec', async (ctx) => {
       const hash = (r as any)?.hash as string | null | undefined;
 
       if (preQuote?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-      if (hash) await notifyPendingThenSuccess(ctx, 'Buy', hash);
+      if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
@@ -507,7 +514,7 @@ bot.action('buy_exec_all', async (ctx) => {
       const hash = (r as any)?.hash as string | null | undefined;
 
       if (preQuote?.amountOut) recordTrade(ctx.from.id, row.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-      if (hash) await notifyPendingThenSuccess(ctx, 'Buy', hash);
+      if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(row), u.token_address, gas).catch(() => {});
@@ -690,7 +697,7 @@ bot.action('sell_exec', async (ctx) => {
     const hash = (r as any)?.hash as string | null | undefined;
 
     if (q?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
-    if (hash) await notifyPendingThenSuccess(ctx, 'Sell', hash);
+    if (hash) notifyPendingThenSuccess(ctx, 'Sell', hash);
 
   } catch (e: any) { await ctx.reply('Sell failed: ' + e.message); }
   await upsertPinnedPosition(ctx);
@@ -925,7 +932,7 @@ bot.on('text', async (ctx, next) => {
         const gas = await computeGas(ctx.from.id);
         const receipt = await buyAutoRoute(getPrivateKey(w), text, ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01)), 0n, gas);
         const hash = (receipt as any)?.hash as string | null | undefined;
-        if (hash) await notifyPendingThenSuccess(ctx, 'Buy', hash);
+        if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
       } catch (e: any) {
         await ctx.reply('Auto-buy failed: ' + e.message);
       }
@@ -1024,7 +1031,7 @@ async function checkLimitsOnce() {
           const pre = await bestQuoteBuy(amt, r.token_address);
           if (pre?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'BUY', amt, pre.amountOut, pre.route.key);
         } catch {}
-        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${otter(hash)}`);
+        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${hash ? otter(hash) : ''}`);
       } else {
         const c = erc20(r.token_address);
         const bal = await c.balanceOf(w.address);
@@ -1037,7 +1044,7 @@ async function checkLimitsOnce() {
         const hash = (rec as any)?.hash as string | null | undefined;
         markLimitFilled(r.id, hash ?? null);
         if (q?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'SELL', q.amountOut, amount, q.route.key);
-        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit SELL filled #${r.id}\n${otter(hash)}`);
+        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit SELL filled #${r.id}\n${hash ? otter(hash) : ''}`);
       }
     } catch (e: any) {
       markLimitError(r.id, e?.message ?? String(e));
