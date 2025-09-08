@@ -750,26 +750,69 @@ bot.action('sell_set_token', async (ctx) => {
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_sell')]]) });
 });
 
+/* ---------- SELL EXEC (instant placeholder + link, then confirm) ---------- */
 bot.action('sell_exec', async (ctx) => {
   await ctx.answerCbQuery();
-  const u = getUserSettings(ctx.from.id); const w = getActiveWallet(ctx.from.id);
+  const u = getUserSettings(ctx.from.id);
+  const w = getActiveWallet(ctx.from.id);
   if (!w || !u?.token_address) return showMenu(ctx, 'Need active wallet and token set.', sellMenu());
+
+  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
+  // 1) Show an immediate placeholder before any slow calls
+  const pendingMsg = await ctx.reply(`⏳ Sending sell for ${short(w.address)}…`);
+
   try {
     const c = erc20(u.token_address);
     const bal = await c.balanceOf(w.address);
     const pct = u?.sell_pct ?? 100;
     const amount = (bal * BigInt(Math.round(pct))) / 100n;
-    if (amount <= 0n) return showMenu(ctx, 'Nothing to sell.', sellMenu());
 
-    const q = await bestQuoteSell(amount, u.token_address);      // for recording
+    if (amount <= 0n) {
+      try {
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'Nothing to sell.');
+      } catch {}
+      await upsertPinnedPosition(ctx);
+      return renderSellMenu(ctx);
+    }
+
     const gas = await computeGas(ctx.from.id);
     const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
     const hash = (r as any)?.hash;
 
-    if (q?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
-    if (hash) notifyPendingThenSuccess(ctx, 'Sell', hash);
+    if (hash) {
+      const link = otter(hash);
+      // 2) Update placeholder to "transaction sent <link>"
+      try {
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
+      } catch {
+        await ctx.reply(`transaction sent ${link}`);
+      }
 
-  } catch (e: any) { await ctx.reply('Sell failed: ' + e.message); }
+      // 3) Record trade (quote fetched after sending to keep UX snappy)
+      try {
+        const q = await bestQuoteSell(amount, u.token_address);
+        if (q?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
+      } catch {}
+
+      // 4) Wait for confirm, then delete placeholder and post success
+      provider.waitForTransaction(hash).then(async () => {
+        try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
+        await ctx.reply(`✅ Sell successful ${link}`);
+      }).catch(() => {/* ignore */});
+    } else {
+      try {
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
+      } catch {}
+    }
+  } catch (e: any) {
+    // On error, convert placeholder to a failure line
+    try {
+      await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Sell failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+    } catch {
+      await ctx.reply(`❌ Sell failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+    }
+  }
+
   await upsertPinnedPosition(ctx);
   return renderSellMenu(ctx);
 });
