@@ -31,6 +31,11 @@ const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
+/** Minimal Markdown escaper for Telegram’s “Markdown” mode (not V2). */
+function mdEsc(s: string) {
+  return String(s).replace(/([_*[\]()`])/g, '\\$1');
+}
+
 /* ---------- message lifecycle: delete previous menus, manage pin ---------- */
 const lastMenuMsg = new Map<number, number>();  // user -> last (non-pinned) menu message id
 const pinnedPosMsg = new Map<number, number>(); // user -> pinned "POSITION" message id
@@ -91,10 +96,10 @@ async function upsertPinnedPosition(ctx: any) {
 
     const text = [
       '📌 *POSITION*',
-      `Token: ${u.token_address}${meta.symbol ? ` (${meta.symbol})` : ''}`,
-      `Wallet: ${short(w.address)}`,
-      `Holdings: ${fmtDec(ethers.formatUnits(bal, decimals))} ${meta.symbol || 'TOKEN'}`,
-      q?.amountOut ? `Est. value: ${fmtPls(q.amountOut)} PLS  ·  Route: ${q.route.key}` : 'Est. value: —',
+      `Token: ${mdEsc(u.token_address)}${meta.symbol ? ` (${mdEsc(meta.symbol)})` : ''}`,
+      `Wallet: ${mdEsc(short(w.address))}`,
+      `Holdings: ${fmtDec(ethers.formatUnits(bal, decimals))} ${mdEsc(meta.symbol || 'TOKEN')}`,
+      q?.amountOut ? `Est. value: ${fmtPls(q.amountOut)} PLS  ·  Route: \`${q.route.key}\`` : 'Est. value: —',
       avg ? `Entry: ${NF.format(avg.avgPlsPerToken)} PLS/token` : 'Entry: —',
       `Unrealized PnL: ${pnlLine}`,
     ].join('\n');
@@ -449,7 +454,7 @@ async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: str
     await provider.waitForTransaction(hash);
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
     const link = otter(hash);
-    const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
+    const title = kind === 'Buy' ? 'Buy Successful' : 'Sell Successful';
     await ctx.reply(`✅ ${title} ${link}`);
   } catch {
     // leave pending if it fails/times out
@@ -604,7 +609,6 @@ async function renderSellMenu(ctx: any) {
 
   if (w && u?.token_address) {
     try {
-      // capture a narrowed local to avoid string|null leaking into nested async
       const tokenAddr = u.token_address as string;
 
       const meta = await tokenMeta(tokenAddr);
@@ -621,9 +625,9 @@ async function renderSellMenu(ctx: any) {
         })()
       ]);
 
-      balLine = `• *Balance:* ${fmtDec(ethers.formatUnits(bal, dec))} ${metaSymbol}`;
+      balLine = `• *Balance:* ${fmtDec(ethers.formatUnits(bal, dec))} ${mdEsc(metaSymbol)}`;
 
-      if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  _(Route: ${best.route.key})_`;
+      if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  (Route: \`${best.route.key}\`)`;
 
       const avg = getAvgEntry(ctx.from.id, tokenAddr, dec);
       if (avg && best) {
@@ -634,7 +638,7 @@ async function renderSellMenu(ctx: any) {
         const pnlPls = curPls - (avg.avgPlsPerToken * amtTok);
         const pnlPct = avg.avgPlsPerToken > 0 ? (curAvg / avg.avgPlsPerToken - 1) * 100 : 0;
 
-        entryLine = `• *Entry:* ${NF.format(avg.avgPlsPerToken)} PLS / ${metaSymbol}`;
+        entryLine = `• *Entry:* ${NF.format(avg.avgPlsPerToken)} PLS / ${mdEsc(metaSymbol)}`;
         pnlLine   = `• *Net PnL:* ${pnlPls >= 0 ? '🟢' : '🔴'} ${NF.format(pnlPls)} PLS  (${NF.format(pnlPct)}%)`;
       }
     } catch { /* keep defaults */ }
@@ -652,10 +656,20 @@ async function renderSellMenu(ctx: any) {
     pnlLine,
   ].join('\n');
 
-  await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenu() });
+  // Robust send: try Markdown first, then retry without Markdown if Telegram rejects formatting
+  try {
+    await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenu() });
+  } catch {
+    const plain = text.replace(/[_*`]/g, '');
+    await showMenu(ctx, plain, { ...sellMenu() });
+  }
 }
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
+// Aliases in case some keyboards send different callback data
+bot.action('sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
+bot.action('sell_menu', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
+
 bot.action('sell_pct_25', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 25); return renderSellMenu(ctx); });
 bot.action('sell_pct_50', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 50); return renderSellMenu(ctx); });
 bot.action('sell_pct_75', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 75); return renderSellMenu(ctx); });
