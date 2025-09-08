@@ -487,8 +487,17 @@ bot.action('buy_exec', async (ctx) => {
       const r = await buyAutoRoute(getPrivateKey(w), u.token_address, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
-      if (preQuote?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+      // notify first so DB issues can't block UX
       if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
+
+      // record trade defensively
+      if (preQuote?.amountOut) {
+        try {
+          recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+        } catch (e) {
+          console.error('recordTrade failed (BUY):', e);
+        }
+      }
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
@@ -517,8 +526,17 @@ bot.action('buy_exec_all', async (ctx) => {
       const r = await buyAutoRoute(getPrivateKey(row), u.token_address, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
-      if (preQuote?.amountOut) recordTrade(ctx.from.id, row.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+      // notify first
       if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
+
+      // record trade defensively
+      if (preQuote?.amountOut) {
+        try {
+          recordTrade(ctx.from.id, row.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+        } catch (e) {
+          console.error('recordTrade failed (BUY all):', e);
+        }
+      }
 
       if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
         approveAllRouters(getPrivateKey(row), u.token_address, gas).catch(() => {});
@@ -714,8 +732,17 @@ bot.action('sell_exec', async (ctx) => {
     const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
     const hash = (r as any)?.hash;
 
-    if (q?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
+    // notify first
     if (hash) notifyPendingThenSuccess(ctx, 'Sell', hash);
+
+    // record trade defensively
+    if (q?.amountOut) {
+      try {
+        recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
+      } catch (e) {
+        console.error('recordTrade failed (SELL):', e);
+      }
+    }
 
   } catch (e: any) { await ctx.reply('Sell failed: ' + e.message); }
   await upsertPinnedPosition(ctx);
