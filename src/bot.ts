@@ -642,7 +642,9 @@ async function renderSellMenu(ctx: any) {
       ]);
 
       balLine = `• *Balance:* ${fmtDec(ethers.formatUnits(bal, dec))} ${metaSymbol}`;
-      if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  _(Route: ${best.route.key})_`;
+
+      // 🔧 FIX: remove italics to avoid Telegram Markdown parse errors when route key contains underscores
+      if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  (Route: ${best.route.key})`;
 
       const avg = getAvgEntry(ctx.from.id, tokenAddr, dec);
       if (avg && best) {
@@ -671,6 +673,7 @@ async function renderSellMenu(ctx: any) {
     pnlLine,
   ].join('\n');
 
+  // Keep your existing keyboard wiring (with Contract button) exactly as-is
   await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenuWithContract() });
 }
 
