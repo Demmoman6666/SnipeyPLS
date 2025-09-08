@@ -1194,23 +1194,71 @@ bot.on('text', async (ctx, next) => {
     setToken(ctx.from.id, text);
     warmTokenAsync(ctx.from.id, text);
 
-    const u = getUserSettings(ctx.from.id);
-    if (u?.auto_buy_enabled) {
-      const w = getActiveWallet(ctx.from.id);
-      if (!w) { await ctx.reply('Select or create a wallet first.'); return renderBuyMenu(ctx); }
+const u = getUserSettings(ctx.from.id);
+if (u?.auto_buy_enabled) {
+  const w = getActiveWallet(ctx.from.id);
+  if (!w) { await ctx.reply('Select or create a wallet first.'); return renderBuyMenu(ctx); }
+
+  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
+  const amountIn = ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01));
+
+  // Show an instant placeholder BEFORE any network calls
+  const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
+
+  try {
+    const gas = await computeGas(ctx.from.id);
+    const r = await buyAutoRoute(getPrivateKey(w), text, amountIn, 0n, gas);
+    const hash = (r as any)?.hash;
+
+    if (hash) {
+      const link = otter(hash);
+
+      // Flip the placeholder to "transaction sent <link>"
       try {
-        const gas = await computeGas(ctx.from.id);
-        const receipt = await buyAutoRoute(getPrivateKey(w), text, ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01)), 0n, gas);
-        const hash = (receipt as any)?.hash;
-        if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
-      } catch (e: any) {
-        await ctx.reply('Auto-buy failed: ' + e.message);
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
+      } catch {
+        await ctx.reply(`transaction sent ${link}`);
       }
-      await upsertPinnedPosition(ctx);
-      return renderBuyMenu(ctx);
+
+      // Record the trade (fetch quote AFTER sending so we don’t block the UI)
+      try {
+        const preQuote = await bestQuoteBuy(amountIn, text);
+        if (preQuote?.amountOut) {
+          recordTrade(ctx.from.id, w.address, text, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+        }
+      } catch {}
+
+      // Optional: approve routers for future sells (non-WPLS tokens)
+      try {
+        if (text.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
+          approveAllRouters(getPrivateKey(w), text, gas).catch(() => {});
+        }
+      } catch {}
+
+      // On confirmation, delete the placeholder and post success
+      provider.waitForTransaction(hash).then(async () => {
+        try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
+        await ctx.reply(`✅ Buy successful ${link}`);
+      }).catch(() => {/* ignore */});
     } else {
-      return renderBuyMenu(ctx);
+      try {
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
+      } catch {}
     }
+  } catch (e: any) {
+    // Convert the placeholder into an error message
+    try {
+      await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Auto-buy failed: ${e?.message ?? String(e)}`);
+    } catch {
+      await ctx.reply(`❌ Auto-buy failed: ${e?.message ?? String(e)}`);
+    }
+  }
+
+  await upsertPinnedPosition(ctx);
+  return renderBuyMenu(ctx);
+} else {
+  return renderBuyMenu(ctx);
+}
   }
 
   return next();
