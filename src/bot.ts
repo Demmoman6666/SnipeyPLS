@@ -31,14 +31,20 @@ const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
-/* Dexscreener fallback config (used only if totalSupply() fails) */
-const DS_CHAIN = (process.env.DS_CHAIN || 'pulsechain').toLowerCase();
-
 /* ---------- message lifecycle: delete previous menus, manage pin ---------- */
 const lastMenuMsg = new Map<number, number>();  // user -> last (non-pinned) menu message id
 const pinnedPosMsg = new Map<number, number>(); // user -> pinned "POSITION" message id
 
-function canEdit(ctx: any) { return Boolean(ctx?.callbackQuery?.message?.message_id); }
+function canEdit(ctx: any) {
+  const mid = ctx?.callbackQuery?.message?.message_id;
+  if (!mid) return false;
+  const uid = ctx?.from?.id as number | undefined;
+  if (!uid) return false;
+  const pinned = pinnedPosMsg.get(uid);
+  // 👇 never try to edit the pinned POSITION card; always send a fresh message
+  if (pinned && pinned === mid) return false;
+  return true;
+}
 
 /** Show a menu, deleting the prior menu message for this user (if any). */
 async function showMenu(ctx: any, text: string, extra?: any) {
@@ -204,20 +210,23 @@ bot.action('settings', async (ctx) => { await ctx.answerCbQuery(); return render
 bot.action('set_gl', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_gl' });
-  return showMenu(ctx, 'Send new *Gas Limit* (e.g., `300000`).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
+  return showMenu(ctx, 'Send new Gas Limit (e.g., 300000).', {
+    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]])
+  });
 });
 bot.action('set_gb', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_gb' });
-  return showMenu(ctx, 'Send new *Gwei Booster* in gwei (e.g., `0.2`).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
+  return showMenu(ctx, 'Send new Gwei Booster in gwei (e.g., 0.2).', {
+    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]])
+  });
 });
 bot.action('set_defpct', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_defpct' });
-  return showMenu(ctx, 'Send *Default Gas %* over market (e.g., `10`).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
+  return showMenu(ctx, 'Send Default Gas % over market (e.g., 10).', {
+    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]])
+  });
 });
 bot.action('auto_toggle', async (ctx) => {
   await ctx.answerCbQuery();
@@ -228,8 +237,9 @@ bot.action('auto_toggle', async (ctx) => {
 bot.action('auto_amt', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'auto_amt' });
-  return showMenu(ctx, 'Send *Auto-buy amount* in PLS (e.g., `0.5`).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
+  return showMenu(ctx, 'Send Auto-buy amount in PLS (e.g., 0.5).', {
+    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]])
+  });
 });
 
 /* ---------- Wallets: list/manage ---------- */
@@ -347,14 +357,16 @@ bot.action(/^wallet_refresh:(\d+)$/, async (ctx: any) => { await ctx.answerCbQue
 bot.action('wallet_generate', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'gen_name' });
-  return showMenu(ctx, 'Send a name for the new wallet (e.g., `trader1`).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]) });
+  return showMenu(ctx, 'Send a name for the new wallet (e.g., `trader1`).', {
+    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]])
+  });
 });
 bot.action('wallet_add', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'import_wallet' });
-  return showMenu(ctx, 'Reply: `name privkey` (e.g., `hot1 0x...`)', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]) });
+  return showMenu(ctx, 'Reply: `name privkey` (e.g., `hot1 0x...`)', {
+    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]])
+  });
 });
 
 /* ---------- BUY MENU ---------- */
@@ -410,14 +422,16 @@ bot.action('buy_refresh', async (ctx) => { await ctx.answerCbQuery(); return ren
 bot.action('buy_set_amount', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_amount' });
-  return showMenu(ctx, 'Send *amount in PLS* (e.g., `0.05`).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_buy')]]) });
+  return showMenu(ctx, 'Send amount in PLS (e.g., 0.05).', {
+    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_buy')]])
+  });
 });
 bot.action('buy_set_token', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_token' });
-  return showMenu(ctx, 'Paste the *token contract address* (0x...).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_buy')]]) });
+  return showMenu(ctx, 'Paste the token contract address (0x...).', {
+    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_buy')]])
+  });
 });
 
 bot.action('gas_pct_open', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Choose gas % over market:', buyGasPctMenu()); });
@@ -537,7 +551,7 @@ bot.action('limit_buy', async (ctx) => {
   if (!w) return showMenu(ctx, 'Select a wallet first.', buyMenu(u?.gas_pct ?? 0));
   draft.set(ctx.from.id, { side: 'BUY', walletId: w.id, token: u.token_address });
   pending.set(ctx.from.id, { type: 'lb_amt' });
-  return showMenu(ctx, 'Send *limit buy amount* in PLS (e.g., `0.5`, `1.2`):', { parse_mode: 'Markdown' });
+  return showMenu(ctx, 'Send limit buy amount in PLS (e.g., 0.5, 1.2):');
 });
 
 bot.action('limit_sell', async (ctx) => {
@@ -548,7 +562,7 @@ bot.action('limit_sell', async (ctx) => {
   if (!w) return showMenu(ctx, 'Select a wallet first.', sellMenu());
   draft.set(ctx.from.id, { side: 'SELL', walletId: w.id, token: u.token_address });
   pending.set(ctx.from.id, { type: 'ls_pct' });
-  return showMenu(ctx, 'What *percent* of your token to sell when triggered? (e.g., `25`, `50`, `100`)', { parse_mode: 'Markdown' });
+  return showMenu(ctx, 'What percent of your token to sell when triggered? (e.g., 25, 50, 100)');
 });
 
 bot.action(/^limit_trig:(PLS|USD|MCAP|MULT)$/, async (ctx: any) => {
@@ -558,12 +572,12 @@ bot.action(/^limit_trig:(PLS|USD|MCAP|MULT)$/, async (ctx: any) => {
   const trig = ctx.match[1] as 'PLS'|'USD'|'MCAP'|'MULT';
   d.trigger = trig; draft.set(ctx.from.id, d);
 
-  const ask = trig === 'PLS' ? 'Enter target **PLS price** per token (e.g., `0.0035`):'
-            : trig === 'USD' ? 'Enter target **USD price** per token (e.g., `0.0012`):'
-            : trig === 'MCAP' ? 'Enter target **Market Cap in USD** (supports `k`/`m`, e.g., `100k`, `1m`):'
-            : 'Enter **multiplier** (e.g., `2` for 2× entry price):';
+  const ask = trig === 'PLS' ? 'Enter target PLS price per token (e.g., 0.0035):'
+            : trig === 'USD' ? 'Enter target USD price per token (e.g., 0.0012):'
+            : trig === 'MCAP' ? 'Enter target Market Cap in USD (supports k/m, e.g., 100k, 1m):'
+            : 'Enter multiplier (e.g., 2 for 2× entry price):';
   pending.set(ctx.from.id, { type: 'limit_value' });
-  return showMenu(ctx, ask, { parse_mode: 'Markdown' });
+  return showMenu(ctx, ask);
 });
 
 bot.action('limit_list', async (ctx) => {
@@ -589,25 +603,24 @@ bot.action(/^limit_cancel:(\d+)$/, async (ctx: any) => {
   return showMenu(ctx, changed ? `Limit #${id} cancelled.` : `Couldn’t cancel #${id}.`, mainMenu());
 });
 
-/* ---------- SELL MENU (clean UI) ---------- */
+/* ---------- SELL MENU (robust: no Markdown) ---------- */
 async function renderSellMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
   const w = getActiveWallet(ctx.from.id);
   const pct = u?.sell_pct ?? 100;
 
-  let header = '🟥 *SELL MENU*';
-  let walletLine = `*Wallet:* ${w ? '`' + short(w.address) + '`' : '—'}`;
-  let tokenLine  = `*Token:* ${u?.token_address ? '`' + short(u.token_address) + '`' : '—'}`;
+  let header = '🟥 SELL MENU';
+  let walletLine = `Wallet: ${w ? short(w.address) : '—'}`;
+  let tokenLine  = `Token: ${u?.token_address ? short(u.token_address) : '—'}`;
 
-  let balLine = '• *Balance:* —';
-  let outLine = '• *Est. Out:* —';
-  let entryLine = '• *Entry:* —';
-  let pnlLine = '• *Net PnL:* —';
+  let balLine = '• Balance: —';
+  let outLine = '• Est. Out: —';
+  let entryLine = '• Entry: —';
+  let pnlLine = '• Net PnL: —';
   let metaSymbol = 'TOKEN';
 
   if (w && u?.token_address) {
     try {
-      // capture a narrowed local to avoid string|null leaking into nested async
       const tokenAddr = u.token_address as string;
 
       const meta = await tokenMeta(tokenAddr);
@@ -624,9 +637,9 @@ async function renderSellMenu(ctx: any) {
         })()
       ]);
 
-      balLine = `• *Balance:* ${fmtDec(ethers.formatUnits(bal, dec))} ${metaSymbol}`;
+      balLine = `• Balance: ${fmtDec(ethers.formatUnits(bal, dec))} ${metaSymbol}`;
 
-      if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  _(Route: ${best.route.key})_`;
+      if (best) outLine = `• Est. Out: ${fmtPls(best.amountOut)} PLS  (Route: ${best.route.key})`;
 
       const avg = getAvgEntry(ctx.from.id, tokenAddr, dec);
       if (avg && best) {
@@ -637,8 +650,8 @@ async function renderSellMenu(ctx: any) {
         const pnlPls = curPls - (avg.avgPlsPerToken * amtTok);
         const pnlPct = avg.avgPlsPerToken > 0 ? (curAvg / avg.avgPlsPerToken - 1) * 100 : 0;
 
-        entryLine = `• *Entry:* ${NF.format(avg.avgPlsPerToken)} PLS / ${metaSymbol}`;
-        pnlLine   = `• *Net PnL:* ${pnlPls >= 0 ? '🟢' : '🔴'} ${NF.format(pnlPls)} PLS  (${NF.format(pnlPct)}%)`;
+        entryLine = `• Entry: ${NF.format(avg.avgPlsPerToken)} PLS / ${metaSymbol}`;
+        pnlLine   = `• Net PnL: ${pnlPls >= 0 ? '🟢' : '🔴'} ${NF.format(pnlPls)} PLS  (${NF.format(pnlPct)}%)`;
       }
     } catch { /* keep defaults */ }
   }
@@ -647,7 +660,7 @@ async function renderSellMenu(ctx: any) {
     header,
     '',
     `${walletLine}    |    ${tokenLine}`,
-    `*Sell %:* ${NF.format(pct)}%`,
+    `Sell %: ${NF.format(pct)}%`,
     '',
     balLine,
     outLine,
@@ -655,7 +668,7 @@ async function renderSellMenu(ctx: any) {
     pnlLine,
   ].join('\n');
 
-  await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenu() });
+  await showMenu(ctx, text, sellMenu());
 }
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
@@ -756,48 +769,6 @@ async function totalSupply(token: string): Promise<bigint | null> {
   try { return await erc20(token).totalSupply(); } catch { return null; }
 }
 
-/* ---------- Dexscreener helpers (fallback only) ---------- */
-async function getFetch(): Promise<typeof fetch> {
-  // Node 18+: fetch is global. If not, lazy-load node-fetch.
-  if (typeof (globalThis as any).fetch === 'function') return (globalThis as any).fetch;
-  const mod = await import('node-fetch'); // @ts-ignore
-  return (mod.default || mod) as any;
-}
-
-type DsPair = {
-  chainId?: string;
-  priceUsd?: string;
-  liquidity?: { usd?: number };
-  fdv?: number;
-  marketCap?: number;
-};
-
-async function mcapFromDexscreener(token: string): Promise<{ ok: boolean; mcapUSD?: number; reason?: string; source?: string; }> {
-  try {
-    const f = await getFetch();
-    const url = `https://api.dexscreener.com/latest/dex/tokens/${token}`;
-    const res = await f(url);
-    if (!res.ok) return { ok: false, reason: `Dexscreener HTTP ${res.status}` };
-    const data = await res.json();
-    const pairs: DsPair[] = Array.isArray(data?.pairs) ? data.pairs : [];
-    if (!pairs.length) return { ok: false, reason: 'Dexscreener: no pairs' };
-
-    // Prefer same-chain, highest liquidity
-    const best = pairs
-      .filter(p => (p.chainId || '').toLowerCase() === DS_CHAIN)
-      .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0] || pairs[0];
-
-    const mcap = best.marketCap ?? best.fdv;
-    if (mcap == null) {
-      return { ok: false, reason: 'Dexscreener: no fdv/marketCap in top pair' };
-    }
-    return { ok: true, mcapUSD: Number(mcap), source: (best.marketCap != null) ? 'dexscreener:marketCap' : 'dexscreener:fdv' };
-  } catch (e: any) {
-    return { ok: false, reason: e?.message ?? String(e) };
-  }
-}
-
-/* Combined MCAP: on-chain if possible, else Dexscreener fallback */
 async function mcapFor(token: string): Promise<{
   ok: boolean;
   reason?: string;
@@ -806,14 +777,11 @@ async function mcapFor(token: string): Promise<{
   plsPerToken?: number;
   supplyTokens?: number;
   decimals?: number;
-  source?: 'onchain' | 'dexscreener:fdv' | 'dexscreener:marketCap';
 }> {
   try {
     if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) {
       return { ok: false, reason: 'No STABLE token address configured (USDC/USDCe). Set env USDC_ADDRESS/USDCe_ADDRESS/STABLE_ADDRESS.' };
     }
-
-    // First try fully on-chain
     const [usdPerPLS, plsPerToken, meta, sup] = await Promise.all([
       plsUSD(),
       pricePLSPerToken(token),
@@ -821,25 +789,16 @@ async function mcapFor(token: string): Promise<{
       totalSupply(token),
     ]);
 
-    if (usdPerPLS != null && plsPerToken != null && sup != null) {
-      const dec = meta.decimals ?? 18;
-      const supplyTokens = Number(ethers.formatUnits(sup, dec));
-      const usdPerToken = plsPerToken * usdPerPLS;
-      const mcapUSD = supplyTokens * usdPerToken;
-      return { ok: true, mcapUSD, usdPerPLS, plsPerToken, supplyTokens, decimals: dec, source: 'onchain' };
-    }
+    if (usdPerPLS == null) return { ok: false, reason: 'Could not fetch USD/PLS (stable quote failed).' };
+    if (plsPerToken == null) return { ok: false, reason: 'No sell route for token (price in PLS not available).' };
+    if (!sup) return { ok: false, reason: 'Could not fetch totalSupply().' };
 
-    // If on-chain supply failed, try Dexscreener as a fallback (uses FDV/marketCap)
-    const ds = await mcapFromDexscreener(token);
-    if (ds.ok) {
-      return { ok: true, mcapUSD: ds.mcapUSD, source: (ds.source as any) };
-    }
+    const dec = meta.decimals ?? 18;
+    const supplyTokens = Number(ethers.formatUnits(sup, dec));
+    const usdPerToken = plsPerToken * usdPerPLS;
+    const mcapUSD = supplyTokens * usdPerToken;
 
-    // Still nothing: bubble the best reason up
-    if (sup == null) return { ok: false, reason: 'Could not fetch totalSupply().' };
-    if (usdPerPLS == null) return { ok: false, reason: 'Could not fetch USD/PLS rate.' };
-    if (plsPerToken == null) return { ok: false, reason: 'No sell route for token (PLS price unavailable).' };
-    return { ok: false, reason: ds.reason || 'Unknown MCAP failure.' };
+    return { ok: true, mcapUSD, usdPerPLS, plsPerToken, supplyTokens, decimals: dec };
   } catch (e: any) {
     return { ok: false, reason: e?.message ?? String(e) };
   }
@@ -853,12 +812,11 @@ bot.command('mcap', async (ctx) => {
   if (!info.ok) return ctx.reply('MCAP check failed: ' + (info.reason ?? 'unknown'));
   const lines = [
     `Token: ${token}`,
-    info.supplyTokens != null ? `Supply: ${NF.format(info.supplyTokens)} tokens` : undefined,
-    info.plsPerToken != null ? `Price: ${info.plsPerToken.toFixed(8)} PLS / token` : undefined,
-    info.usdPerPLS != null ? `PLS→USD: ${info.usdPerPLS.toFixed(6)} USD / PLS` : undefined,
+    `Supply: ${NF.format(info.supplyTokens!)} tokens`,
+    `Price: ${info.plsPerToken!.toFixed(8)} PLS / token`,
+    `PLS→USD: ${info.usdPerPLS!.toFixed(6)} USD / PLS`,
     `MCAP: $${fmtInt(String(Math.round(info.mcapUSD!)))}`,
-    info.source ? `Source: ${info.source}` : undefined,
-  ].filter(Boolean).join('\n');
+  ].join('\n');
   return ctx.reply(lines);
 });
 
