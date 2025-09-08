@@ -900,4 +900,17 @@ async function checkLimitsOnce() {
 
 setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
 
+/* ---------- shortcuts ---------- */
+bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Main Menu', mainMenu()); });
+bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
+bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
+bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
+
+/** ✅ Generic BACK catcher: handles `back`, `main_back`, `foo_back`, `foo:back` */
+const BACK_RE = /(?:^|[:_])back$/;
+bot.action(BACK_RE, async (ctx) => {
+  await ctx.answerCbQuery();
+  return showMenu(ctx, 'Main Menu', mainMenu());
+});
+
 export {};
