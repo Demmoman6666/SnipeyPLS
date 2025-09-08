@@ -37,24 +37,26 @@ const pinnedPosMsg = new Map<number, number>(); // user -> pinned "POSITION" mes
 
 function canEdit(ctx: any) { return Boolean(ctx?.callbackQuery?.message?.message_id); }
 
-/** Show a menu, deleting the prior menu message for this user (if any). */
+/**
+ * Show a menu, *always* deleting the prior menu message for this user (if any).
+ * Also deletes the tapped callback message when relevant to prevent "edit" edge-cases.
+ * Exclusion: buy/sell tx notices use plain ctx.reply elsewhere, not this helper.
+ */
 async function showMenu(ctx: any, text: string, extra?: any) {
   const uid = ctx.from.id;
   const pinned = pinnedPosMsg.get(uid);
-
-  // If we can edit (button taps), just edit and keep id
-  if (canEdit(ctx)) {
-    try {
-      await ctx.editMessageText(text, extra);
-      lastMenuMsg.set(uid, ctx.callbackQuery.message.message_id);
-      return;
-    } catch { /* fallthrough to reply */ }
-  }
-
-  // delete previous menu (but never the pinned id)
   const prev = lastMenuMsg.get(uid);
+
+  // If there was a previously rendered menu, delete it (never delete the pinned)
   if (prev && (!pinned || prev !== pinned)) {
     try { await ctx.deleteMessage(prev); } catch {}
+  }
+
+  // If this call came from a button tap, also delete that source message
+  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
+  const sourceId = ctx?.callbackQuery?.message?.message_id as number | undefined;
+  if (sourceId && sourceId !== prev && (!pinned || sourceId !== pinned)) {
+    try { await bot.telegram.deleteMessage(chatId, sourceId); } catch {}
   }
 
   const m = await ctx.reply(text, extra);
@@ -174,13 +176,13 @@ function parseNumHuman(s: string): number | null {
 
 /* ---------- pending prompts ---------- */
 type Pending =
-  | { type: 'set_amount' } | { type: 'set_token' } | { type: 'gen_name' } | { type: 'import_wallet' }
+  | { type: 'set_amount' } | { type: 'set_token' } | { type: 'set_token_sell' } | { type: 'gen_name' } | { type: 'import_wallet' }
   | { type: 'withdraw'; walletId: number } | { type: 'set_gl' } | { type: 'set_gb' } | { type: 'set_defpct' }
   | { type: 'auto_amt' } | { type: 'lb_amt' } | { type: 'ls_pct' } | { type: 'limit_value' };
 const pending = new Map<number, Pending>();
 
 /* ---------- /start ---------- */
-bot.start(async (ctx) => { await ctx.reply('Main Menu', mainMenu()); });
+bot.start(async (ctx) => { await showMenu(ctx, 'Main Menu', mainMenu()); });
 
 /* ---------- SETTINGS ---------- */
 async function renderSettings(ctx: any) {
@@ -196,7 +198,7 @@ async function renderSettings(ctx: any) {
   await showMenu(ctx, lines, settingsMenu());
 }
 
-bot.action('settings', async (ctx) => { await ctx.answerCbQuery(); return renderSettings(ctx); });
+bot.action('settings', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSettings(ctx); });
 
 bot.action('set_gl', async (ctx) => {
   await ctx.answerCbQuery();
@@ -279,7 +281,7 @@ async function renderWalletManage(ctx: any, walletId: number) {
   await showMenu(ctx, lines, kb);
 }
 
-bot.action('wallets', async (ctx) => { await ctx.answerCbQuery(); return renderWalletsList(ctx); });
+bot.action('wallets', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderWalletsList(ctx); });
 bot.action(/^wallet_manage:(\d+)$/, async (ctx: any) => { await ctx.answerCbQuery(); return renderWalletManage(ctx, Number(ctx.match[1])); });
 
 /* PK */
@@ -401,7 +403,7 @@ async function renderBuyMenu(ctx: any) {
   await showMenu(ctx, lines, buyMenu(Math.round(pct), walletButtons));
 }
 
-bot.action('menu_buy', async (ctx) => { await ctx.answerCbQuery(); return renderBuyMenu(ctx); });
+bot.action('menu_buy', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderBuyMenu(ctx); });
 bot.action('buy_refresh', async (ctx) => { await ctx.answerCbQuery(); return renderBuyMenu(ctx); });
 
 bot.action('buy_set_amount', async (ctx) => {
@@ -657,7 +659,7 @@ async function renderSellMenu(ctx: any) {
   await showMenu(ctx, text, { parse_mode: 'HTML', ...sellMenu() });
 }
 
-bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
+bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSellMenu(ctx); });
 bot.action('sell_pct_25', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 25); return renderSellMenu(ctx); });
 bot.action('sell_pct_50', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 50); return renderSellMenu(ctx); });
 bot.action('sell_pct_75', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 75); return renderSellMenu(ctx); });
@@ -679,6 +681,14 @@ bot.action('sell_approve', async (ctx) => {
     await ctx.reply('Approve failed: ' + (e?.message ?? String(e)));
   }
   return renderSellMenu(ctx);
+});
+
+/* (optional button) Sell ▸ Set Token (mirrors buy_set_token prompt, returns to Sell) */
+bot.action('sell_set_token', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.set(ctx.from.id, { type: 'set_token_sell' });
+  return showMenu(ctx, 'Paste the *token contract address* (0x...).', { parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_sell')]]) });
 });
 
 bot.action('sell_exec', async (ctx) => {
@@ -706,8 +716,8 @@ bot.action('sell_exec', async (ctx) => {
 });
 
 /* ----- Pinned position: buttons ----- */
-bot.action('pin_buy', async (ctx) => { await ctx.answerCbQuery(); return renderBuyMenu(ctx); });
-bot.action('pin_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
+bot.action('pin_buy', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderBuyMenu(ctx); });
+bot.action('pin_sell', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSellMenu(ctx); });
 
 /* ---------- DIAGNOSTICS ---------- */
 bot.command('rpc_check', async (ctx) => {
@@ -887,5 +897,177 @@ async function checkLimitsOnce() {
 }
 
 setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
+
+/* ---------- TEXT: prompts + auto-detect address (auto-buy) ---------- */
+bot.on('text', async (ctx, next) => {
+  const p = pending.get(ctx.from.id);
+  if (p) {
+    const msg = String(ctx.message.text).trim();
+
+    if (p.type === 'set_amount') {
+      const v = Number(msg);
+      if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number (e.g., 0.02).');
+      setBuyAmount(ctx.from.id, v); pending.delete(ctx.from.id);
+      await ctx.reply(`Buy amount set to ${fmtDec(String(v))} PLS.`);
+      return renderBuyMenu(ctx);
+    }
+
+    if (p.type === 'set_token') {
+      if (!/^0x[a-fA-F0-9]{40}$/.test(msg)) return ctx.reply('That does not look like a token address.');
+      setToken(ctx.from.id, msg);
+      warmTokenAsync(ctx.from.id, msg);
+      pending.delete(ctx.from.id);
+      return renderBuyMenu(ctx);
+    }
+
+    if (p.type === 'set_token_sell') {
+      if (!/^0x[a-fA-F0-9]{40}$/.test(msg)) return ctx.reply('That does not look like a token address.');
+      setToken(ctx.from.id, msg);
+      warmTokenAsync(ctx.from.id, msg);
+      pending.delete(ctx.from.id);
+      return renderSellMenu(ctx);
+    }
+
+    if (p.type === 'gen_name') {
+      const name = msg; if (!name) return ctx.reply('Please send a non-empty name.');
+      const w = createWallet(ctx.from.id, name); pending.delete(ctx.from.id);
+      await ctx.reply(`Created wallet "${name}": ${w.address}`);
+      return renderWalletsList(ctx);
+    }
+
+    if (p.type === 'import_wallet') {
+      const parts = msg.split(/\s+/); if (parts.length < 2) return ctx.reply('Expected: `name privkey`');
+      const name = parts[0], pk = parts[1];
+      try { const w = importWallet(ctx.from.id, name, pk); pending.delete(ctx.from.id); await ctx.reply(`Imported "${name}": ${w.address}`); }
+      catch (e: any) { pending.delete(ctx.from.id); return ctx.reply('Import failed: ' + e.message); }
+      return renderWalletsList(ctx);
+    }
+
+    if (p.type === 'withdraw') {
+      const [to, amtStr] = msg.split(/\s+/);
+      if (!/^0x[a-fA-F0-9]{40}$/.test(to) || !amtStr) return ctx.reply('Expected: `address amount_pls`');
+      const amount = Number(amtStr);
+      if (!Number.isFinite(amount) || amount <= 0) return ctx.reply('Amount must be positive.');
+      const w = getWalletById(ctx.from.id, (p as any).walletId); if (!w) { pending.delete(ctx.from.id); return ctx.reply('Wallet not found.'); }
+      try {
+        const gas = await computeGas(ctx.from.id);
+        const receipt = await withdrawPls(getPrivateKey(w), to, ethers.parseEther(String(amount)), gas);
+        const hash = (receipt as any)?.hash;
+        await ctx.reply(hash ? `Withdraw sent! ${otter(hash)}` : 'Withdraw sent! (pending)');
+      } catch (e: any) { await ctx.reply('Withdraw failed: ' + e.message); }
+      pending.delete(ctx.from.id);
+      return renderWalletManage(ctx, (p as any).walletId);
+    }
+
+    if (p.type === 'set_gl') {
+      const v = Number(msg);
+      if (!Number.isFinite(v) || v < 21000) return ctx.reply('Gas Limit must be ≥ 21000.');
+      const u = getUserSettings(ctx.from.id); setGasBase(ctx.from.id, Math.floor(v), u?.gwei_boost_gwei ?? 0);
+      pending.delete(ctx.from.id); return renderSettings(ctx);
+    }
+
+    if (p.type === 'set_gb') {
+      const v = Number(msg);
+      if (!Number.isFinite(v) || v < 0) return ctx.reply('Gwei Booster must be ≥ 0.');
+      const u = getUserSettings(ctx.from.id); setGasBase(ctx.from.id, u?.gas_limit ?? 250000, v);
+      pending.delete(ctx.from.id); return renderSettings(ctx);
+    }
+
+    if (p.type === 'set_defpct') {
+      const v = Number(msg);
+      if (!Number.isFinite(v)) return ctx.reply('Send a number (percent).');
+      setDefaultGasPercent(ctx.from.id, v); setGasPercent(ctx.from.id, v);
+      pending.delete(ctx.from.id); return renderSettings(ctx);
+    }
+
+    if (p.type === 'auto_amt') {
+      const v = Number(msg);
+      if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number (PLS).');
+      setAutoBuyAmount(ctx.from.id, v);
+      pending.delete(ctx.from.id); return renderSettings(ctx);
+    }
+
+    // ----- Limit order building -----
+    if (p.type === 'lb_amt') {
+      const v = Number(msg);
+      if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number of PLS (e.g., 0.5).');
+      const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Buy.'); }
+      d.amountPlsWei = ethers.parseEther(String(v));
+      draft.set(ctx.from.id, d);
+      pending.delete(ctx.from.id);
+      return showMenu(ctx, 'Choose a trigger:', limitTriggerMenu('BUY'));
+    }
+
+    if (p.type === 'ls_pct') {
+      const v = Number(msg);
+      if (!Number.isFinite(v) || v <= 0 || v > 100) return ctx.reply('Send a percent between 1 and 100.');
+      const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Sell.'); }
+      d.sellPct = v; draft.set(ctx.from.id, d);
+      pending.delete(ctx.from.id);
+      return showMenu(ctx, 'Choose a trigger:', limitTriggerMenu('SELL'));
+    }
+
+    if (p.type === 'limit_value') {
+      const d = draft.get(ctx.from.id);
+      if (!d || !d.trigger) { pending.delete(ctx.from.id); return ctx.reply('Start a Limit order first.'); }
+      const val = parseNumHuman(msg);
+      if (val == null || !(val > 0)) return ctx.reply('Send a positive number (supports `k`/`m`).');
+
+      const id = addLimitOrder({
+        telegramId: ctx.from.id,
+        walletId: d.walletId,
+        token: d.token,
+        side: d.side,
+        amountPlsWei: d.side === 'BUY' ? (d.amountPlsWei ?? ethers.parseEther('0')) : undefined,
+        sellPct: d.side === 'SELL' ? (d.sellPct ?? 100) : undefined,
+        trigger: d.trigger!,
+        value: val
+      });
+
+      draft.delete(ctx.from.id);
+      pending.delete(ctx.from.id);
+      await ctx.reply(`Limit ${d.side} #${id} created: ${d.trigger} @ ${NF.format(val)} ${d.side === 'BUY' ? `for ${fmtDec(ethers.formatEther((d.amountPlsWei ?? 0n))) } PLS` : `${d.sellPct}%`}`);
+      if (d.side === 'BUY') return renderBuyMenu(ctx);
+      return renderSellMenu(ctx);
+    }
+
+    return;
+  }
+
+  // Auto-detect token address when no prompt is active (this powers auto-buy)
+  const text = String(ctx.message.text).trim();
+  if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
+    setToken(ctx.from.id, text);
+    warmTokenAsync(ctx.from.id, text);
+
+    const u = getUserSettings(ctx.from.id);
+    if (u?.auto_buy_enabled) {
+      const w = getActiveWallet(ctx.from.id);
+      if (!w) { await ctx.reply('Select or create a wallet first.'); return renderBuyMenu(ctx); }
+      try {
+        const gas = await computeGas(ctx.from.id);
+        const receipt = await buyAutoRoute(getPrivateKey(w), text, ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01)), 0n, gas);
+        const hash = (receipt as any)?.hash;
+        if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
+      } catch (e: any) {
+        await ctx.reply('Auto-buy failed: ' + e.message);
+      }
+      await upsertPinnedPosition(ctx);
+      return renderBuyMenu(ctx);
+    } else {
+      return renderBuyMenu(ctx);
+    }
+  }
+
+  return next();
+});
+
+/* ---------- shortcuts ---------- */
+bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return showMenu(ctx, 'Main Menu', mainMenu()); });
+bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
+bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
+
+// no-op pill handler
+bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
 
 export {};
