@@ -61,9 +61,6 @@ async function showMenu(ctx: any, text: string, extra?: any) {
   lastMenuMsg.set(uid, m.message_id);
 }
 
-/** Clear any pending input prompt for this user. */
-function clearPending(uid: number) { pending.delete(uid); }
-
 /** Post or replace a pinned "POSITION" card (delete + re-send to avoid edit overload typing) */
 async function upsertPinnedPosition(ctx: any) {
   const uid = ctx.from.id;
@@ -177,17 +174,13 @@ function parseNumHuman(s: string): number | null {
 
 /* ---------- pending prompts ---------- */
 type Pending =
-  | { type: 'set_amount' }
-  | { type: 'set_token'; from?: 'buy' | 'sell' }
-  | { type: 'gen_name' } | { type: 'import_wallet' }
+  | { type: 'set_amount' } | { type: 'set_token' } | { type: 'gen_name' } | { type: 'import_wallet' }
   | { type: 'withdraw'; walletId: number } | { type: 'set_gl' } | { type: 'set_gb' } | { type: 'set_defpct' }
   | { type: 'auto_amt' } | { type: 'lb_amt' } | { type: 'ls_pct' } | { type: 'limit_value' };
 const pending = new Map<number, Pending>();
 
 /* ---------- /start ---------- */
-bot.start(async (ctx) => {
-  await showMenu(ctx, 'Main Menu', mainMenu());
-});
+bot.start(async (ctx) => { await ctx.reply('Main Menu', mainMenu()); });
 
 /* ---------- SETTINGS ---------- */
 async function renderSettings(ctx: any) {
@@ -203,7 +196,7 @@ async function renderSettings(ctx: any) {
   await showMenu(ctx, lines, settingsMenu());
 }
 
-bot.action('settings', async (ctx) => { await ctx.answerCbQuery(); clearPending(ctx.from.id); return renderSettings(ctx); });
+bot.action('settings', async (ctx) => { await ctx.answerCbQuery(); return renderSettings(ctx); });
 
 bot.action('set_gl', async (ctx) => {
   await ctx.answerCbQuery();
@@ -286,7 +279,7 @@ async function renderWalletManage(ctx: any, walletId: number) {
   await showMenu(ctx, lines, kb);
 }
 
-bot.action('wallets', async (ctx) => { await ctx.answerCbQuery(); clearPending(ctx.from.id); return renderWalletsList(ctx); });
+bot.action('wallets', async (ctx) => { await ctx.answerCbQuery(); return renderWalletsList(ctx); });
 bot.action(/^wallet_manage:(\d+)$/, async (ctx: any) => { await ctx.answerCbQuery(); return renderWalletManage(ctx, Number(ctx.match[1])); });
 
 /* PK */
@@ -408,7 +401,7 @@ async function renderBuyMenu(ctx: any) {
   await showMenu(ctx, lines, buyMenu(Math.round(pct), walletButtons));
 }
 
-bot.action('menu_buy', async (ctx) => { await ctx.answerCbQuery(); /* don’t clear here */ return renderBuyMenu(ctx); });
+bot.action('menu_buy', async (ctx) => { await ctx.answerCbQuery(); return renderBuyMenu(ctx); });
 bot.action('buy_refresh', async (ctx) => { await ctx.answerCbQuery(); return renderBuyMenu(ctx); });
 
 bot.action('buy_set_amount', async (ctx) => {
@@ -419,7 +412,7 @@ bot.action('buy_set_amount', async (ctx) => {
 });
 bot.action('buy_set_token', async (ctx) => {
   await ctx.answerCbQuery();
-  pending.set(ctx.from.id, { type: 'set_token', from: 'buy' });
+  pending.set(ctx.from.id, { type: 'set_token' });
   return showMenu(ctx, 'Paste the *token contract address* (0x...).', { parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_buy')]]) });
 });
@@ -593,34 +586,23 @@ bot.action(/^limit_cancel:(\d+)$/, async (ctx: any) => {
   return showMenu(ctx, changed ? `Limit #${id} cancelled.` : `Couldn’t cancel #${id}.`, mainMenu());
 });
 
-/* ---------- SELL MENU (adds Contract button) ---------- */
-function sellMenuWithContract() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback('📄 Contract', 'sell_set_token'), Markup.button.callback('✅ Approve', 'sell_approve')],
-    [
-      Markup.button.callback('25%', 'sell_pct_25'),
-      Markup.button.callback('50%', 'sell_pct_50'),
-      Markup.button.callback('75%', 'sell_pct_75'),
-      Markup.button.callback('100%', 'sell_pct_100'),
-    ],
-    [Markup.button.callback('🔴 Sell', 'sell_exec')],
-    [Markup.button.callback('⬅️ Back', 'main_back')],
-  ]);
-}
-
+/* ---------- SELL MENU (robust HTML render) ---------- */
 async function renderSellMenu(ctx: any) {
+  const esc = (s: string) =>
+    String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
   const u = getUserSettings(ctx.from.id);
   const w = getActiveWallet(ctx.from.id);
   const pct = u?.sell_pct ?? 100;
 
-  let header = '🟥 *SELL MENU*';
-  let walletLine = `*Wallet:* ${w ? '`' + short(w.address) + '`' : '—'}`;
-  let tokenLine  = `*Token:* ${u?.token_address ? '`' + short(u.token_address) + '`' : '—'}`;
+  let header = '🟥 <b>SELL MENU</b>';
+  let walletLine = `<b>Wallet:</b> ${w ? `<code>${esc(short(w.address))}</code>` : '—'}`;
+  let tokenLine  = `<b>Token:</b> ${u?.token_address ? `<code>${esc(short(u.token_address))}</code>` : '—'}`;
 
-  let balLine = '• *Balance:* —';
-  let outLine = '• *Est. Out:* —';
-  let entryLine = '• *Entry:* —';
-  let pnlLine = '• *Net PnL:* —';
+  let balLine = '• <b>Balance:</b> —';
+  let outLine = '• <b>Est. Out:</b> —';
+  let entryLine = '• <b>Entry:</b> —';
+  let pnlLine = '• <b>Net PnL:</b> —';
   let metaSymbol = 'TOKEN';
 
   if (w && u?.token_address) {
@@ -641,10 +623,9 @@ async function renderSellMenu(ctx: any) {
         })()
       ]);
 
-      balLine = `• *Balance:* ${fmtDec(ethers.formatUnits(bal, dec))} ${metaSymbol}`;
+      balLine = `• <b>Balance:</b> ${esc(fmtDec(ethers.formatUnits(bal, dec)))} ${esc(metaSymbol)}`;
 
-      // 🔧 FIX: remove italics to avoid Telegram Markdown parse errors when route key contains underscores
-      if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  (Route: ${best.route.key})`;
+      if (best) outLine = `• <b>Est. Out:</b> ${esc(fmtPls(best.amountOut))} PLS  (Route: ${esc(best.route.key)})`;
 
       const avg = getAvgEntry(ctx.from.id, tokenAddr, dec);
       if (avg && best) {
@@ -655,8 +636,8 @@ async function renderSellMenu(ctx: any) {
         const pnlPls = curPls - (avg.avgPlsPerToken * amtTok);
         const pnlPct = avg.avgPlsPerToken > 0 ? (curAvg / avg.avgPlsPerToken - 1) * 100 : 0;
 
-        entryLine = `• *Entry:* ${NF.format(avg.avgPlsPerToken)} PLS / ${metaSymbol}`;
-        pnlLine   = `• *Net PnL:* ${pnlPls >= 0 ? '🟢' : '🔴'} ${NF.format(pnlPls)} PLS  (${NF.format(pnlPct)}%)`;
+        entryLine = `• <b>Entry:</b> ${esc(NF.format(avg.avgPlsPerToken))} PLS / ${esc(metaSymbol)}`;
+        pnlLine   = `• <b>Net PnL:</b> ${pnlPls >= 0 ? '🟢' : '🔴'} ${esc(NF.format(pnlPls))} PLS  (${esc(NF.format(pnlPct))}%)`;
       }
     } catch { /* keep defaults */ }
   }
@@ -665,7 +646,7 @@ async function renderSellMenu(ctx: any) {
     header,
     '',
     `${walletLine}    |    ${tokenLine}`,
-    `*Sell %:* ${NF.format(pct)}%`,
+    `<b>Sell %:</b> ${esc(NF.format(pct))}%`,
     '',
     balLine,
     outLine,
@@ -673,17 +654,10 @@ async function renderSellMenu(ctx: any) {
     pnlLine,
   ].join('\n');
 
-  // Keep your existing keyboard wiring (with Contract button) exactly as-is
-  await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenuWithContract() });
+  await showMenu(ctx, text, { parse_mode: 'HTML', ...sellMenu() });
 }
 
-bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); /* don’t clear here */ return renderSellMenu(ctx); });
-bot.action('sell_set_token', async (ctx) => {
-  await ctx.answerCbQuery();
-  pending.set(ctx.from.id, { type: 'set_token', from: 'sell' });
-  return showMenu(ctx, 'Paste the *token contract address* (0x...).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_sell')]]) });
-});
+bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
 bot.action('sell_pct_25', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 25); return renderSellMenu(ctx); });
 bot.action('sell_pct_50', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 50); return renderSellMenu(ctx); });
 bot.action('sell_pct_75', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 75); return renderSellMenu(ctx); });
@@ -694,9 +668,9 @@ bot.action('sell_approve', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
   const w = getActiveWallet(ctx.from.id) || listWallets(ctx.from.id)[0];
-  if (!w || !u?.token_address) return showMenu(ctx, 'Need a wallet and token set first.', sellMenuWithContract());
+  if (!w || !u?.token_address) return showMenu(ctx, 'Need a wallet and token set first.', sellMenu());
   if (u.token_address.toLowerCase() === process.env.WPLS_ADDRESS!.toLowerCase())
-    return showMenu(ctx, 'WPLS doesn’t require approval.', sellMenuWithContract());
+    return showMenu(ctx, 'WPLS doesn’t require approval.', sellMenu());
   try {
     const gas = await computeGas(ctx.from.id);
     const results = await approveAllRouters(getPrivateKey(w), u.token_address, gas);
@@ -710,13 +684,13 @@ bot.action('sell_approve', async (ctx) => {
 bot.action('sell_exec', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id); const w = getActiveWallet(ctx.from.id);
-  if (!w || !u?.token_address) return showMenu(ctx, 'Need active wallet and token set.', sellMenuWithContract());
+  if (!w || !u?.token_address) return showMenu(ctx, 'Need active wallet and token set.', sellMenu());
   try {
     const c = erc20(u.token_address);
     const bal = await c.balanceOf(w.address);
     const pct = u?.sell_pct ?? 100;
     const amount = (bal * BigInt(Math.round(pct))) / 100n;
-    if (amount <= 0n) return showMenu(ctx, 'Nothing to sell.', sellMenuWithContract());
+    if (amount <= 0n) return showMenu(ctx, 'Nothing to sell.', sellMenu());
 
     const q = await bestQuoteSell(amount, u.token_address);      // for recording
     const gas = await computeGas(ctx.from.id);
@@ -782,7 +756,13 @@ async function totalSupply(token: string): Promise<bigint | null> {
 }
 
 async function mcapFor(token: string): Promise<{
-  ok: boolean; reason?: string; mcapUSD?: number; usdPerPLS?: number; plsPerToken?: number; supplyTokens?: number; decimals?: number;
+  ok: boolean;
+  reason?: string;
+  mcapUSD?: number;
+  usdPerPLS?: number;
+  plsPerToken?: number;
+  supplyTokens?: number;
+  decimals?: number;
 }> {
   try {
     if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) {
@@ -907,169 +887,5 @@ async function checkLimitsOnce() {
 }
 
 setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
-
-/* ---------- TEXT: prompts + paste-to-set-token (and auto-buy) ---------- */
-bot.on('text', async (ctx, next) => {
-  const p = pending.get(ctx.from.id);
-  const msg = String(ctx.message.text).trim();
-
-  if (p) {
-    if (p.type === 'set_amount') {
-      const v = Number(msg);
-      if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number (e.g., 0.02).');
-      setBuyAmount(ctx.from.id, v); pending.delete(ctx.from.id);
-      await ctx.reply(`Buy amount set to ${fmtDec(String(v))} PLS.`);
-      return renderBuyMenu(ctx);
-    }
-
-    if (p.type === 'set_token') {
-      if (!/^0x[a-fA-F0-9]{40}$/.test(msg)) return ctx.reply('That does not look like a token address.');
-      setToken(ctx.from.id, msg);
-      warmTokenAsync(ctx.from.id, msg);
-      pending.delete(ctx.from.id);
-      if (p.from === 'sell') return renderSellMenu(ctx);   // no auto-buy here
-      return renderBuyMenu(ctx);                           // no auto-buy here
-    }
-
-    if (p.type === 'gen_name') {
-      const name = msg; if (!name) return ctx.reply('Please send a non-empty name.');
-      const w = createWallet(ctx.from.id, name); pending.delete(ctx.from.id);
-      await ctx.reply(`Created wallet "${name}": ${w.address}`);
-      return renderWalletsList(ctx);
-    }
-
-    if (p.type === 'import_wallet') {
-      const parts = msg.split(/\s+/); if (parts.length < 2) return ctx.reply('Expected: `name privkey`');
-      const name = parts[0], pk = parts[1];
-      try { const w = importWallet(ctx.from.id, name, pk); pending.delete(ctx.from.id); await ctx.reply(`Imported "${name}": ${w.address}`); }
-      catch (e: any) { pending.delete(ctx.from.id); return ctx.reply('Import failed: ' + e.message); }
-      return renderWalletsList(ctx);
-    }
-
-    if (p.type === 'withdraw') {
-      const [to, amtStr] = msg.split(/\s+/);
-      if (!/^0x[a-fA-F0-9]{40}$/.test(to) || !amtStr) return ctx.reply('Expected: `address amount_pls`');
-      const amount = Number(amtStr);
-      if (!Number.isFinite(amount) || amount <= 0) return ctx.reply('Amount must be positive.');
-      const w = getWalletById(ctx.from.id, (p as any).walletId); if (!w) { pending.delete(ctx.from.id); return ctx.reply('Wallet not found.'); }
-      try {
-        const gas = await computeGas(ctx.from.id);
-        const receipt = await withdrawPls(getPrivateKey(w), to, ethers.parseEther(String(amount)), gas);
-        const hash = (receipt as any)?.hash;
-        await ctx.reply(hash ? `Withdraw sent! ${otter(hash)}` : 'Withdraw sent! (pending)');
-      } catch (e: any) { await ctx.reply('Withdraw failed: ' + e.message); }
-      pending.delete(ctx.from.id);
-      return renderWalletManage(ctx, (p as any).walletId);
-    }
-
-    if (p.type === 'set_gl') {
-      const v = Number(msg);
-      if (!Number.isFinite(v) || v < 21000) return ctx.reply('Gas Limit must be ≥ 21000.');
-      const u = getUserSettings(ctx.from.id); setGasBase(ctx.from.id, Math.floor(v), u?.gwei_boost_gwei ?? 0);
-      pending.delete(ctx.from.id); return renderSettings(ctx);
-    }
-
-    if (p.type === 'set_gb') {
-      const v = Number(msg);
-      if (!Number.isFinite(v) || v < 0) return ctx.reply('Gwei Booster must be ≥ 0.');
-      const u = getUserSettings(ctx.from.id); setGasBase(ctx.from.id, u?.gas_limit ?? 250000, v);
-      pending.delete(ctx.from.id); return renderSettings(ctx);
-    }
-
-    if (p.type === 'set_defpct') {
-      const v = Number(msg);
-      if (!Number.isFinite(v)) return ctx.reply('Send a number (percent).');
-      setDefaultGasPercent(ctx.from.id, v); setGasPercent(ctx.from.id, v);
-      pending.delete(ctx.from.id); return renderSettings(ctx);
-    }
-
-    if (p.type === 'auto_amt') {
-      const v = Number(msg);
-      if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number (PLS).');
-      setAutoBuyAmount(ctx.from.id, v);
-      pending.delete(ctx.from.id); return renderSettings(ctx);
-    }
-
-    // ----- Limit order building -----
-    if (p.type === 'lb_amt') {
-      const v = Number(msg);
-      if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number of PLS (e.g., 0.5).');
-      const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Buy.'); }
-      d.amountPlsWei = ethers.parseEther(String(v));
-      draft.set(ctx.from.id, d);
-      pending.delete(ctx.from.id);
-      return showMenu(ctx, 'Choose a trigger:', limitTriggerMenu('BUY'));
-    }
-
-    if (p.type === 'ls_pct') {
-      const v = Number(msg);
-      if (!Number.isFinite(v) || v <= 0 || v > 100) return ctx.reply('Send a percent between 1 and 100.');
-      const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Sell.'); }
-      d.sellPct = v; draft.set(ctx.from.id, d);
-      pending.delete(ctx.from.id);
-      return showMenu(ctx, 'Choose a trigger:', limitTriggerMenu('SELL'));
-    }
-
-    if (p.type === 'limit_value') {
-      const d = draft.get(ctx.from.id);
-      if (!d || !d.trigger) { pending.delete(ctx.from.id); return ctx.reply('Start a Limit order first.'); }
-      const val = parseNumHuman(msg);
-      if (val == null || !(val > 0)) return ctx.reply('Send a positive number (supports `k`/`m`).');
-
-      const id = addLimitOrder({
-        telegramId: ctx.from.id,
-        walletId: d.walletId,
-        token: d.token,
-        side: d.side,
-        amountPlsWei: d.side === 'BUY' ? (d.amountPlsWei ?? ethers.parseEther('0')) : undefined,
-        sellPct: d.side === 'SELL' ? (d.sellPct ?? 100) : undefined,
-        trigger: d.trigger!,
-        value: val
-      });
-
-      draft.delete(ctx.from.id);
-      pending.delete(ctx.from.id);
-      await ctx.reply(`Limit ${d.side} #${id} created: ${d.trigger} @ ${NF.format(val)} ${d.side === 'BUY' ? `for ${fmtDec(ethers.formatEther((d.amountPlsWei ?? 0n))) } PLS` : `${d.sellPct}%`}`);
-      if (d.side === 'BUY') return renderBuyMenu(ctx);
-      return renderSellMenu(ctx);
-    }
-
-    return; // handled a pending prompt
-  }
-
-  // No pending prompt: detect contract paste and (optionally) auto-buy
-  if (/^0x[a-fA-F0-9]{40}$/.test(msg)) {
-    setToken(ctx.from.id, msg);
-    warmTokenAsync(ctx.from.id, msg);
-
-    const u = getUserSettings(ctx.from.id);
-    if (u?.auto_buy_enabled) {
-      const w = getActiveWallet(ctx.from.id);
-      if (!w) { await ctx.reply('Select or create a wallet first.'); return renderBuyMenu(ctx); }
-      try {
-        const gas = await computeGas(ctx.from.id);
-        const receipt = await buyAutoRoute(getPrivateKey(w), msg, ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01)), 0n, gas);
-        const hash = (receipt as any)?.hash;
-        if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
-      } catch (e: any) {
-        await ctx.reply('Auto-buy failed: ' + e.message);
-      }
-      await upsertPinnedPosition(ctx);
-      return renderBuyMenu(ctx);
-    } else {
-      return renderBuyMenu(ctx);
-    }
-  }
-
-  return next();
-});
-
-/* ---------- shortcuts ---------- */
-bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); clearPending(ctx.from.id); return showMenu(ctx, 'Main Menu', mainMenu()); });
-bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
-bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
-
-// no-op pill handler
-bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
 
 export {};
