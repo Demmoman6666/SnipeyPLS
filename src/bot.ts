@@ -442,29 +442,21 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
   return renderBuyMenu(ctx);
 });
 
-/* ----- Tx notifications: show link immediately, then replace on confirm ----- */
+/* ----- Tx notifications: pending -> success (delete pending) ----- */
 async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string) {
   if (!hash) return;
-
-  const link = otter(hash); // explorer URL
-
-  // 1) Immediately show a message with the tx link (even while pending)
-  const pendingMsg = await ctx.reply(`transaction sent ${link}`);
-
+  const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
-    // 2) Wait for on-chain confirmation
     await provider.waitForTransaction(hash);
-
-    // 3) Delete the "transaction sent" message
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
-
-    // 4) Post the success update (with the same link)
-    const title = kind === 'Buy' ? 'Buy successful' : 'Sell successful';
+    const link = otter(hash);
+    const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
     await ctx.reply(`✅ ${title} ${link}`);
   } catch {
-    // If confirmation fails or times out, just leave the "transaction sent" message as-is.
+    // leave pending if it fails/times out
   }
 }
+
 /* Buy using selected wallets (or active) + auto-approve + record entry + pin card */
 bot.action('buy_exec', async (ctx) => {
   await ctx.answerCbQuery();
@@ -478,32 +470,57 @@ bot.action('buy_exec', async (ctx) => {
     : (active ? [active] : []);
   if (!wallets.length) return showMenu(ctx, 'Select a wallet first (Wallets page).', buyMenu(u?.gas_pct ?? 0));
 
+  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
   const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
-  const preQuote = await bestQuoteBuy(amountIn, u.token_address);
 
   for (const w of wallets) {
+    // 1) Show an immediate pending notice before any slow ops
+    const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
+
     try {
       const gas = await computeGas(ctx.from.id);
       const r = await buyAutoRoute(getPrivateKey(w), u.token_address, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
-      // notify first so DB issues can't block UX
-      if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
-
-      // record trade defensively
-      if (preQuote?.amountOut) {
+      // 2) As soon as we have the hash, edit the placeholder to "transaction sent <link>"
+      if (hash) {
+        const link = otter(hash);
         try {
-          recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-        } catch (e) {
-          console.error('recordTrade failed (BUY):', e);
+          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
+        } catch {
+          // fall back to a new message if edit fails
+          await ctx.reply(`transaction sent ${link}`);
         }
-      }
 
-      if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
-        approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
+        // 3) Record trade (quote can be fetched after sending to keep UX snappy)
+        try {
+          const preQuote = await bestQuoteBuy(amountIn, u.token_address);
+          if (preQuote?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+        } catch {}
+
+        // 4) Optional approvals after buy
+        if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
+          approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
+        }
+
+        // 5) Wait for confirmation and then clean up the "transaction sent" message
+        provider.waitForTransaction(hash).then(async () => {
+          try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
+          await ctx.reply(`✅ Buy successful ${link}`);
+        }).catch(() => {/* ignore */});
+      } else {
+        // No hash returned: update the placeholder accordingly
+        try {
+          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent (no hash yet)`);
+        } catch {}
       }
     } catch (e: any) {
-      await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${e.message}`);
+      // On error, turn the placeholder into an error line
+      try {
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Buy failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+      } catch {
+        await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+      }
     }
   }
 
@@ -517,34 +534,51 @@ bot.action('buy_exec_all', async (ctx) => {
   if (!rows.length) return showMenu(ctx, 'No wallets.', buyMenu(u?.gas_pct ?? 0));
   if (!u?.token_address) return showMenu(ctx, 'Set token first.', buyMenu(u?.gas_pct ?? 0));
 
+  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
   const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
-  const preQuote = await bestQuoteBuy(amountIn, u.token_address);
 
-  for (const row of rows) {
+  for (const w of rows) {
+    const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
     try {
       const gas = await computeGas(ctx.from.id);
-      const r = await buyAutoRoute(getPrivateKey(row), u.token_address, amountIn, 0n, gas);
+      const r = await buyAutoRoute(getPrivateKey(w), u.token_address, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
-      // notify first
-      if (hash) notifyPendingThenSuccess(ctx, 'Buy', hash);
-
-      // record trade defensively
-      if (preQuote?.amountOut) {
+      if (hash) {
+        const link = otter(hash);
         try {
-          recordTrade(ctx.from.id, row.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-        } catch (e) {
-          console.error('recordTrade failed (BUY all):', e);
+          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
+        } catch {
+          await ctx.reply(`transaction sent ${link}`);
         }
-      }
 
-      if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
-        approveAllRouters(getPrivateKey(row), u.token_address, gas).catch(() => {});
+        try {
+          const preQuote = await bestQuoteBuy(amountIn, u.token_address);
+          if (preQuote?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+        } catch {}
+
+        if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
+          approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
+        }
+
+        provider.waitForTransaction(hash).then(async () => {
+          try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
+          await ctx.reply(`✅ Buy successful ${link}`);
+        }).catch(() => {/* ignore */});
+      } else {
+        try {
+          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent (no hash yet)`);
+        } catch {}
       }
     } catch (e: any) {
-      await ctx.reply(`❌ Buy failed for ${short(row.address)}: ${e.message}`);
+      try {
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Buy failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+      } catch {
+        await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+      }
     }
   }
+
   await upsertPinnedPosition(ctx);
   return renderBuyMenu(ctx);
 });
@@ -732,17 +766,8 @@ bot.action('sell_exec', async (ctx) => {
     const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
     const hash = (r as any)?.hash;
 
-    // notify first
+    if (q?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
     if (hash) notifyPendingThenSuccess(ctx, 'Sell', hash);
-
-    // record trade defensively
-    if (q?.amountOut) {
-      try {
-        recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
-      } catch (e) {
-        console.error('recordTrade failed (SELL):', e);
-      }
-    }
 
   } catch (e: any) { await ctx.reply('Sell failed: ' + e.message); }
   await upsertPinnedPosition(ctx);
