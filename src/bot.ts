@@ -442,22 +442,29 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
   return renderBuyMenu(ctx);
 });
 
-/* ----- Tx notifications: pending -> success (delete pending) ----- */
+/* ----- Tx notifications: show link immediately, then replace on confirm ----- */
 async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string) {
   if (!hash) return;
-  // Pending: simple tick only
-  const pendingMsg = await ctx.reply('✅ Transaction submitted');
+
+  const link = otter(hash); // explorer URL
+
+  // 1) Immediately show a message with the tx link (even while pending)
+  const pendingMsg = await ctx.reply(`transaction sent ${link}`);
+
   try {
+    // 2) Wait for on-chain confirmation
     await provider.waitForTransaction(hash);
+
+    // 3) Delete the "transaction sent" message
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
-    const link = otter(hash);
-    const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
+
+    // 4) Post the success update (with the same link)
+    const title = kind === 'Buy' ? 'Buy successful' : 'Sell successful';
     await ctx.reply(`✅ ${title} ${link}`);
   } catch {
-    // leave pending if it fails/times out
+    // If confirmation fails or times out, just leave the "transaction sent" message as-is.
   }
 }
-
 /* Buy using selected wallets (or active) + auto-approve + record entry + pin card */
 bot.action('buy_exec', async (ctx) => {
   await ctx.answerCbQuery();
