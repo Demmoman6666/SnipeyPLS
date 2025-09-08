@@ -761,8 +761,60 @@ async function plsUSD(): Promise<number | null> {
   } catch { return null; }
 }
 
+/** -------- Explorer totalSupply() fallback (optional) -------- */
+const _fetchAny: any = (globalThis as any).fetch?.bind(globalThis);
+
+function explorerApiBase(): string | null {
+  const b = (process.env.EXPLORER_API_BASE || '').trim();
+  return b ? b.replace(/\/+$/, '') : null;
+}
+function withApiKey(url: string): string {
+  const k = (process.env.EXPLORER_API_KEY || '').trim();
+  if (!k) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'apikey=' + encodeURIComponent(k);
+}
+function explorerHeaders(): Record<string,string> {
+  const k = (process.env.EXPLORER_API_KEY || '').trim();
+  return k ? { 'X-API-KEY': k } : {};
+}
+async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null> {
+  if (!_fetchAny) return null;
+  const base = explorerApiBase();
+  if (!base) return null;
+
+  // Etherscan-compatible
+  try {
+    const url = withApiKey(`${base}?module=stats&action=tokensupply&contractaddress=${token}`);
+    const r = await _fetchAny(url, { headers: explorerHeaders() });
+    if (r?.ok) {
+      const j: any = await r.json();
+      const raw = j?.result ?? j?.data?.result;
+      if (raw && /^\d+$/.test(String(raw))) return BigInt(String(raw));
+    }
+  } catch {}
+
+  // Blockscout-style
+  try {
+    const url = `${base}/tokens/${token}`;
+    const r = await _fetchAny(url, { headers: explorerHeaders() });
+    if (r?.ok) {
+      const j: any = await r.json();
+      const val = j?.total_supply ?? j?.data?.total_supply ?? j?.supply ?? j?.data?.supply;
+      if (val) {
+        if (typeof val === 'string' && /^0x[0-9a-fA-F]+$/.test(val)) return BigInt(val);
+        if (typeof val === 'string' && /^\d+$/.test(val)) return BigInt(val);
+        if (typeof val === 'number' && Number.isFinite(val)) return BigInt(Math.floor(val));
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
 async function totalSupply(token: string): Promise<bigint | null> {
-  try { return await erc20(token).totalSupply(); } catch { return null; }
+  try { return await erc20(token).totalSupply(); } catch {}
+  try { return await fetchTotalSupplyViaExplorer(token); } catch {}
+  return null;
 }
 
 async function mcapFor(token: string): Promise<{
