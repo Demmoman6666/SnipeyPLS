@@ -31,10 +31,8 @@ const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
-/** Minimal Markdown escaper for Telegram’s “Markdown” mode (not V2). */
-function mdEsc(s: string) {
-  return String(s).replace(/([_*[\]()`])/g, '\\$1');
-}
+/* Dexscreener fallback config (used only if totalSupply() fails) */
+const DS_CHAIN = (process.env.DS_CHAIN || 'pulsechain').toLowerCase();
 
 /* ---------- message lifecycle: delete previous menus, manage pin ---------- */
 const lastMenuMsg = new Map<number, number>();  // user -> last (non-pinned) menu message id
@@ -96,10 +94,10 @@ async function upsertPinnedPosition(ctx: any) {
 
     const text = [
       '📌 *POSITION*',
-      `Token: ${mdEsc(u.token_address)}${meta.symbol ? ` (${mdEsc(meta.symbol)})` : ''}`,
-      `Wallet: ${mdEsc(short(w.address))}`,
-      `Holdings: ${fmtDec(ethers.formatUnits(bal, decimals))} ${mdEsc(meta.symbol || 'TOKEN')}`,
-      q?.amountOut ? `Est. value: ${fmtPls(q.amountOut)} PLS  ·  Route: \`${q.route.key}\`` : 'Est. value: —',
+      `Token: ${u.token_address}${meta.symbol ? ` (${meta.symbol})` : ''}`,
+      `Wallet: ${short(w.address)}`,
+      `Holdings: ${fmtDec(ethers.formatUnits(bal, decimals))} ${meta.symbol || 'TOKEN'}`,
+      q?.amountOut ? `Est. value: ${fmtPls(q.amountOut)} PLS  ·  Route: ${q.route.key}` : 'Est. value: —',
       avg ? `Entry: ${NF.format(avg.avgPlsPerToken)} PLS/token` : 'Entry: —',
       `Unrealized PnL: ${pnlLine}`,
     ].join('\n');
@@ -454,7 +452,7 @@ async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: str
     await provider.waitForTransaction(hash);
     try { await ctx.deleteMessage(pendingMsg.message_id); } catch {}
     const link = otter(hash);
-    const title = kind === 'Buy' ? 'Buy Successful' : 'Sell Successful';
+    const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
     await ctx.reply(`✅ ${title} ${link}`);
   } catch {
     // leave pending if it fails/times out
@@ -609,6 +607,7 @@ async function renderSellMenu(ctx: any) {
 
   if (w && u?.token_address) {
     try {
+      // capture a narrowed local to avoid string|null leaking into nested async
       const tokenAddr = u.token_address as string;
 
       const meta = await tokenMeta(tokenAddr);
@@ -625,9 +624,9 @@ async function renderSellMenu(ctx: any) {
         })()
       ]);
 
-      balLine = `• *Balance:* ${fmtDec(ethers.formatUnits(bal, dec))} ${mdEsc(metaSymbol)}`;
+      balLine = `• *Balance:* ${fmtDec(ethers.formatUnits(bal, dec))} ${metaSymbol}`;
 
-      if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  (Route: \`${best.route.key}\`)`;
+      if (best) outLine = `• *Est. Out:* ${fmtPls(best.amountOut)} PLS  _(Route: ${best.route.key})_`;
 
       const avg = getAvgEntry(ctx.from.id, tokenAddr, dec);
       if (avg && best) {
@@ -638,7 +637,7 @@ async function renderSellMenu(ctx: any) {
         const pnlPls = curPls - (avg.avgPlsPerToken * amtTok);
         const pnlPct = avg.avgPlsPerToken > 0 ? (curAvg / avg.avgPlsPerToken - 1) * 100 : 0;
 
-        entryLine = `• *Entry:* ${NF.format(avg.avgPlsPerToken)} PLS / ${mdEsc(metaSymbol)}`;
+        entryLine = `• *Entry:* ${NF.format(avg.avgPlsPerToken)} PLS / ${metaSymbol}`;
         pnlLine   = `• *Net PnL:* ${pnlPls >= 0 ? '🟢' : '🔴'} ${NF.format(pnlPls)} PLS  (${NF.format(pnlPct)}%)`;
       }
     } catch { /* keep defaults */ }
@@ -656,20 +655,10 @@ async function renderSellMenu(ctx: any) {
     pnlLine,
   ].join('\n');
 
-  // Robust send: try Markdown first, then retry without Markdown if Telegram rejects formatting
-  try {
-    await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenu() });
-  } catch {
-    const plain = text.replace(/[_*`]/g, '');
-    await showMenu(ctx, plain, { ...sellMenu() });
-  }
+  await showMenu(ctx, text, { parse_mode: 'Markdown', ...sellMenu() });
 }
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
-// Aliases in case some keyboards send different callback data
-bot.action('sell', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
-bot.action('sell_menu', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
-
 bot.action('sell_pct_25', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 25); return renderSellMenu(ctx); });
 bot.action('sell_pct_50', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 50); return renderSellMenu(ctx); });
 bot.action('sell_pct_75', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 75); return renderSellMenu(ctx); });
@@ -767,6 +756,48 @@ async function totalSupply(token: string): Promise<bigint | null> {
   try { return await erc20(token).totalSupply(); } catch { return null; }
 }
 
+/* ---------- Dexscreener helpers (fallback only) ---------- */
+async function getFetch(): Promise<typeof fetch> {
+  // Node 18+: fetch is global. If not, lazy-load node-fetch.
+  if (typeof (globalThis as any).fetch === 'function') return (globalThis as any).fetch;
+  const mod = await import('node-fetch'); // @ts-ignore
+  return (mod.default || mod) as any;
+}
+
+type DsPair = {
+  chainId?: string;
+  priceUsd?: string;
+  liquidity?: { usd?: number };
+  fdv?: number;
+  marketCap?: number;
+};
+
+async function mcapFromDexscreener(token: string): Promise<{ ok: boolean; mcapUSD?: number; reason?: string; source?: string; }> {
+  try {
+    const f = await getFetch();
+    const url = `https://api.dexscreener.com/latest/dex/tokens/${token}`;
+    const res = await f(url);
+    if (!res.ok) return { ok: false, reason: `Dexscreener HTTP ${res.status}` };
+    const data = await res.json();
+    const pairs: DsPair[] = Array.isArray(data?.pairs) ? data.pairs : [];
+    if (!pairs.length) return { ok: false, reason: 'Dexscreener: no pairs' };
+
+    // Prefer same-chain, highest liquidity
+    const best = pairs
+      .filter(p => (p.chainId || '').toLowerCase() === DS_CHAIN)
+      .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0] || pairs[0];
+
+    const mcap = best.marketCap ?? best.fdv;
+    if (mcap == null) {
+      return { ok: false, reason: 'Dexscreener: no fdv/marketCap in top pair' };
+    }
+    return { ok: true, mcapUSD: Number(mcap), source: (best.marketCap != null) ? 'dexscreener:marketCap' : 'dexscreener:fdv' };
+  } catch (e: any) {
+    return { ok: false, reason: e?.message ?? String(e) };
+  }
+}
+
+/* Combined MCAP: on-chain if possible, else Dexscreener fallback */
 async function mcapFor(token: string): Promise<{
   ok: boolean;
   reason?: string;
@@ -775,11 +806,14 @@ async function mcapFor(token: string): Promise<{
   plsPerToken?: number;
   supplyTokens?: number;
   decimals?: number;
+  source?: 'onchain' | 'dexscreener:fdv' | 'dexscreener:marketCap';
 }> {
   try {
     if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) {
       return { ok: false, reason: 'No STABLE token address configured (USDC/USDCe). Set env USDC_ADDRESS/USDCe_ADDRESS/STABLE_ADDRESS.' };
     }
+
+    // First try fully on-chain
     const [usdPerPLS, plsPerToken, meta, sup] = await Promise.all([
       plsUSD(),
       pricePLSPerToken(token),
@@ -787,16 +821,25 @@ async function mcapFor(token: string): Promise<{
       totalSupply(token),
     ]);
 
-    if (usdPerPLS == null) return { ok: false, reason: 'Could not fetch USD/PLS (stable quote failed).' };
-    if (plsPerToken == null) return { ok: false, reason: 'No sell route for token (price in PLS not available).' };
-    if (!sup) return { ok: false, reason: 'Could not fetch totalSupply().' };
+    if (usdPerPLS != null && plsPerToken != null && sup != null) {
+      const dec = meta.decimals ?? 18;
+      const supplyTokens = Number(ethers.formatUnits(sup, dec));
+      const usdPerToken = plsPerToken * usdPerPLS;
+      const mcapUSD = supplyTokens * usdPerToken;
+      return { ok: true, mcapUSD, usdPerPLS, plsPerToken, supplyTokens, decimals: dec, source: 'onchain' };
+    }
 
-    const dec = meta.decimals ?? 18;
-    const supplyTokens = Number(ethers.formatUnits(sup, dec));
-    const usdPerToken = plsPerToken * usdPerPLS;
-    const mcapUSD = supplyTokens * usdPerToken;
+    // If on-chain supply failed, try Dexscreener as a fallback (uses FDV/marketCap)
+    const ds = await mcapFromDexscreener(token);
+    if (ds.ok) {
+      return { ok: true, mcapUSD: ds.mcapUSD, source: (ds.source as any) };
+    }
 
-    return { ok: true, mcapUSD, usdPerPLS, plsPerToken, supplyTokens, decimals: dec };
+    // Still nothing: bubble the best reason up
+    if (sup == null) return { ok: false, reason: 'Could not fetch totalSupply().' };
+    if (usdPerPLS == null) return { ok: false, reason: 'Could not fetch USD/PLS rate.' };
+    if (plsPerToken == null) return { ok: false, reason: 'No sell route for token (PLS price unavailable).' };
+    return { ok: false, reason: ds.reason || 'Unknown MCAP failure.' };
   } catch (e: any) {
     return { ok: false, reason: e?.message ?? String(e) };
   }
@@ -810,11 +853,12 @@ bot.command('mcap', async (ctx) => {
   if (!info.ok) return ctx.reply('MCAP check failed: ' + (info.reason ?? 'unknown'));
   const lines = [
     `Token: ${token}`,
-    `Supply: ${NF.format(info.supplyTokens!)} tokens`,
-    `Price: ${info.plsPerToken!.toFixed(8)} PLS / token`,
-    `PLS→USD: ${info.usdPerPLS!.toFixed(6)} USD / PLS`,
+    info.supplyTokens != null ? `Supply: ${NF.format(info.supplyTokens)} tokens` : undefined,
+    info.plsPerToken != null ? `Price: ${info.plsPerToken.toFixed(8)} PLS / token` : undefined,
+    info.usdPerPLS != null ? `PLS→USD: ${info.usdPerPLS.toFixed(6)} USD / PLS` : undefined,
     `MCAP: $${fmtInt(String(Math.round(info.mcapUSD!)))}`,
-  ].join('\n');
+    info.source ? `Source: ${info.source}` : undefined,
+  ].filter(Boolean).join('\n');
   return ctx.reply(lines);
 });
 
@@ -899,18 +943,5 @@ async function checkLimitsOnce() {
 }
 
 setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
-
-/* ---------- shortcuts ---------- */
-bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Main Menu', mainMenu()); });
-bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
-bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
-bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
-
-/** ✅ Generic BACK catcher: handles `back`, `main_back`, `foo_back`, `foo:back` */
-const BACK_RE = /(?:^|[:_])back$/;
-bot.action(BACK_RE, async (ctx) => {
-  await ctx.answerCbQuery();
-  return showMenu(ctx, 'Main Menu', mainMenu());
-});
 
 export {};
