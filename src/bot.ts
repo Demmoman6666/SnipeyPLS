@@ -582,7 +582,6 @@ bot.action(/^limit_cancel:(\d+)$/, async (ctx: any) => {
 /* ---------- SELL MENU (robust: no Markdown) ---------- */
 async function renderSellMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
-  the:
   const w = getActiveWallet(ctx.from.id);
   const pct = u?.sell_pct ?? 100;
 
