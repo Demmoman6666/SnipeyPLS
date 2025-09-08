@@ -35,35 +35,15 @@ const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process
 const lastMenuMsg = new Map<number, number>();  // user -> last (non-pinned) menu message id
 const pinnedPosMsg = new Map<number, number>(); // user -> pinned "POSITION" message id
 
-function canEdit(ctx: any) {
-  const mid = ctx?.callbackQuery?.message?.message_id;
-  if (!mid) return false;
-  const uid = ctx?.from?.id as number | undefined;
-  if (!uid) return false;
-  const pinned = pinnedPosMsg.get(uid);
-  // 👇 never try to edit the pinned POSITION card; always send a fresh message
-  if (pinned && pinned === mid) return false;
-  return true;
-}
-
-/** Show a menu, deleting the prior menu message for this user (if any). */
+/** Show a menu: ALWAYS delete the previous non-pinned menu message, then send a fresh one. */
 async function showMenu(ctx: any, text: string, extra?: any) {
   const uid = ctx.from.id;
   const pinned = pinnedPosMsg.get(uid);
 
-  // If we can edit (button taps), just edit and keep id
-  if (canEdit(ctx)) {
-    try {
-      await ctx.editMessageText(text, extra);
-      lastMenuMsg.set(uid, ctx.callbackQuery.message.message_id);
-      return;
-    } catch { /* fallthrough to reply */ }
-  }
-
   // delete previous menu (but never the pinned id)
   const prev = lastMenuMsg.get(uid);
   if (prev && (!pinned || prev !== pinned)) {
-    try { await ctx.deleteMessage(prev); } catch {}
+    try { await ctx.deleteMessage(prev); } catch { /* ignore */ }
   }
 
   const m = await ctx.reply(text, extra);
@@ -77,7 +57,6 @@ async function upsertPinnedPosition(ctx: any) {
   const w = getActiveWallet(uid);
   if (!u?.token_address || !w) return;
 
-  // always pass a definite chat id
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
 
   try {
@@ -460,7 +439,6 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
 /* ----- Tx notifications: pending -> success (delete pending) ----- */
 async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: string) {
   if (!hash) return;
-  // Pending: simple tick only
   const pendingMsg = await ctx.reply('✅ Transaction submitted');
   try {
     await provider.waitForTransaction(hash);
@@ -468,9 +446,7 @@ async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: str
     const link = otter(hash);
     const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
     await ctx.reply(`✅ ${title} ${link}`);
-  } catch {
-    // leave pending if it fails/times out
-  }
+  } catch { /* leave pending if it fails/times out */ }
 }
 
 /* Buy using selected wallets (or active) + auto-approve + record entry + pin card */
@@ -606,6 +582,7 @@ bot.action(/^limit_cancel:(\d+)$/, async (ctx: any) => {
 /* ---------- SELL MENU (robust: no Markdown) ---------- */
 async function renderSellMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
+  the:
   const w = getActiveWallet(ctx.from.id);
   const pct = u?.sell_pct ?? 100;
 
@@ -751,7 +728,7 @@ async function pricePLSPerToken(token: string): Promise<number | null> {
     const one = ethers.parseUnits('1', dec);
     const q = await bestQuoteSell(one, token);
     if (!q) return null;
-    return Number(ethers.formatEther(q.amountOut)); // PLS per 1 token
+    return Number(ethers.formatEther(q.amountOut));
   } catch { return null; }
 }
 
@@ -759,9 +736,9 @@ async function plsUSD(): Promise<number | null> {
   try {
     if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) return null;
     const meta = await tokenMeta(STABLE);
-    const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE); // 1 WPLS -> stable
+    const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE);
     if (!q) return null;
-    return Number(ethers.formatUnits(q.amountOut, meta.decimals ?? 18)); // USD-ish per 1 PLS
+    return Number(ethers.formatUnits(q.amountOut, meta.decimals ?? 18));
   } catch { return null; }
 }
 
@@ -827,7 +804,7 @@ async function checkLimitsOnce() {
   const rows = getOpenLimitOrders();
   if (!rows.length) return;
 
-  const usd = await plsUSD(); // still used for USD trigger
+  const usd = await plsUSD();
 
   for (const r of rows) {
     try {
@@ -901,5 +878,19 @@ async function checkLimitsOnce() {
 }
 
 setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
+
+/* ---------- shortcuts (Back + helpers) ---------- */
+bot.action('main_back', async (ctx) => {
+  await ctx.answerCbQuery();
+  return showMenu(ctx, 'Main Menu', mainMenu());
+});
+bot.action('price', async (ctx) => {
+  await ctx.answerCbQuery();
+  return showMenu(ctx, 'Use /price after setting a token.', mainMenu());
+});
+bot.action('balances', async (ctx) => {
+  await ctx.answerCbQuery();
+  return showMenu(ctx, 'Use /balances after selecting a wallet.', mainMenu());
+});
 
 export {};
