@@ -168,7 +168,10 @@ type Pending =
 const pending = new Map<number, Pending>();
 
 /* ---------- /start ---------- */
-bot.start(async (ctx) => { await ctx.reply('Main Menu', mainMenu()); });
+// AFTER
+bot.start(async (ctx) => {
+  await showMenu(ctx, 'Main Menu', mainMenu());
+});
 
 /* ---------- SETTINGS ---------- */
 async function renderSettings(ctx: any) {
