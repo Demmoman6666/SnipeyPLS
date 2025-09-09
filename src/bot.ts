@@ -596,7 +596,7 @@ bot.action('buy_exec', async (ctx) => {
             buyAmountPlsWei: amountIn,
             recvTokWei: lastQuote?.amountOut,
           });
-          await ctx.reply(pretty, { parse_mode: 'Markdown' });
+          await ctx.replyWithMarkdown(pretty);
         }).catch(() => {/* ignore */});
       } else {
         // No hash returned: update the placeholder accordingly
@@ -660,7 +660,7 @@ bot.action('buy_exec_all', async (ctx) => {
             buyAmountPlsWei: amountIn,
             recvTokWei: lastQuote?.amountOut,
           });
-          await ctx.reply(pretty, { parse_mode: 'Markdown' });
+          await ctx.replyWithMarkdown(pretty);
         }).catch(() => {/* ignore */});
       } else {
         try {
@@ -901,7 +901,7 @@ bot.action('sell_exec', async (ctx) => {
           soldTokWei: amount,
           recvPlsWei: sellQuote?.amountOut,
         });
-        await ctx.reply(pretty, { parse_mode: 'Markdown' });
+        await ctx.replyWithMarkdown(pretty);
       }).catch(() => {/* ignore */});
     } else {
       try {
@@ -1349,7 +1349,7 @@ if (u?.auto_buy_enabled) {
           buyAmountPlsWei: amountIn,
           recvTokWei: lastQuote?.amountOut,
         });
-        await ctx.reply(pretty, { parse_mode: 'Markdown' });
+        await ctx.replyWithMarkdown(pretty);
       }).catch(() => {/* ignore */});
     } else {
       try {
