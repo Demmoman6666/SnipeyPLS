@@ -501,15 +501,21 @@ async function renderBuyMenu(ctx: any) {
     } catch {}
   }
 
-  const lines = [
-    'BUY MENU', '',
-    `Wallet: ${aw ? aw.address : '— (Select)'}`,
-    tokenLine, pairLine, '',
-    `Amount in: ${fmtDec(String(amt))} PLS`,
-    `Gas boost: +${NF.format(pct)}% over market`,
-    `GL: ${fmtInt(String(gl))}  |  Booster: ${NF.format(gb)} gwei`, '',
-    outLine,
-  ].join('\n');
+ const lines = [
+  'BUY MENU',
+  '',
+  `Wallet: ${aw ? aw.address : '— (Select)'}`,
+  '',                        // ← add a blank line after Wallet
+  tokenLine,
+  '',                        // ← add a blank line after Token
+  pairLine,
+  '',
+  `Amount in: ${fmtDec(String(amt))} PLS`,
+  `Gas boost: +${NF.format(pct)}% over market`,
+  `GL: ${fmtInt(String(gl))}  |  Booster: ${NF.format(gb)} gwei`,
+  '',
+  outLine,
+].join('\n');
 
   const rows = listWallets(ctx.from.id);
   const sel = getSelSet(ctx.from.id);
