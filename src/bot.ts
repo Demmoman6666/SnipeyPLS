@@ -631,7 +631,7 @@ bot.action('buy_exec', async (ctx) => {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
             receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-            tokenAddress: u.token_address,
+            tokenAddress: u.token_address!,   // <-- assert non-null
             explorerUrl: link
           });
         }).catch(() => {/* ignore */});
@@ -701,7 +701,7 @@ bot.action('buy_exec_all', async (ctx) => {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
             receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-            tokenAddress: u.token_address,
+            tokenAddress: u.token_address!,   // <-- assert non-null
             explorerUrl: link
           });
         }).catch(() => {/* ignore */});
@@ -943,7 +943,7 @@ bot.action('sell_exec', async (ctx) => {
           action: 'SELL',
           spend:   { amount: amount,  decimals: tokDec, symbol: tokSym },
           receive: { amount: outPls,  decimals: 18,     symbol: 'PLS' },
-          tokenAddress: u.token_address,
+          tokenAddress: u.token_address!,   // <-- assert non-null
           explorerUrl: link
         });
       }).catch(() => {/* ignore */});
