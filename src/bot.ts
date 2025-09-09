@@ -56,7 +56,6 @@ function fmtUsdPrice(n: number | null | undefined): string {
 function groupThousands(intStr: string) {
   return intStr.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
-// Round + format bigint units → decimal string (dp decimals)
 function formatUnitsDp(amount: bigint, decimals: number, dp: number): string {
   let s = ethers.formatUnits(amount, decimals);
   if (!s.includes('.')) return groupThousands(s);
@@ -77,7 +76,6 @@ function formatUnitsDp(amount: bigint, decimals: number, dp: number): string {
   if (carry) i = (BigInt(i) + 1n).toString();
   return `${groupThousands(i)}.${f2}`;
 }
-// Compact tiny decimals using subscript zeros: "0.00001" -> "0.0₄1"
 function formatTinyDecimalStr(decStr: string): string {
   if (!decStr.includes('.')) return decStr;
   const [i, fRaw] = decStr.split('.');
@@ -91,7 +89,6 @@ function formatTinyDecimalStr(decStr: string): string {
   const sub = String(zeros).replace(/\d/g, d => subscriptDigits[Number(d)]);
   return `0.0${sub}${first}`;
 }
-// Divide BigInt to decimal string with given precision
 function bigDivToDecimal(n: bigint, d: bigint, precision = 20): string {
   if (d === 0n) return '0';
   const scale = 10n ** BigInt(precision);
@@ -100,14 +97,13 @@ function bigDivToDecimal(n: bigint, d: bigint, precision = 20): string {
   let frac = (q % scale).toString().padStart(precision, '0').replace(/0+$/, '');
   return frac ? `${intPart.toString()}.${frac}` : intPart.toString();
 }
-// USD/PLS via stable route if configured
 async function plsUSD(): Promise<number | null> {
   try {
     if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) return null;
     const meta = await tokenMeta(STABLE);
     const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE); // 1 PLS -> stable
     if (!q) return null;
-    return Number(ethers.formatUnits(q.amountOut, meta.decimals ?? 18)); // USD-ish per 1 PLS
+    return Number(ethers.formatUnits(q.amountOut, meta.decimals ?? 18));
   } catch { return null; }
 }
 
@@ -115,16 +111,12 @@ type PostTradeArgs = {
   action: 'BUY' | 'SELL';
   spend: { amount: bigint; decimals: number; symbol: string };
   receive: { amount: bigint; decimals: number; symbol: string };
-  tokenAddress: string; // ERC-20 in question
+  tokenAddress: string;
   explorerUrl: string;
 };
 
 async function postTradeSuccess(ctx: any, args: PostTradeArgs) {
   const { action, spend, receive } = args;
-
-  // Compute price PLS per token:
-  // BUY:  price = PLS_spent / tokens_received
-  // SELL: price = PLS_received / tokens_sold
   const nativeSymbol = 'PLS';
   const plsRaw18 = action === 'BUY'
     ? (spend.symbol === nativeSymbol ? spend.amount : 0n)
@@ -136,7 +128,6 @@ async function postTradeSuccess(ctx: any, args: PostTradeArgs) {
     ? bigDivToDecimal(plsRaw18 * (10n ** BigInt(tokenDecimals)), tokenRaw * (10n ** 18n), 20)
     : '0';
 
-  // Prefer USD display if we can resolve USD/PLS
   let priceLine: string;
   const usdPerPls = await plsUSD().catch(() => null);
   if (usdPerPls != null) {
@@ -168,17 +159,11 @@ async function postTradeSuccess(ctx: any, args: PostTradeArgs) {
   await replyHTML(ctx, body);
 }
 
-/* ---------- message lifecycle: delete previous menus, manage pin ---------- */
-const lastMenuMsg = new Map<number, number>();  // user -> last (non-pinned) menu message id
-const pinnedPosMsg = new Map<number, number>(); // user -> pinned "POSITION" message id
-
+/* ---------- message lifecycle ---------- */
+const lastMenuMsg = new Map<number, number>();
+const pinnedPosMsg = new Map<number, number>();
 function canEdit(ctx: any) { return Boolean(ctx?.callbackQuery?.message?.message_id); }
 
-/**
- * Show a menu, *always* deleting the prior menu message for this user (if any).
- * Also deletes the tapped callback message when relevant to prevent "edit" edge-cases.
- * Exclusion: buy/sell tx notices use plain ctx.reply elsewhere, not this helper.
- */
 async function showMenu(ctx: any, text: string, extra?: any) {
   const uid = ctx.from.id;
   const pinned = pinnedPosMsg.get(uid);
@@ -198,7 +183,7 @@ async function showMenu(ctx: any, text: string, extra?: any) {
   lastMenuMsg.set(uid, m.message_id);
 }
 
-/** Post or replace a pinned "POSITION" card — now HTML + escaped (no Markdown issues) */
+/** Pinned "POSITION" card */
 async function upsertPinnedPosition(ctx: any) {
   const uid = ctx.from.id;
   const u = getUserSettings(uid);
@@ -263,7 +248,6 @@ async function getBalanceFast(address: string): Promise<{ value: bigint; ok: boo
   catch { return { value: 0n, ok: false }; }
 }
 
-/* compute effective gas from market + settings */
 async function computeGas(telegramId: number, extraPct = 0): Promise<{
   maxPriorityFeePerGas: bigint; maxFeePerGas: bigint; gasLimit: bigint;
 }> {
@@ -500,7 +484,6 @@ async function fetchDexScreener(token: string): Promise<DSMetrics> {
     const j: any = await resp.json();
     const pairs: any[] = Array.isArray(j?.pairs) ? j.pairs : [];
     if (!pairs.length) return { priceUSD: null, liquidityUSD: null };
-    // choose highest-liquidity pair
     let best = pairs[0];
     for (const p of pairs) {
       const bL = Number(best?.liquidity?.usd ?? 0);
@@ -541,25 +524,24 @@ async function renderBuyMenu(ctx: any) {
   let outLine = 'Amount out: unavailable';
 
   if (u?.token_address) {
+    const tokenAddr = u.token_address as string; // <-- pin to string for TS
     try {
-      const meta = await tokenMeta(u.token_address);
-      tokenLine = `Token: ${u.token_address} (${meta.symbol || meta.name || 'TOKEN'})`;
+      const meta = await tokenMeta(tokenAddr);
+      tokenLine = `Token: ${tokenAddr} (${meta.symbol || meta.name || 'TOKEN'})`;
 
-      // quotes (for amount out)
-      const best = await bestQuoteBuy(ethers.parseEther(String(amt)), u.token_address);
+      const best = await bestQuoteBuy(ethers.parseEther(String(amt)), tokenAddr);
       if (best) {
         const dec = meta.decimals ?? 18;
         outLine = `Amount out: ${fmtDec(ethers.formatUnits(best.amountOut, dec))} ${meta.symbol || 'TOKEN'}   ·   Route: ${best.route.key}`;
       }
 
-      // metrics
       const [ds, cap] = await Promise.all([
-        fetchDexScreener(u.token_address),
-        mcapFor(u.token_address)
+        fetchDexScreener(tokenAddr),
+        mcapFor(tokenAddr)
       ]);
 
       const pUsd = ds.priceUSD ?? (async () => {
-        const [pPLS, usd] = await Promise.all([pricePLSPerToken(u.token_address), plsUSD()]);
+        const [pPLS, usd] = await Promise.all([pricePLSPerToken(tokenAddr), plsUSD()]);
         return (pPLS != null && usd != null) ? pPLS * usd : null;
       })();
 
@@ -880,7 +862,6 @@ async function renderSellMenu(ctx: any) {
   let walletLine = `<b>Wallet:</b> ${w ? `<code>${esc(short(w.address))}</code>` : '—'}`;
   let tokenLine  = `<b>Token:</b> ${u?.token_address ? `<code>${esc(short(u.token_address))}</code>` : '—'}`;
 
-  // metrics placeholders
   let priceLine = `📈 Price: —`;
   let mcapLine  = `💰 Market Cap: —`;
   let liqLine   = `💧 Liquidity: —`;
@@ -892,13 +873,13 @@ async function renderSellMenu(ctx: any) {
   let metaSymbol = 'TOKEN';
 
   if (u?.token_address) {
+    const tokenAddr = u.token_address as string; // <-- pin to string for TS
     try {
-      // metrics first
       const [ds, cap] = await Promise.all([
-        fetchDexScreener(u.token_address),
-        mcapFor(u.token_address),
+        fetchDexScreener(tokenAddr),
+        mcapFor(tokenAddr),
       ]);
-      const pUsd = await priceUSDPerToken(u.token_address);
+      const pUsd = await priceUSDPerToken(tokenAddr);
       priceLine = `📈 Price: ${fmtUsdPrice(pUsd)}`;
       if (cap.ok && cap.mcapUSD != null) mcapLine = `💰 Market Cap: ${fmtUsdCompact(cap.mcapUSD)}`;
       if (ds.liquidityUSD != null)       liqLine  = `💧 Liquidity: ${fmtUsdCompact(ds.liquidityUSD)}`;
@@ -992,7 +973,7 @@ bot.action('sell_set_token', async (ctx) => {
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_sell')]]) });
 });
 
-/* ---------- SELL EXEC (placeholder → link → confirm + success card) ---------- */
+/* ---------- SELL EXEC ---------- */
 bot.action('sell_exec', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
@@ -1073,7 +1054,7 @@ bot.action('sell_exec', async (ctx) => {
 bot.action('pin_buy', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderBuyMenu(ctx); });
 bot.action('pin_sell', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSellMenu(ctx); });
 
-/* ---------- DIAGNOSTICS (HTML now, escaped) ---------- */
+/* ---------- DIAGNOSTICS ---------- */
 bot.command('rpc_check', async (ctx) => {
   const aw = getActiveWallet(ctx.from.id);
   const info = await pingRpc(aw?.address);
@@ -1101,7 +1082,7 @@ async function pricePLSPerToken(token: string): Promise<number | null> {
     const one = ethers.parseUnits('1', dec);
     const q = await bestQuoteSell(one, token);
     if (!q) return null;
-    return Number(ethers.formatEther(q.amountOut)); // PLS per 1 token
+    return Number(ethers.formatEther(q.amountOut));
   } catch { return null; }
 }
 
@@ -1122,8 +1103,6 @@ function explorerHeaders(): Record<string,string> {
   const k = (process.env.EXPLORER_API_KEY || '').trim();
   return k ? { 'X-API-KEY': k } : {};
 }
-
-/* ----- explorer (Etherscan + Blockscout) ----- */
 async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null> {
   if (!_fetchAny) return null;
   const baseIn = explorerApiBase();
@@ -1132,7 +1111,6 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
   const base = baseIn.replace(/\/+$/, '');
   const rootNoApi = base.replace(/\/api$/, '');
 
-  // Etherscan-compatible: stats.tokensupply
   try {
     const url = withApiKey(`${base}?module=stats&action=tokensupply&contractaddress=${token}`);
     const r = await _fetchAny(url, { headers: explorerHeaders() });
@@ -1143,7 +1121,6 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
     }
   } catch {}
 
-  // Etherscan-compatible: token.tokeninfo
   try {
     const url = withApiKey(`${base}?module=token&action=tokeninfo&contractaddress=${token}`);
     const r = await _fetchAny(url, { headers: explorerHeaders() });
@@ -1156,7 +1133,6 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
     }
   } catch {}
 
-  // Blockscout v2 REST: /api/v2/tokens/<address>
   try {
     const url = `${rootNoApi}/api/v2/tokens/${token}`;
     const r = await _fetchAny(url, { headers: explorerHeaders() });
@@ -1175,10 +1151,8 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
   return null;
 }
 
-/* ----- bulletproof low-level on-chain totalSupply() call ----- */
 async function totalSupplyLowLevel(token: string): Promise<bigint | null> {
   try {
-    // totalSupply() selector = 0x18160ddd
     const res = await provider.call({ to: token, data: '0x18160ddd' });
     if (!res || res === '0x') return null;
     return BigInt(res);
@@ -1187,7 +1161,6 @@ async function totalSupplyLowLevel(token: string): Promise<bigint | null> {
   }
 }
 
-/* ----- totalSupply with ABI → low-level → explorer chain ----- */
 async function totalSupply(token: string): Promise<bigint | null> {
   try { return await erc20(token).totalSupply(); } catch {}
   try {
@@ -1329,7 +1302,7 @@ async function checkLimitsOnce() {
 
 setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
 
-/* ---------- TEXT: prompts + auto-detect address (AUTO-BUY flow with success card) ---------- */
+/* ---------- TEXT: prompts + auto-detect address ---------- */
 bot.on('text', async (ctx, next) => {
   const p = pending.get(ctx.from.id);
   if (p) {
@@ -1554,7 +1527,6 @@ bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); pending.dele
 bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
 bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
 
-// no-op pill handler
 bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
 
 export {};
