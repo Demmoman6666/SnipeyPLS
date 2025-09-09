@@ -505,9 +505,9 @@ async function renderBuyMenu(ctx: any) {
   'BUY MENU',
   '',
   `Wallet: ${aw ? aw.address : '— (Select)'}`,
-  '',                        // ← add a blank line after Wallet
+  '',
   tokenLine,
-  '',                        // ← add a blank line after Token
+  '',
   pairLine,
   '',
   `Amount in: ${fmtDec(String(amt))} PLS`,
@@ -1010,7 +1010,7 @@ async function plsUSD_legacy(): Promise<number | null> {
   return plsUSD();
 }
 
-/** -------- Explorer totalSupply() fallback (optional) -------- */
+/** -------- Explorer totalSupply() fallback (improved) -------- */
 const _fetchAny: any = (globalThis as any).fetch?.bind(globalThis);
 
 function explorerApiBase(): string | null {
@@ -1025,12 +1025,17 @@ function explorerHeaders(): Record<string,string> {
   const k = (process.env.EXPLORER_API_KEY || '').trim();
   return k ? { 'X-API-KEY': k } : {};
 }
+
+/* ----- NEW: Blockscout/Etherscan hybrid fetch ----- */
 async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null> {
   if (!_fetchAny) return null;
-  const base = explorerApiBase();
-  if (!base) return null;
+  const baseIn = explorerApiBase();
+  if (!baseIn) return null;
 
-  // Etherscan-compatible
+  const base = baseIn.replace(/\/+$/, '');
+  const rootNoApi = base.replace(/\/api$/, '');
+
+  // 1) Etherscan-compatible: stats.tokensupply
   try {
     const url = withApiKey(`${base}?module=stats&action=tokensupply&contractaddress=${token}`);
     const r = await _fetchAny(url, { headers: explorerHeaders() });
@@ -1041,17 +1046,31 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
     }
   } catch {}
 
-  // Blockscout-style
+  // 1b) Etherscan-compatible: token.tokeninfo
   try {
-    const url = `${base}/tokens/${token}`;
+    const url = withApiKey(`${base}?module=token&action=tokeninfo&contractaddress=${token}`);
     const r = await _fetchAny(url, { headers: explorerHeaders() });
     if (r?.ok) {
       const j: any = await r.json();
-      const val = j?.total_supply ?? j?.data?.total_supply ?? j?.supply ?? j?.data?.supply;
-      if (val) {
-        if (typeof val === 'string' && /^0x[0-9a-fA-F]+$/.test(val)) return BigInt(val);
-        if (typeof val === 'string' && /^\d+$/.test(val)) return BigInt(val);
-        if (typeof val === 'number' && Number.isFinite(val)) return BigInt(Math.floor(val));
+      const res = j?.result ?? j?.data?.result;
+      const info = Array.isArray(res) ? res[0] : res;
+      const raw = info?.totalSupply ?? info?.total_supply ?? info?.supply;
+      if (raw && /^\d+$/.test(String(raw))) return BigInt(String(raw));
+    }
+  } catch {}
+
+  // 2) Blockscout v2 REST: /api/v2/tokens/<address>
+  try {
+    const url = `${rootNoApi}/api/v2/tokens/${token}`;
+    const r = await _fetchAny(url, { headers: explorerHeaders() });
+    if (r?.ok) {
+      const j: any = await r.json();
+      const val = j?.total_supply ?? j?.supply ?? j?.data?.total_supply ?? j?.data?.supply;
+      if (typeof val === 'string') {
+        if (/^0x[0-9a-fA-F]+$/.test(val)) return BigInt(val);
+        if (/^\d+$/.test(val)) return BigInt(val);
+      } else if (typeof val === 'number' && Number.isFinite(val)) {
+        return BigInt(Math.floor(val));
       }
     }
   } catch {}
@@ -1059,8 +1078,25 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
   return null;
 }
 
+/* ----- NEW: bulletproof low-level on-chain call ----- */
+async function totalSupplyLowLevel(token: string): Promise<bigint | null> {
+  try {
+    // totalSupply() selector = 0x18160ddd
+    const res = await provider.call({ to: token, data: '0x18160ddd' });
+    if (!res || res === '0x') return null;
+    return BigInt(res);
+  } catch {
+    return null;
+  }
+}
+
+/* ----- UPDATED: totalSupply with ABI → low-level → explorer chain ----- */
 async function totalSupply(token: string): Promise<bigint | null> {
   try { return await erc20(token).totalSupply(); } catch {}
+  try {
+    const ll = await totalSupplyLowLevel(token);
+    if (ll != null) return ll;
+  } catch {}
   try { return await fetchTotalSupplyViaExplorer(token); } catch {}
   return null;
 }
