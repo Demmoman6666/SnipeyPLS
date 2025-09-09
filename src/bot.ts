@@ -4,7 +4,7 @@ import { Telegraf, Markup } from 'telegraf';
 import { getConfig } from './config.js';
 import { mainMenu, buyMenu, buyGasPctMenu, sellMenu, settingsMenu, limitTriggerMenu } from './keyboards.js';
 import {
-  listWallets, createWallet, importWallet, setActiveWallet, getActiveWallet, setToken, setGasBase, setGasPercent,
+  listWallets, createWallet, importWallet, getActiveWallet, setToken, setGasBase, setGasPercent,
   setDefaultGasPercent, getUserSettings, getPrivateKey, setBuyAmount, getWalletById, removeWallet, setSellPct,
   setAutoBuyEnabled, setAutoBuyAmount,
 } from './wallets.js';
@@ -1155,7 +1155,7 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
   } catch {}
 
   try {
-    const url = `${rootNoApi}/api/v2/tokens/${token}`);
+    const url = `${rootNoApi}/api/v2/tokens/${token}`;
     const r = await _fetchAny(url, { headers: explorerHeaders() });
     if (r?.ok) {
       const j: any = await r.json();
@@ -1198,9 +1198,7 @@ async function mcapFor(token: string): Promise<{
   decimals?: number;
 }> {
   try {
-    if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) {
-      // still allow if DexScreener fallback exists (we'll compute USD with plsUSD() which falls back to DS)
-    }
+    // If STABLE not set, USD conversion will fall back to DexScreener via plsUSD()
     const [usdPerPLS, plsPerToken, meta, sup] = await Promise.all([
       plsUSD_legacy(),
       pricePLSPerToken(token),
@@ -1250,6 +1248,7 @@ bot.command('mcap', async (ctx) => {
 
 /* ---------- LIMIT ENGINE ---------- */
 const LIMIT_CHECK_MS = Number(process.env.LIMIT_CHECK_MS ?? 15000);
+const limitSkipNotified = new Set<number>();
 
 // Use DexScreener MCAP when present; fallback to on-chain
 async function mcapUSDForTriggers(token: string): Promise<number | null> {
@@ -1263,8 +1262,6 @@ async function mcapUSDForTriggers(token: string): Promise<number | null> {
 async function checkLimitsOnce() {
   const rows = getOpenLimitOrders();
   if (!rows.length) return;
-
-  const usd = await plsUSD(); // still used for USD price trigger if we fall back
 
   for (const r of rows) {
     try {
@@ -1336,8 +1333,6 @@ async function checkLimitsOnce() {
   }
 }
 setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
-
-const limitSkipNotified = new Set<number>();
 
 /* ---------- TEXT: prompts + auto-detect address ---------- */
 bot.on('text', async (ctx, next) => {
