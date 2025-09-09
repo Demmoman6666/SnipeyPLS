@@ -31,48 +31,35 @@ const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
-/* ===== NEW: ultra-robust success card helpers (HTML-safe) ===== */
-
-function escHtml(s: string) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+/* ---- HTML escape + reply helper (use anywhere with dynamic strings) ---- */
+const esc = (s: string) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function replyHTML(ctx: any, html: string, extra: any = {}) {
+  return ctx.reply(html, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
 }
+
+/* ===== Robust success card helpers (HTML-safe) ===== */
 function groupThousands(intStr: string) {
   return intStr.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 // Round + format bigint units → decimal string (dp decimals)
 function formatUnitsDp(amount: bigint, decimals: number, dp: number): string {
-  // Convert to full-precision string first
   let s = ethers.formatUnits(amount, decimals);
-  if (!s.includes('.')) {
-    return groupThousands(s);
-  }
+  if (!s.includes('.')) return groupThousands(s);
   let [i, f] = s.split('.');
   if (dp < 0) dp = 0;
-  if (f.length <= dp) {
-    return `${groupThousands(i)}.${f.padEnd(dp, '0')}`.replace(/\.$/, '');
-  }
-  // need to round
+  if (f.length <= dp) return `${groupThousands(i)}.${f.padEnd(dp, '0')}`.replace(/\.$/, '');
   const keep = f.slice(0, dp);
   const next = Number(f[dp] ?? '0');
-  if (next < 5) {
-    return dp ? `${groupThousands(i)}.${keep}` : groupThousands(i);
-  }
-  // add 1 ulp at dp
-  if (dp === 0) {
-    i = (BigInt(i) + 1n).toString();
-    return groupThousands(i);
-  }
+  if (next < 5) return dp ? `${groupThousands(i)}.${keep}` : groupThousands(i);
+  if (dp === 0) return groupThousands((BigInt(i) + 1n).toString());
   let carry = 1;
   const arr = keep.split('').reverse();
   for (let idx = 0; idx < arr.length; idx++) {
     const d = Number(arr[idx]) + carry;
-    if (d >= 10) { arr[idx] = '0'; carry = 1; }
-    else { arr[idx] = String(d); carry = 0; break; }
+    if (d >= 10) { arr[idx] = '0'; carry = 1; } else { arr[idx] = String(d); carry = 0; break; }
   }
   let f2 = arr.reverse().join('');
-  if (carry) {
-    i = (BigInt(i) + 1n).toString();
-  }
+  if (carry) i = (BigInt(i) + 1n).toString();
   return `${groupThousands(i)}.${f2}`;
 }
 // Compact tiny decimals using subscript zeros: "0.00001" -> "0.0₄1"
@@ -98,7 +85,7 @@ function bigDivToDecimal(n: bigint, d: bigint, precision = 20): string {
   let frac = (q % scale).toString().padStart(precision, '0').replace(/0+$/, '');
   return frac ? `${intPart.toString()}.${frac}` : intPart.toString();
 }
-// Try to fetch USD/PLS via stable route if configured
+// USD/PLS via stable route if configured
 async function plsUSD(): Promise<number | null> {
   try {
     if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) return null;
@@ -120,28 +107,24 @@ type PostTradeArgs = {
 async function postTradeSuccess(ctx: any, args: PostTradeArgs) {
   const { action, spend, receive, tokenAddress, explorerUrl } = args;
 
-  // Compute price per token:
-  // BUY:  PLS_spent / tokens_received
-  // SELL: PLS_received / tokens_sold
+  // Compute price PLS per token:
+  // BUY:  price = PLS_spent / tokens_received
+  // SELL: price = PLS_received / tokens_sold
   const nativeSymbol = 'PLS';
-  const plsAmt = action === 'BUY'
+  const plsRaw18 = action === 'BUY'
     ? (spend.symbol === nativeSymbol ? spend.amount : 0n)
     : (receive.symbol === nativeSymbol ? receive.amount : 0n);
-  const tokAmt = action === 'BUY'
-    ? receive.amount
-    : spend.amount;
-  // Normalize to raw 18/decimals for ratio
-  const pls18 = plsAmt; // already 18 for PLS
-  // Price in PLS per token as decimal string
-  const pricePLS = (tokAmt > 0n)
-    ? bigDivToDecimal(pls18 * (10n ** BigInt(receive.decimals)), tokAmt * (10n ** 18n), 20)
+  const tokenRaw = action === 'BUY' ? receive.amount : spend.amount;
+  const tokenDecimals = action === 'BUY' ? receive.decimals : spend.decimals;
+
+  const pricePLS = (tokenRaw > 0n)
+    ? bigDivToDecimal(plsRaw18 * (10n ** BigInt(tokenDecimals)), tokenRaw * (10n ** 18n), 20)
     : '0';
 
   // Prefer USD display if we can resolve USD/PLS
   let priceLine: string;
   const usdPerPls = await plsUSD().catch(() => null);
   if (usdPerPls != null) {
-    // Multiply with JS number; ok for display
     const priceUSDnum = Number(pricePLS || '0') * usdPerPls;
     const priceUSDstr = priceUSDnum < 0.01
       ? formatTinyDecimalStr(priceUSDnum.toString())
@@ -154,24 +137,21 @@ async function postTradeSuccess(ctx: any, args: PostTradeArgs) {
     priceLine = `📊 ${action[0]}${action.slice(1).toLowerCase()} Price: ${plsPretty} PLS`;
   }
 
-  // Spend/Receive formatting
   const spendStr = `${formatUnitsDp(spend.amount, spend.decimals, 0)} ${spend.symbol}`;
-  // Prefer 2dp for token side readability
   const receiveStr = `${formatUnitsDp(receive.amount, receive.decimals, 2)} ${receive.symbol}`;
-
   const line1 = action === 'BUY' ? '✅ Buy successful ✅' : '✅ Sell successful ✅';
-  const linkHtml = `<a href="${escHtml(explorerUrl)}">PulseScan</a>`;
+  const linkHtml = `<a href="${esc(explorerUrl)}">PulseScan</a>`;
 
   const body =
 `${line1}
 
-  💳 Spend: ${escHtml(spendStr)}
-  💰 Received: ${escHtml(receiveStr)}
+  💳 Spend: ${esc(spendStr)}
+  💰 Received: ${esc(receiveStr)}
   ${priceLine}
 
 🔗 ${linkHtml}`;
 
-  await ctx.reply(body, { parse_mode: 'HTML', disable_web_page_preview: true });
+  await replyHTML(ctx, body);
 }
 
 /* ---------- message lifecycle: delete previous menus, manage pin ---------- */
@@ -190,12 +170,10 @@ async function showMenu(ctx: any, text: string, extra?: any) {
   const pinned = pinnedPosMsg.get(uid);
   const prev = lastMenuMsg.get(uid);
 
-  // If there was a previously rendered menu, delete it (never delete the pinned)
   if (prev && (!pinned || prev !== pinned)) {
     try { await ctx.deleteMessage(prev); } catch {}
   }
 
-  // If this call came from a button tap, also delete that source message
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
   const sourceId = ctx?.callbackQuery?.message?.message_id as number | undefined;
   if (sourceId && sourceId !== prev && (!pinned || sourceId !== pinned)) {
@@ -206,14 +184,13 @@ async function showMenu(ctx: any, text: string, extra?: any) {
   lastMenuMsg.set(uid, m.message_id);
 }
 
-/** Post or replace a pinned "POSITION" card (delete + re-send to avoid edit overload typing) */
+/** Post or replace a pinned "POSITION" card — now HTML + escaped (no Markdown issues) */
 async function upsertPinnedPosition(ctx: any) {
   const uid = ctx.from.id;
   const u = getUserSettings(uid);
   const w = getActiveWallet(uid);
   if (!u?.token_address || !w) return;
 
-  // always pass a definite chat id
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
 
   try {
@@ -235,26 +212,25 @@ async function upsertPinnedPosition(ctx: any) {
     }
 
     const text = [
-      '📌 *POSITION*',
-      `Token: ${u.token_address}${meta.symbol ? ` (${meta.symbol})` : ''}`,
-      `Wallet: ${short(w.address)}`,
-      `Holdings: ${fmtDec(ethers.formatUnits(bal, decimals))} ${meta.symbol || 'TOKEN'}`,
-      q?.amountOut ? `Est. value: ${fmtPls(q.amountOut)} PLS  ·  Route: ${q.route.key}` : 'Est. value: —',
-      avg ? `Entry: ${NF.format(avg.avgPlsPerToken)} PLS/token` : 'Entry: —',
-      `Unrealized PnL: ${pnlLine}`,
+      '📌 <b>POSITION</b>',
+      `Token: <code>${esc(u.token_address)}</code>${meta.symbol ? ` (${esc(meta.symbol)})` : ''}`,
+      `Wallet: <code>${esc(short(w.address))}</code>`,
+      `Holdings: ${esc(fmtDec(ethers.formatUnits(bal, decimals)))} ${esc(meta.symbol || 'TOKEN')}`,
+      q?.amountOut ? `Est. value: ${esc(fmtPls(q.amountOut))} PLS  ·  Route: ${esc(q.route.key)}` : 'Est. value: —',
+      avg ? `Entry: ${esc(NF.format(avg.avgPlsPerToken))} PLS/token` : 'Entry: —',
+      `Unrealized PnL: ${esc(pnlLine)}`,
     ].join('\n');
 
     const kb = Markup.inlineKeyboard([
       [Markup.button.callback('🟢 Buy More', 'pin_buy'), Markup.button.callback('🔴 Sell', 'pin_sell')],
     ]);
 
-    // delete old pinned message if we tracked one
     const existing = pinnedPosMsg.get(uid);
     if (existing) {
       try { await bot.telegram.deleteMessage(chatId, existing); } catch {}
     }
 
-    const m = await bot.telegram.sendMessage(chatId, text, { parse_mode: 'Markdown', ...kb } as any);
+    const m = await bot.telegram.sendMessage(chatId, text, { parse_mode: 'HTML', ...kb } as any);
     pinnedPosMsg.set(uid, m.message_id);
     try { await bot.telegram.pinChatMessage(chatId, m.message_id, { disable_notification: true } as any); } catch {}
   } catch { /* ignore */ }
@@ -307,7 +283,6 @@ function chunk<T>(arr: T[], size = 6): T[][] { const out: T[][] = []; for (let i
 
 /* --- parsing helpers --- */
 function parseNumHuman(s: string): number | null {
-  // accept $, spaces and commas
   const t = s.trim().toLowerCase().replace(/[\s,$]/g, '');
   const m = t.match(/^([0-9]*\.?[0-9]+)\s*([kmb])?$/);
   if (!m) return null;
@@ -617,7 +592,6 @@ bot.action('buy_exec', async (ctx) => {
   const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
 
   for (const w of wallets) {
-    // 1) Show an immediate pending notice before any slow ops
     const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
 
     try {
@@ -625,7 +599,6 @@ bot.action('buy_exec', async (ctx) => {
       const r = await buyAutoRoute(getPrivateKey(w), u.token_address, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
-      // We'll capture quote + meta once (after send) for consistent UX
       let preOut: bigint = 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
@@ -640,22 +613,18 @@ bot.action('buy_exec', async (ctx) => {
         }
       } catch {}
 
-      // 2) As soon as we have the hash, edit the placeholder to "transaction sent <link>"
       if (hash) {
         const link = otter(hash);
         try {
           await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
         } catch {
-          // fall back to a new message if edit fails
           await ctx.reply(`transaction sent ${link}`);
         }
 
-        // 3) Optional approvals after buy
         if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
           approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
         }
 
-        // 4) Wait for confirmation and then clean up the "transaction sent" message → post success card
         provider.waitForTransaction(hash).then(async () => {
           try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
           await postTradeSuccess(ctx, {
@@ -667,13 +636,11 @@ bot.action('buy_exec', async (ctx) => {
           });
         }).catch(() => {/* ignore */});
       } else {
-        // No hash returned: update the placeholder accordingly
         try {
           await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent (no hash yet)`);
         } catch {}
       }
     } catch (e: any) {
-      // On error, turn the placeholder into an error line
       try {
         await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Buy failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
       } catch {
@@ -822,9 +789,6 @@ bot.action(/^limit_cancel:(\d+)$/, async (ctx: any) => {
 
 /* ---------- SELL MENU (robust HTML render) ---------- */
 async function renderSellMenu(ctx: any) {
-  const esc = (s: string) =>
-    String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
   const u = getUserSettings(ctx.from.id);
   const w = getActiveWallet(ctx.from.id);
   const pct = u?.sell_pct ?? 100;
@@ -915,7 +879,7 @@ bot.action('sell_approve', async (ctx) => {
   return renderSellMenu(ctx);
 });
 
-/* (optional button) Sell ▸ Set Token (mirrors buy_set_token prompt, returns to Sell) */
+/* (optional button) Sell ▸ Set Token */
 bot.action('sell_set_token', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_token_sell' });
@@ -931,7 +895,6 @@ bot.action('sell_exec', async (ctx) => {
   if (!w || !u?.token_address) return showMenu(ctx, 'Need active wallet and token set.', sellMenu());
 
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
-  // 1) Show an immediate placeholder before any slow calls
   const pendingMsg = await ctx.reply(`⏳ Sending sell for ${short(w.address)}…`);
 
   try {
@@ -952,7 +915,6 @@ bot.action('sell_exec', async (ctx) => {
     const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
     const hash = (r as any)?.hash;
 
-    // Get quote + post-trade data for the success card
     let outPls: bigint = 0n;
     let tokDec = 18;
     let tokSym = 'TOKEN';
@@ -969,14 +931,12 @@ bot.action('sell_exec', async (ctx) => {
 
     if (hash) {
       const link = otter(hash);
-      // 2) Update placeholder to "transaction sent <link>"
       try {
         await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
       } catch {
         await ctx.reply(`transaction sent ${link}`);
       }
 
-      // 3) Wait for confirm, then delete placeholder and post success card
       provider.waitForTransaction(hash).then(async () => {
         try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
         await postTradeSuccess(ctx, {
@@ -993,7 +953,6 @@ bot.action('sell_exec', async (ctx) => {
       } catch {}
     }
   } catch (e: any) {
-    // On error, convert placeholder to a failure line
     try {
       await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Sell failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
     } catch {
@@ -1009,22 +968,22 @@ bot.action('sell_exec', async (ctx) => {
 bot.action('pin_buy', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderBuyMenu(ctx); });
 bot.action('pin_sell', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSellMenu(ctx); });
 
-/* ---------- DIAGNOSTICS ---------- */
+/* ---------- DIAGNOSTICS (HTML now, escaped) ---------- */
 bot.command('rpc_check', async (ctx) => {
   const aw = getActiveWallet(ctx.from.id);
   const info = await pingRpc(aw?.address);
   const lines = [
-    '*RPC Check*',
-    `chainId: ${info.chainId ?? '—'}`,
-    `block: ${info.blockNumber ?? '—'}`,
-    `gasPrice(wei): ${info.gasPrice ?? '—'}`,
-    `maxFeePerGas(wei): ${info.maxFeePerGas ?? '—'}`,
-    `maxPriorityFeePerGas(wei): ${info.maxPriorityFeePerGas ?? '—'}`,
-    `active wallet: ${aw ? aw.address : '—'}`,
-    `balance(wei): ${info.balanceWei ?? '—'}`,
-    `${info.error ? 'error: ' + info.error : ''}`,
+    '<b>RPC Check</b>',
+    `chainId: ${esc(String(info.chainId ?? '—'))}`,
+    `block: ${esc(String(info.blockNumber ?? '—'))}`,
+    `gasPrice(wei): ${esc(String(info.gasPrice ?? '—'))}`,
+    `maxFeePerGas(wei): ${esc(String(info.maxFeePerGas ?? '—'))}`,
+    `maxPriorityFeePerGas(wei): ${esc(String(info.maxPriorityFeePerGas ?? '—'))}`,
+    `active wallet: ${esc(aw ? aw.address : '—')}`,
+    `balance(wei): ${esc(String(info.balanceWei ?? '—'))}`,
+    `${info.error ? 'error: ' + esc(String(info.error)) : ''}`,
   ].join('\n');
-  await ctx.reply(lines, { parse_mode: 'Markdown' });
+  await replyHTML(ctx, lines);
 });
 
 /* ---------- Quick MCAP debug ---------- */
@@ -1042,7 +1001,6 @@ async function pricePLSPerToken(token: string): Promise<number | null> {
 }
 
 async function plsUSD_legacy(): Promise<number | null> {
-  // kept for mcap flow; wrapper around new plsUSD to avoid refactoring
   return plsUSD();
 }
 
@@ -1234,7 +1192,7 @@ async function checkLimitsOnce() {
 
 setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
 
-/* ---------- TEXT: prompts + auto-detect address (AUTO-BUY flow updated) ---------- */
+/* ---------- TEXT: prompts + auto-detect address (AUTO-BUY flow with success card) ---------- */
 bot.on('text', async (ctx, next) => {
   const p = pending.get(ctx.from.id);
   if (p) {
@@ -1384,7 +1342,6 @@ bot.on('text', async (ctx, next) => {
       const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
       const amountIn = ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01));
 
-      // Show an instant placeholder BEFORE any network calls
       const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
 
       try {
@@ -1392,7 +1349,6 @@ bot.on('text', async (ctx, next) => {
         const r = await buyAutoRoute(getPrivateKey(w), text, amountIn, 0n, gas);
         const hash = (r as any)?.hash;
 
-        // Capture quote + meta for success card
         let preOut: bigint = 0n;
         let tokDec = 18;
         let tokSym = 'TOKEN';
@@ -1400,14 +1356,12 @@ bot.on('text', async (ctx, next) => {
         if (hash) {
           const link = otter(hash);
 
-          // Flip the placeholder to "transaction sent <link>"
           try {
             await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
           } catch {
             await ctx.reply(`transaction sent ${link}`);
           }
 
-          // Record the trade (fetch quote AFTER sending so we don’t block the UI)
           try {
             const meta = await tokenMeta(text);
             tokDec = meta.decimals ?? 18;
@@ -1419,14 +1373,12 @@ bot.on('text', async (ctx, next) => {
             }
           } catch {}
 
-          // Optional: approve routers for future sells (non-WPLS tokens)
           try {
             if (text.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
               approveAllRouters(getPrivateKey(w), text, gas).catch(() => {});
             }
           } catch {}
 
-          // On confirmation, delete the placeholder and post success (robust HTML card)
           provider.waitForTransaction(hash).then(async () => {
             try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
             await postTradeSuccess(ctx, {
@@ -1443,7 +1395,6 @@ bot.on('text', async (ctx, next) => {
           } catch {}
         }
       } catch (e: any) {
-        // Convert the placeholder into an error message
         try {
           await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Auto-buy failed: ${e?.message ?? String(e)}`);
         } catch {
