@@ -31,6 +31,89 @@ const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 
+/* ===== Pretty success card helpers (added) ===== */
+const SUB = ['₀','₁','₂','₃','₄','₅','₆','₇','₈','₉'];
+
+function fmtHumanShort(n: number, dp = 2): string {
+  const a = Math.abs(n);
+  if (a >= 1e9) return (n / 1e9).toFixed(dp).replace(/\.0+$/,'') + 'B';
+  if (a >= 1e6) return (n / 1e6).toFixed(dp).replace(/\.0+$/,'') + 'M';
+  if (a >= 1e3) return (n / 1e3).toFixed(dp).replace(/\.0+$/,'') + 'K';
+  const s = n.toFixed(dp);
+  return s.replace(/\.0+$/,'').replace(/(\.\d*?)0+$/,'$1');
+}
+
+function fmtUsdTiny(v: number): string {
+  if (!Number.isFinite(v) || v <= 0) return '—';
+  if (v >= 0.01) return '$' + v.toFixed(6).replace(/0+$/,'').replace(/\.$/,'');
+  const s = v.toFixed(12);
+  const m = /^0\.(0+)(\d+)/.exec(s);
+  if (!m) return '$' + s;
+  const zeros = m[1].length;
+  const tail  = m[2].replace(/0+$/,'').slice(0,4) || '0';
+  const sub   = String(zeros).split('').map(d => SUB[Number(d)]).join('');
+  return `$0.0${sub}${tail}`;
+}
+
+async function buildSuccessMessage(
+  kind: 'Buy' | 'Sell',
+  link: string,
+  extra: {
+    token?: string;
+    buyAmountPlsWei?: bigint;   // BUY: PLS spent
+    recvTokWei?: bigint;        // BUY: tokens received (quote)
+    soldTokWei?: bigint;        // SELL: tokens sold
+    recvPlsWei?: bigint;        // SELL: PLS received (quote)
+  }
+): Promise<string> {
+  const token = extra.token;
+  let sym = 'TOKEN', dec = 18;
+
+  if (token) {
+    try {
+      const meta = await tokenMeta(token);
+      dec = meta.decimals ?? 18;
+      sym = meta.symbol ? `$${meta.symbol}` : (meta.name || 'TOKEN');
+    } catch {}
+  }
+
+  const spentPls  = extra.buyAmountPlsWei ? Number(ethers.formatEther(extra.buyAmountPlsWei)) : null;
+  const recvTok   = extra.recvTokWei      ? Number(ethers.formatUnits(extra.recvTokWei, dec)) : null;
+  const soldTok   = extra.soldTokWei      ? Number(ethers.formatUnits(extra.soldTokWei, dec)) : null;
+  const recvPls   = extra.recvPlsWei      ? Number(ethers.formatEther(extra.recvPlsWei))      : null;
+
+  let priceUsdStr = '—';
+  try {
+    const usdPerPLS = await plsUSD();
+    if (usdPerPLS != null) {
+      if (kind === 'Buy' && spentPls != null && recvTok && recvTok > 0) {
+        priceUsdStr = fmtUsdTiny((spentPls * usdPerPLS) / recvTok);
+      }
+      if (kind === 'Sell' && recvPls != null && soldTok && soldTok > 0) {
+        priceUsdStr = fmtUsdTiny((recvPls * usdPerPLS) / soldTok);
+      }
+    }
+  } catch {}
+
+  const head = kind === 'Buy' ? '✅ Buy successful ✅' : '✅ Sell successful ✅';
+
+  const body = (kind === 'Buy')
+    ? [
+        `    💳 Spend: ${spentPls != null ? fmtHumanShort(spentPls, 4) : '—'} PLS`,
+        `    💰 Received: ${recvTok != null ? fmtHumanShort(recvTok) : '—'} ${sym}`,
+        `    📊 Buy Price: ${priceUsdStr}`,
+      ]
+    : [
+        `    💳 Sold: ${soldTok != null ? fmtHumanShort(soldTok) : '—'} ${sym}`,
+        `    💰 Received: ${recvPls != null ? fmtHumanShort(recvPls) : '—'} PLS`,
+        `    📊 Sell Price: ${priceUsdStr}`,
+      ];
+
+  const tail = `\n    🔗 [Scan](${link})`;
+  return [head, '', ...body, tail].join('\n');
+}
+/* ===== end pretty success helpers ===== */
+
 /* ---------- message lifecycle: delete previous menus, manage pin ---------- */
 const lastMenuMsg = new Map<number, number>();  // user -> last (non-pinned) menu message id
 const pinnedPosMsg = new Map<number, number>(); // user -> pinned "POSITION" message id
@@ -493,8 +576,10 @@ bot.action('buy_exec', async (ctx) => {
         }
 
         // 3) Record trade (quote can be fetched after sending to keep UX snappy)
+        let lastQuote: any = undefined;
         try {
           const preQuote = await bestQuoteBuy(amountIn, u.token_address);
+          lastQuote = preQuote;
           if (preQuote?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
         } catch {}
 
@@ -506,7 +591,12 @@ bot.action('buy_exec', async (ctx) => {
         // 5) Wait for confirmation and then clean up the "transaction sent" message
         provider.waitForTransaction(hash).then(async () => {
           try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
-          await ctx.reply(`✅ Buy successful ${link}`);
+          const pretty = await buildSuccessMessage('Buy', link, {
+            token: u.token_address,
+            buyAmountPlsWei: amountIn,
+            recvTokWei: lastQuote?.amountOut,
+          });
+          await ctx.reply(pretty, { parse_mode: 'Markdown' });
         }).catch(() => {/* ignore */});
       } else {
         // No hash returned: update the placeholder accordingly
@@ -552,8 +642,10 @@ bot.action('buy_exec_all', async (ctx) => {
           await ctx.reply(`transaction sent ${link}`);
         }
 
+        let lastQuote: any = undefined;
         try {
           const preQuote = await bestQuoteBuy(amountIn, u.token_address);
+          lastQuote = preQuote;
           if (preQuote?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
         } catch {}
 
@@ -563,7 +655,12 @@ bot.action('buy_exec_all', async (ctx) => {
 
         provider.waitForTransaction(hash).then(async () => {
           try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
-          await ctx.reply(`✅ Buy successful ${link}`);
+          const pretty = await buildSuccessMessage('Buy', link, {
+            token: u.token_address,
+            buyAmountPlsWei: amountIn,
+            recvTokWei: lastQuote?.amountOut,
+          });
+          await ctx.reply(pretty, { parse_mode: 'Markdown' });
         }).catch(() => {/* ignore */});
       } else {
         try {
@@ -789,15 +886,22 @@ bot.action('sell_exec', async (ctx) => {
       }
 
       // 3) Record trade (quote fetched after sending to keep UX snappy)
+      let sellQuote: any = undefined;
       try {
         const q = await bestQuoteSell(amount, u.token_address);
+        sellQuote = q;
         if (q?.amountOut) recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
       } catch {}
 
       // 4) Wait for confirm, then delete placeholder and post success
       provider.waitForTransaction(hash).then(async () => {
         try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
-        await ctx.reply(`✅ Sell successful ${link}`);
+        const pretty = await buildSuccessMessage('Sell', link, {
+          token: u.token_address,
+          soldTokWei: amount,
+          recvPlsWei: sellQuote?.amountOut,
+        });
+        await ctx.reply(pretty, { parse_mode: 'Markdown' });
       }).catch(() => {/* ignore */});
     } else {
       try {
@@ -1221,8 +1325,10 @@ if (u?.auto_buy_enabled) {
       }
 
       // Record the trade (fetch quote AFTER sending so we don’t block the UI)
+      let lastQuote: any = undefined;
       try {
         const preQuote = await bestQuoteBuy(amountIn, text);
+        lastQuote = preQuote;
         if (preQuote?.amountOut) {
           recordTrade(ctx.from.id, w.address, text, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
         }
@@ -1238,7 +1344,12 @@ if (u?.auto_buy_enabled) {
       // On confirmation, delete the placeholder and post success
       provider.waitForTransaction(hash).then(async () => {
         try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
-        await ctx.reply(`✅ Buy successful ${link}`);
+        const pretty = await buildSuccessMessage('Buy', link, {
+          token: text,
+          buyAmountPlsWei: amountIn,
+          recvTokWei: lastQuote?.amountOut,
+        });
+        await ctx.reply(pretty, { parse_mode: 'Markdown' });
       }).catch(() => {/* ignore */});
     } else {
       try {
