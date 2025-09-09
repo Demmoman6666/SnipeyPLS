@@ -30,8 +30,9 @@ const fmtDec = (s: string) => { const [i, d] = s.split('.'); return d ? `${fmtIn
 const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
+const WPLS = (process.env.WPLS_ADDRESS || '0xA1077a294dDE1B09bB078844df40758a5D0f9a27').toLowerCase(); // Pulse WPLS
 
-/* ---- HTML escape + reply helper (use anywhere with dynamic strings) ---- */
+/* ---- HTML escape + reply helper ---- */
 const esc = (s: string) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 function replyHTML(ctx: any, html: string, extra: any = {}) {
   return ctx.reply(html, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
@@ -97,16 +98,75 @@ function bigDivToDecimal(n: bigint, d: bigint, precision = 20): string {
   let frac = (q % scale).toString().padStart(precision, '0').replace(/0+$/, '');
   return frac ? `${intPart.toString()}.${frac}` : intPart.toString();
 }
-async function plsUSD(): Promise<number | null> {
+
+/* ---------- DexScreener helpers (price + liquidity + marketCap) ---------- */
+const _fetchAny: any = (globalThis as any).fetch?.bind(globalThis);
+
+type DSPair = {
+  priceUsd?: string | number;
+  liquidity?: { usd?: number | string };
+  fdv?: number | string | null;
+  marketCap?: number | string | null;
+  baseToken?: { address?: string; symbol?: string };
+  quoteToken?: { address?: string; symbol?: string };
+};
+type DSMetrics = { priceUSD: number | null; liquidityUSD: number | null; marketCapUSD: number | null };
+
+async function fetchDexScreenerBestPair(token: string): Promise<DSPair | null> {
+  if (!_fetchAny) return null;
   try {
-    if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) return null;
-    const meta = await tokenMeta(STABLE);
-    const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE); // 1 PLS -> stable
-    if (!q) return null;
-    return Number(ethers.formatUnits(q.amountOut, meta.decimals ?? 18));
+    const resp = await _fetchAny(`https://api.dexscreener.com/latest/dex/tokens/${token}`);
+    if (!resp?.ok) return null;
+    const j: any = await resp.json();
+    const pairs: DSPair[] = Array.isArray(j?.pairs) ? j.pairs : [];
+    if (!pairs.length) return null;
+    // Pick highest-liquidity pair
+    let best = pairs[0];
+    for (const p of pairs) {
+      const bL = Number((best?.liquidity as any)?.usd ?? 0);
+      const pL = Number((p?.liquidity as any)?.usd ?? 0);
+      if (pL > bL) best = p;
+    }
+    return best;
   } catch { return null; }
 }
 
+async function fetchDexScreener(token: string): Promise<DSMetrics> {
+  const best = await fetchDexScreenerBestPair(token);
+  if (!best) return { priceUSD: null, liquidityUSD: null, marketCapUSD: null };
+  const priceUSD = best.priceUsd != null ? Number(best.priceUsd) : null;
+  const liquidityUSD = (best.liquidity && (best.liquidity as any).usd != null)
+    ? Number((best.liquidity as any).usd)
+    : null;
+  // DexScreener shows Market Cap when it knows circulating; otherwise FDV.
+  let mcap = best.marketCap != null ? Number(best.marketCap) : null;
+  if (mcap == null && best.fdv != null) mcap = Number(best.fdv);
+  return { priceUSD, liquidityUSD, marketCapUSD: mcap };
+}
+
+// WPLS → USD via DexScreener (most liquid WPLS/* pair)
+async function plsUSD_viaDex(): Promise<number | null> {
+  const best = await fetchDexScreenerBestPair(WPLS);
+  if (!best) return null;
+  const v = best.priceUsd != null ? Number(best.priceUsd) : null;
+  return Number.isFinite(v as any) ? (v as number) : null;
+}
+
+/* ---------- USD/PLS via stable route, with DexScreener fallback ---------- */
+async function plsUSD(): Promise<number | null> {
+  // Try on-chain route via configured stable
+  try {
+    if (STABLE && /^0x[a-fA-F0-9]{40}$/.test(STABLE)) {
+      const meta = await tokenMeta(STABLE);
+      const q = await bestQuoteBuy(ethers.parseEther('1'), STABLE); // 1 PLS -> stable
+      if (q) return Number(ethers.formatUnits(q.amountOut, meta.decimals ?? 18));
+    }
+  } catch { /* fall through */ }
+  // Fallback to DexScreener WPLS USD
+  try { return await plsUSD_viaDex(); } catch { return null; }
+}
+
+/* ---------- trade success card ---------- */
 type PostTradeArgs = {
   action: 'BUY' | 'SELL';
   spend: { amount: bigint; decimals: number; symbol: string };
@@ -472,33 +532,19 @@ bot.action('wallet_add', async (ctx) => {
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]) });
 });
 
-/* ---------- DEXSCREENER HELPERS (price + liquidity) ---------- */
-const _fetchAny: any = (globalThis as any).fetch?.bind(globalThis);
-
-type DSMetrics = { priceUSD: number | null; liquidityUSD: number | null };
-async function fetchDexScreener(token: string): Promise<DSMetrics> {
-  if (!_fetchAny) return { priceUSD: null, liquidityUSD: null };
+/* ---------- Price helpers used below ---------- */
+async function pricePLSPerToken(token: string): Promise<number | null> {
   try {
-    const resp = await _fetchAny(`https://api.dexscreener.com/latest/dex/tokens/${token}`);
-    if (!resp?.ok) return { priceUSD: null, liquidityUSD: null };
-    const j: any = await resp.json();
-    const pairs: any[] = Array.isArray(j?.pairs) ? j.pairs : [];
-    if (!pairs.length) return { priceUSD: null, liquidityUSD: null };
-    let best = pairs[0];
-    for (const p of pairs) {
-      const bL = Number(best?.liquidity?.usd ?? 0);
-      const pL = Number(p?.liquidity?.usd ?? 0);
-      if (pL > bL) best = p;
-    }
-    const priceUSD = best?.priceUsd != null ? Number(best.priceUsd) : null;
-    const liqUSD   = best?.liquidity?.usd != null ? Number(best.liquidity.usd) : null;
-    return { priceUSD, liquidityUSD: liqUSD };
-  } catch {
-    return { priceUSD: null, liquidityUSD: null };
-  }
+    const meta = await tokenMeta(token);
+    const dec = meta.decimals ?? 18;
+    const one = ethers.parseUnits('1', dec);
+    const q = await bestQuoteSell(one, token);
+    if (!q) return null;
+    return Number(ethers.formatEther(q.amountOut)); // PLS per 1 token
+  } catch { return null; }
 }
-
 async function priceUSDPerToken(token: string): Promise<number | null> {
+  // Prefer DexScreener price if available; fallback to on-chain PLS*USD
   const ds = await fetchDexScreener(token);
   if (ds.priceUSD != null) return ds.priceUSD;
   const [pPLS, usd] = await Promise.all([pricePLSPerToken(token), plsUSD()]);
@@ -507,7 +553,6 @@ async function priceUSDPerToken(token: string): Promise<number | null> {
 }
 
 /* ---------- BUY MENU ---------- */
-
 async function renderBuyMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
   const aw = getActiveWallet(ctx.from.id);
@@ -517,14 +562,14 @@ async function renderBuyMenu(ctx: any) {
   const gb = u?.gwei_boost_gwei ?? 0;
 
   let tokenLine = 'Token: —';
-  let pairLine = `Pair: ${process.env.WPLS_ADDRESS} (WPLS)`;
+  let pairLine = `Pair: ${process.env.WPLS_ADDRESS || '0xA1077a294dDE1B09bB078844df40758a5D0f9a27'} (WPLS)`;
   let priceLine = '📈 Price: —';
   let mcapLine  = '💰 Market Cap: —';
   let liqLine   = '💧 Liquidity: —';
   let outLine = 'Amount out: unavailable';
 
   if (u?.token_address) {
-    const tokenAddr = u.token_address as string; // <-- pin to string for TS
+    const tokenAddr = u.token_address as string;
     try {
       const meta = await tokenMeta(tokenAddr);
       tokenLine = `Token: ${tokenAddr} (${meta.symbol || meta.name || 'TOKEN'})`;
@@ -535,22 +580,20 @@ async function renderBuyMenu(ctx: any) {
         outLine = `Amount out: ${fmtDec(ethers.formatUnits(best.amountOut, dec))} ${meta.symbol || 'TOKEN'}   ·   Route: ${best.route.key}`;
       }
 
-      const [ds, cap] = await Promise.all([
+      const [ds, capFallback] = await Promise.all([
         fetchDexScreener(tokenAddr),
-        mcapFor(tokenAddr)
+        mcapFor(tokenAddr),
       ]);
 
-      const pUsd = ds.priceUSD ?? (async () => {
-        const [pPLS, usd] = await Promise.all([pricePLSPerToken(tokenAddr), plsUSD()]);
-        return (pPLS != null && usd != null) ? pPLS * usd : null;
-      })();
-
-      const priceUsdVal = await pUsd;
-
+      const priceUsdVal = ds.priceUSD != null ? ds.priceUSD : await priceUSDPerToken(tokenAddr);
       priceLine = `📈 Price: ${fmtUsdPrice(priceUsdVal)}`;
-      if (cap.ok && cap.mcapUSD != null) {
-        mcapLine = `💰 Market Cap: ${fmtUsdCompact(cap.mcapUSD)}`;
+
+      if (ds.marketCapUSD != null) {
+        mcapLine = `💰 Market Cap: ${fmtUsdCompact(ds.marketCapUSD)} (DexScreener)`;
+      } else if (capFallback.ok && capFallback.mcapUSD != null) {
+        mcapLine = `💰 Market Cap: ${fmtUsdCompact(capFallback.mcapUSD)}`;
       }
+
       if (ds.liquidityUSD != null) {
         liqLine = `💧 Liquidity: ${fmtUsdCompact(ds.liquidityUSD)}`;
       }
@@ -636,9 +679,7 @@ async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: str
     const link = otter(hash);
     const title = kind === 'Buy' ? 'Buy Successfull' : 'Sell Successfull';
     await ctx.reply(`✅ ${title} ${link}`);
-  } catch {
-    // leave pending if it fails/times out
-  }
+  } catch {}
 }
 
 /* Buy using selected wallets (or active) + auto-approve + record entry + pin card */
@@ -687,7 +728,7 @@ bot.action('buy_exec', async (ctx) => {
           await ctx.reply(`transaction sent ${link}`);
         }
 
-        if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
+        if (u.token_address.toLowerCase() !== WPLS) {
           approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
         }
 
@@ -697,7 +738,7 @@ bot.action('buy_exec', async (ctx) => {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
             receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-            tokenAddress: u.token_address!,   // <-- assert non-null
+            tokenAddress: u.token_address!,   // assert non-null
             explorerUrl: link
           });
         }).catch(() => {/* ignore */});
@@ -757,7 +798,7 @@ bot.action('buy_exec_all', async (ctx) => {
           await ctx.reply(`transaction sent ${link}`);
         }
 
-        if (u.token_address.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
+        if (u.token_address.toLowerCase() !== WPLS) {
           approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
         }
 
@@ -767,7 +808,7 @@ bot.action('buy_exec_all', async (ctx) => {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
             receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-            tokenAddress: u.token_address!,   // <-- assert non-null
+            tokenAddress: u.token_address!,   // assert non-null
             explorerUrl: link
           });
         }).catch(() => {/* ignore */});
@@ -853,7 +894,7 @@ bot.action(/^limit_cancel:(\d+)$/, async (ctx: any) => {
   return showMenu(ctx, changed ? `Limit #${id} cancelled.` : `Couldn’t cancel #${id}.`, mainMenu());
 });
 
-/* ---------- SELL MENU (robust HTML render + metrics) ---------- */
+/* ---------- SELL MENU (HTML + metrics) ---------- */
 async function renderSellMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
   const w = getActiveWallet(ctx.from.id);
@@ -874,7 +915,7 @@ async function renderSellMenu(ctx: any) {
   let metaSymbol = 'TOKEN';
 
   if (u?.token_address) {
-    const tokenAddr = u.token_address as string; // <-- pin to string for TS
+    const tokenAddr = u.token_address as string;
     try {
       const [ds, cap] = await Promise.all([
         fetchDexScreener(tokenAddr),
@@ -882,7 +923,8 @@ async function renderSellMenu(ctx: any) {
       ]);
       const pUsd = await priceUSDPerToken(tokenAddr);
       priceLine = `📈 Price: ${fmtUsdPrice(pUsd)}`;
-      if (cap.ok && cap.mcapUSD != null) mcapLine = `💰 Market Cap: ${fmtUsdCompact(cap.mcapUSD)}`;
+      if (ds.marketCapUSD != null) mcapLine = `💰 Market Cap: ${fmtUsdCompact(ds.marketCapUSD)} (DexScreener)`;
+      else if (cap.ok && cap.mcapUSD != null) mcapLine = `💰 Market Cap: ${fmtUsdCompact(cap.mcapUSD)}`;
       if (ds.liquidityUSD != null)       liqLine  = `💧 Liquidity: ${fmtUsdCompact(ds.liquidityUSD)}`;
     } catch {}
   }
@@ -954,7 +996,7 @@ bot.action('sell_approve', async (ctx) => {
   const u = getUserSettings(ctx.from.id);
   const w = getActiveWallet(ctx.from.id) || listWallets(ctx.from.id)[0];
   if (!w || !u?.token_address) return showMenu(ctx, 'Need a wallet and token set first.', sellMenu());
-  if (u.token_address.toLowerCase() === process.env.WPLS_ADDRESS!.toLowerCase())
+  if (u.token_address.toLowerCase() === WPLS)
     return showMenu(ctx, 'WPLS doesn’t require approval.', sellMenu());
   try {
     const gas = await computeGas(ctx.from.id);
@@ -1030,7 +1072,7 @@ bot.action('sell_exec', async (ctx) => {
           action: 'SELL',
           spend:   { amount: amount,  decimals: tokDec, symbol: tokSym },
           receive: { amount: outPls,  decimals: 18,     symbol: 'PLS' },
-          tokenAddress: u.token_address!,   // <-- assert non-null
+          tokenAddress: u.token_address!,   // assert non-null
           explorerUrl: link
         });
       }).catch(() => {/* ignore */});
@@ -1051,10 +1093,6 @@ bot.action('sell_exec', async (ctx) => {
   return renderSellMenu(ctx);
 });
 
-/* ----- Pinned position: buttons ----- */
-bot.action('pin_buy', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderBuyMenu(ctx); });
-bot.action('pin_sell', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSellMenu(ctx); });
-
 /* ---------- DIAGNOSTICS ---------- */
 bot.command('rpc_check', async (ctx) => {
   const aw = getActiveWallet(ctx.from.id);
@@ -1073,25 +1111,7 @@ bot.command('rpc_check', async (ctx) => {
   await replyHTML(ctx, lines);
 });
 
-/* ---------- Quick MCAP + price helpers ---------- */
-const limitSkipNotified = new Set<number>();
-
-async function pricePLSPerToken(token: string): Promise<number | null> {
-  try {
-    const meta = await tokenMeta(token);
-    const dec = meta.decimals ?? 18;
-    const one = ethers.parseUnits('1', dec);
-    const q = await bestQuoteSell(one, token);
-    if (!q) return null;
-    return Number(ethers.formatEther(q.amountOut));
-  } catch { return null; }
-}
-
-async function plsUSD_legacy(): Promise<number | null> {
-  return plsUSD();
-}
-
-/** -------- Explorer totalSupply() fallback (improved) -------- */
+/* ---------- Explorer totalSupply fallbacks ---------- */
 function explorerApiBase(): string | null {
   const b = (process.env.EXPLORER_API_BASE || '').trim();
   return b ? b.replace(/\/+$/, '') : null;
@@ -1135,7 +1155,7 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
   } catch {}
 
   try {
-    const url = `${rootNoApi}/api/v2/tokens/${token}`;
+    const url = `${rootNoApi}/api/v2/tokens/${token}`);
     const r = await _fetchAny(url, { headers: explorerHeaders() });
     if (r?.ok) {
       const j: any = await r.json();
@@ -1151,26 +1171,22 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
 
   return null;
 }
-
 async function totalSupplyLowLevel(token: string): Promise<bigint | null> {
   try {
     const res = await provider.call({ to: token, data: '0x18160ddd' });
     if (!res || res === '0x') return null;
     return BigInt(res);
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
-
 async function totalSupply(token: string): Promise<bigint | null> {
   try { return await erc20(token).totalSupply(); } catch {}
-  try {
-    const ll = await totalSupplyLowLevel(token);
-    if (ll != null) return ll;
-  } catch {}
+  try { const ll = await totalSupplyLowLevel(token); if (ll != null) return ll; } catch {}
   try { return await fetchTotalSupplyViaExplorer(token); } catch {}
   return null;
 }
+
+/* ---------- MCAP (on-chain) ---------- */
+async function plsUSD_legacy(): Promise<number | null> { return plsUSD(); }
 
 async function mcapFor(token: string): Promise<{
   ok: boolean;
@@ -1183,7 +1199,7 @@ async function mcapFor(token: string): Promise<{
 }> {
   try {
     if (!STABLE || !/^0x[a-fA-F0-9]{40}$/.test(STABLE)) {
-      return { ok: false, reason: 'No STABLE token address configured (USDC/USDCe). Set env USDC_ADDRESS/USDCe_ADDRESS/STABLE_ADDRESS.' };
+      // still allow if DexScreener fallback exists (we'll compute USD with plsUSD() which falls back to DS)
     }
     const [usdPerPLS, plsPerToken, meta, sup] = await Promise.all([
       plsUSD_legacy(),
@@ -1192,7 +1208,7 @@ async function mcapFor(token: string): Promise<{
       totalSupply(token),
     ]);
 
-    if (usdPerPLS == null) return { ok: false, reason: 'Could not fetch USD/PLS (stable quote failed).' };
+    if (usdPerPLS == null) return { ok: false, reason: 'Could not fetch USD/PLS.' };
     if (plsPerToken == null) return { ok: false, reason: 'No sell route for token (price in PLS not available).' };
     if (!sup) return { ok: false, reason: 'Could not fetch totalSupply().' };
 
@@ -1207,10 +1223,19 @@ async function mcapFor(token: string): Promise<{
   }
 }
 
+/* ---------- /mcap command (will match DexScreener when available) ---------- */
 bot.command('mcap', async (ctx) => {
   const u = getUserSettings(ctx.from.id);
   const token = u?.token_address;
   if (!token) return ctx.reply('Set a token first.');
+
+  // Prefer DexScreener’s marketCap/fdv for parity with their UI
+  const ds = await fetchDexScreener(token);
+  if (ds.marketCapUSD != null) {
+    return ctx.reply(`DexScreener MCAP: ${fmtUsdCompact(ds.marketCapUSD)}  (raw: $${ds.marketCapUSD.toLocaleString()})`);
+  }
+
+  // Fallback to on-chain supply × price
   const info = await mcapFor(token);
   if (!info.ok) return ctx.reply('MCAP check failed: ' + (info.reason ?? 'unknown'));
   const lines = [
@@ -1226,9 +1251,20 @@ bot.command('mcap', async (ctx) => {
 /* ---------- LIMIT ENGINE ---------- */
 const LIMIT_CHECK_MS = Number(process.env.LIMIT_CHECK_MS ?? 15000);
 
+// Use DexScreener MCAP when present; fallback to on-chain
+async function mcapUSDForTriggers(token: string): Promise<number | null> {
+  const ds = await fetchDexScreener(token);
+  if (ds.marketCapUSD != null) return ds.marketCapUSD;
+  const on = await mcapFor(token);
+  if (on.ok && on.mcapUSD != null) return on.mcapUSD;
+  return null;
+}
+
 async function checkLimitsOnce() {
   const rows = getOpenLimitOrders();
   if (!rows.length) return;
+
+  const usd = await plsUSD(); // still used for USD price trigger if we fall back
 
   for (const r of rows) {
     try {
@@ -1244,18 +1280,17 @@ async function checkLimitsOnce() {
         if (pUSD == null) continue;
         should = (r.side === 'BUY') ? (pUSD <= r.trigger_value) : (pUSD >= r.trigger_value);
       } else if (r.trigger_type === 'MCAP') {
-        const info = await mcapFor(r.token_address);
-        if (!info.ok) {
+        const mcap = await mcapUSDForTriggers(r.token_address);
+        if (mcap == null) {
           if (!limitSkipNotified.has(r.id)) {
             limitSkipNotified.add(r.id);
             await bot.telegram.sendMessage(
               r.telegram_id,
-              `ℹ️ Limit #${r.id} (MCAP) skipped: ${info.reason ?? 'unknown reason'}`
+              `ℹ️ Limit #${r.id} (MCAP) skipped: Could not resolve Market Cap.`
             );
           }
           continue;
         }
-        const mcap = info.mcapUSD!;
         should = (r.side === 'BUY') ? (mcap <= r.trigger_value) : (mcap >= r.trigger_value);
       } else if (r.trigger_type === 'MULT') {
         const avg = getAvgEntry(r.telegram_id, r.token_address);
@@ -1300,8 +1335,9 @@ async function checkLimitsOnce() {
     }
   }
 }
-
 setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
+
+const limitSkipNotified = new Set<number>();
 
 /* ---------- TEXT: prompts + auto-detect address ---------- */
 bot.on('text', async (ctx, next) => {
@@ -1392,7 +1428,7 @@ bot.on('text', async (ctx, next) => {
       pending.delete(ctx.from.id); return renderSettings(ctx);
     }
 
-    // ----- Limit order building -----
+    // Limit order building
     if (p.type === 'lb_amt') {
       const v = Number(msg);
       if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number of PLS (e.g., 0.5).');
@@ -1439,7 +1475,7 @@ bot.on('text', async (ctx, next) => {
     return;
   }
 
-  // Auto-detect token address when no prompt is active (this powers auto-buy)
+  // Auto-detect token address when no prompt is active (powers auto-buy)
   const text = String(ctx.message.text).trim();
   if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
     setToken(ctx.from.id, text);
@@ -1485,7 +1521,7 @@ bot.on('text', async (ctx, next) => {
           } catch {}
 
           try {
-            if (text.toLowerCase() !== process.env.WPLS_ADDRESS!.toLowerCase()) {
+            if (text.toLowerCase() !== WPLS) {
               approveAllRouters(getPrivateKey(w), text, gas).catch(() => {});
             }
           } catch {}
@@ -1528,6 +1564,7 @@ bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); pending.dele
 bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
 bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
 
+// no-op
 bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
 
 export {};
