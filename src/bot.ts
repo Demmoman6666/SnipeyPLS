@@ -218,7 +218,38 @@ async function postTradeSuccess(ctx: any, args: PostTradeArgs) {
 
   await replyHTML(ctx, body);
 }
+// === Branding + Home screen ===
+const BRAND_NAME = process.env.BRAND_NAME || 'SNIPEY';
+const BRAND_TWITTER = process.env.BRAND_TWITTER_URL || 'https://twitter.com/yourhandle';
+const BRAND_TELEGRAM = process.env.BRAND_TELEGRAM_URL || 'https://t.me/yourchannel';
 
+function homeScreenText() {
+  const rule = '⎯'.repeat(34);
+  return [
+    `⚡️ <b>${esc(BRAND_NAME)} Bot</b>`,
+    '',
+    '🚀 Fastest Telegram trading bot on PulseChain network. Take advantage against other traders and snipe or trade tokens on PulseChain without leaving Telegram!',
+    '',
+    '<b>How To Start?</b>',
+    '1️⃣ Generate a new wallet',
+    '2️⃣ Fund your newly generated wallet with <b>$PLS</b>',
+    '3️⃣ Trade or snipe tokens',
+    '',
+    `<a href="${esc(BRAND_TWITTER)}">Twitter</a>  •  <a href="${esc(BRAND_TELEGRAM)}">Telegram</a>`,
+    rule,
+    'You can also paste a <b>CA</b> to quickly interact with a token.',
+    '',
+    '<b>Features</b>',
+    '• Super fast trading bot',
+    '• Referral program',
+    '• Limit orders',
+    '• Auto-buy when contract address is pasted (toggle in Settings)',
+  ].join('\n');
+}
+
+async function renderHome(ctx: any) {
+  await showMenu(ctx, homeScreenText(), { parse_mode: 'HTML', disable_web_page_preview: true, ...mainMenu() });
+}
 /* ---------- message lifecycle ---------- */
 const lastMenuMsg = new Map<number, number>();
 const pinnedPosMsg = new Map<number, number>();
