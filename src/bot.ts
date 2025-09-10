@@ -1145,6 +1145,7 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
   const base = baseIn.replace(/\/+$/, '');
   const rootNoApi = base.replace(/\/api$/, '');
 
+  // 1) classic /api?module=stats&action=tokensupply
   try {
     const url = withApiKey(`${base}?module=stats&action=tokensupply&contractaddress=${token}`);
     const r = await _fetchAny(url, { headers: explorerHeaders() });
@@ -1155,6 +1156,7 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
     }
   } catch {}
 
+  // 2) /api?module=token&action=tokeninfo
   try {
     const url = withApiKey(`${base}?module=token&action=tokeninfo&contractaddress=${token}`);
     const r = await _fetchAny(url, { headers: explorerHeaders() });
@@ -1167,6 +1169,7 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
     }
   } catch {}
 
+  // 3) modern REST: /api/v2/tokens/{token}
   try {
     const url = `${rootNoApi}/api/v2/tokens/${token}`;
     const r = await _fetchAny(url, { headers: explorerHeaders() });
