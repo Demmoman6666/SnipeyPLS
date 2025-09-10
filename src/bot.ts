@@ -235,15 +235,17 @@ function homeScreenText() {
     '2️⃣ Fund your newly generated wallet with <b>$PLS</b>',
     '3️⃣ Trade or snipe tokens',
     '',
-    `<a href="${esc(BRAND_TWITTER)}">Twitter</a>  •  <a href="${esc(BRAND_TELEGRAM)}">Telegram</a>`,
     rule,
     'You can also paste a <b>CA</b> to quickly interact with a token.',
     '',
     '<b>Features</b>',
-    '• Super fast trading bot',
-    '• Referral program',
-    '• Limit orders',
-    '• Auto-buy when contract address is pasted (toggle in Settings)',
+    '⚡️ Super fast trading bot',
+    '🤝 Referral program',
+    '🎯 Limit orders',
+    '🤖 Auto-buy when contract address is pasted (toggle in Settings)',
+    '',
+    rule,
+    `<a href="${esc(BRAND_TWITTER)}">Twitter</a>  •  <a href="${esc(BRAND_TELEGRAM)}">Telegram</a>`,
   ].join('\n');
 }
 
