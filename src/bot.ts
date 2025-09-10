@@ -389,7 +389,7 @@ type Pending =
 const pending = new Map<number, Pending>();
 
 /* ---------- /start ---------- */
-bot.start(async (ctx) => { await showMenu(ctx, 'Main Menu', mainMenu()); });
+bot.start(async (ctx) => { await renderHome(ctx); });
 
 /* ---------- SETTINGS ---------- */
 async function renderSettings(ctx: any) {
@@ -1701,8 +1701,11 @@ bot.on('text', async (ctx, next) => {
 });
 
 /* ---------- shortcuts ---------- */
-bot.action('main_back', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return showMenu(ctx, 'Main Menu', mainMenu()); });
-bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
+bot.action('main_back', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.delete(ctx.from.id);
+  return renderHome(ctx);
+});bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
 bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
 
 // no-op
