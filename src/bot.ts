@@ -1248,7 +1248,17 @@ bot.command('mcap', async (ctx) => {
 
 /* ---------- LIMIT ENGINE ---------- */
 const LIMIT_CHECK_MS = Number(process.env.LIMIT_CHECK_MS ?? 15000);
-const limitSkipNotified = new Set<number>();
+
+// in-memory guards to prevent duplicate fills while a tx is in-flight
+const limitProcessing = new Map<number, number>(); // id -> timestamp(ms)
+function isProcessing(id: number) { return limitProcessing.has(id); }
+function markProcessing(id: number) { limitProcessing.set(id, Date.now()); }
+function unmarkProcessing(id: number) { limitProcessing.delete(id); }
+// clean out old entries every minute (5-minute TTL safety)
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, t] of limitProcessing) if (now - t > 5 * 60_000) limitProcessing.delete(id);
+}, 60_000);
 
 // Use DexScreener MCAP when present; fallback to on-chain
 async function mcapUSDForTriggers(token: string): Promise<number | null> {
@@ -1264,6 +1274,9 @@ async function checkLimitsOnce() {
   if (!rows.length) return;
 
   for (const r of rows) {
+    // hard de-dupe: if we already started firing this id, skip
+    if (isProcessing(r.id)) continue;
+
     try {
       const pPLS = await pricePLSPerToken(r.token_address);
       if (pPLS == null) continue;
@@ -1298,40 +1311,118 @@ async function checkLimitsOnce() {
 
       if (!should) continue;
 
+      // mark as processing so subsequent ticks don't fire again
+      markProcessing(r.id);
+
       const w = getWalletById(r.telegram_id, r.wallet_id);
-      if (!w) { markLimitError(r.id, 'wallet missing'); continue; }
+      if (!w) { unmarkProcessing(r.id); markLimitError(r.id, 'wallet missing'); continue; }
+
       const gas = await computeGas(r.telegram_id);
 
+      // minimal ctx shim so we can reuse the same success card
+      const ctxShim: any = {
+        reply: (html: string, extra: any = {}) =>
+          bot.telegram.sendMessage(r.telegram_id, html, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra })
+      };
+
       if (r.side === 'BUY') {
-        const amt = r.amount_pls_wei ? BigInt(r.amount_pls_wei) : 0n;
-        if (amt <= 0n) { markLimitError(r.id, 'amount zero'); continue; }
-        const rec = await buyAutoRoute(getPrivateKey(w), r.token_address, amt, 0n, gas);
-        const hash = (rec as any)?.hash;
-        markLimitFilled(r.id, hash);
+        const amtIn = r.amount_pls_wei ? BigInt(r.amount_pls_wei) : 0n;
+        if (amtIn <= 0n) { unmarkProcessing(r.id); markLimitError(r.id, 'amount zero'); continue; }
+
+        // Pre-resolve some metadata for the success card & record
+        let preOut: bigint = 0n;
+        let tokDec = 18;
+        let tokSym = 'TOKEN';
         try {
-          const pre = await bestQuoteBuy(amt, r.token_address);
-          if (pre?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'BUY', amt, pre.amountOut, pre.route.key);
+          const meta = await tokenMeta(r.token_address);
+          tokDec = meta.decimals ?? 18;
+          tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+          const pre = await bestQuoteBuy(amtIn, r.token_address);
+          if (pre?.amountOut) {
+            preOut = pre.amountOut;
+            recordTrade(r.telegram_id, w.address, r.token_address, 'BUY', amtIn, pre.amountOut, pre.route.key);
+          }
         } catch {}
-        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit BUY filled #${r.id}\n${hash ? otter(hash) : ''}`);
+
+        const rec = await buyAutoRoute(getPrivateKey(w), r.token_address, amtIn, 0n, gas);
+        const hash = (rec as any)?.hash;
+
+        // mark filled in DB immediately to avoid refiring
+        markLimitFilled(r.id, hash);
+
+        if (hash) {
+          const link = otter(hash);
+          const sentMsg = await bot.telegram.sendMessage(r.telegram_id, `transaction sent ${link}`);
+          provider.waitForTransaction(hash).then(async () => {
+            try { await bot.telegram.deleteMessage(r.telegram_id, sentMsg.message_id); } catch {}
+            await postTradeSuccess(ctxShim, {
+              action: 'BUY',
+              spend:   { amount: amtIn, decimals: 18, symbol: 'PLS' },
+              receive: { amount: preOut, decimals: tokDec, symbol: tokSym },
+              tokenAddress: r.token_address,
+              explorerUrl: link
+            });
+            unmarkProcessing(r.id);
+          }).catch(() => { unmarkProcessing(r.id); });
+        } else {
+          await bot.telegram.sendMessage(r.telegram_id, `transaction sent (no hash yet)`);
+          unmarkProcessing(r.id);
+        }
+
       } else {
+        // SELL
         const c = erc20(r.token_address);
         const bal = await c.balanceOf(w.address);
         const pct = Math.max(1, Math.min(100, Number(r.sell_pct ?? 100)));
         const amount = (bal * BigInt(Math.round(pct))) / 100n;
-        if (amount <= 0n) { markLimitError(r.id, 'balance zero'); continue; }
+        if (amount <= 0n) { unmarkProcessing(r.id); markLimitError(r.id, 'balance zero'); continue; }
 
-        const q = await bestQuoteSell(amount, r.token_address);
+        // Pre-quote for record + success card fields
+        let outPls: bigint = 0n;
+        let tokDec = 18;
+        let tokSym = 'TOKEN';
+        try {
+          const meta = await tokenMeta(r.token_address);
+          tokDec = meta.decimals ?? 18;
+          tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+          const q = await bestQuoteSell(amount, r.token_address);
+          if (q?.amountOut) {
+            outPls = q.amountOut;
+            recordTrade(r.telegram_id, w.address, r.token_address, 'SELL', q.amountOut, amount, q.route.key);
+          }
+        } catch {}
+
         const rec = await sellAutoRoute(getPrivateKey(w), r.token_address, amount, 0n, gas);
         const hash = (rec as any)?.hash;
+
         markLimitFilled(r.id, hash);
-        if (q?.amountOut) recordTrade(r.telegram_id, w.address, r.token_address, 'SELL', q.amountOut, amount, q.route.key);
-        await bot.telegram.sendMessage(r.telegram_id, `✅ Limit SELL filled #${r.id}\n${hash ? otter(hash) : ''}`);
+
+        if (hash) {
+          const link = otter(hash);
+          const sentMsg = await bot.telegram.sendMessage(r.telegram_id, `transaction sent ${link}`);
+          provider.waitForTransaction(hash).then(async () => {
+            try { await bot.telegram.deleteMessage(r.telegram_id, sentMsg.message_id); } catch {}
+            await postTradeSuccess(ctxShim, {
+              action: 'SELL',
+              spend:   { amount,  decimals: tokDec, symbol: tokSym },
+              receive: { amount: outPls, decimals: 18,     symbol: 'PLS' },
+              tokenAddress: r.token_address,
+              explorerUrl: link
+            });
+            unmarkProcessing(r.id);
+          }).catch(() => { unmarkProcessing(r.id); });
+        } else {
+          await bot.telegram.sendMessage(r.telegram_id, `transaction sent (no hash yet)`);
+          unmarkProcessing(r.id);
+        }
       }
     } catch (e: any) {
+      unmarkProcessing(r.id);
       markLimitError(r.id, e?.message ?? String(e));
     }
   }
 }
+
 setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
 
 /* ---------- TEXT: prompts + auto-detect address ---------- */
