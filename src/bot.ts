@@ -1145,7 +1145,7 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
   const base = baseIn.replace(/\/+$/, '');
   const rootNoApi = base.replace(/\/api$/, '');
 
-  // 1) classic /api?module=stats&action=tokensupply
+  // 1) Etherscan-style: /api?module=stats&action=tokensupply
   try {
     const url = withApiKey(`${base}?module=stats&action=tokensupply&contractaddress=${token}`);
     const r = await _fetchAny(url, { headers: explorerHeaders() });
@@ -1156,7 +1156,7 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
     }
   } catch {}
 
-  // 2) /api?module=token&action=tokeninfo
+  // 2) tokeninfo: /api?module=token&action=tokeninfo
   try {
     const url = withApiKey(`${base}?module=token&action=tokeninfo&contractaddress=${token}`);
     const r = await _fetchAny(url, { headers: explorerHeaders() });
@@ -1175,7 +1175,12 @@ async function fetchTotalSupplyViaExplorer(token: string): Promise<bigint | null
     const r = await _fetchAny(url, { headers: explorerHeaders() });
     if (r?.ok) {
       const j: any = await r.json();
-      const val = j?.total_supply ?? j?.supply ?? j?.data?.total_supply ?? j?.data?.supply;
+      const val =
+        j?.total_supply ??
+        j?.supply ??
+        j?.data?.total_supply ??
+        j?.data?.supply;
+
       if (typeof val === 'string') {
         if (/^0x[0-9a-fA-F]+$/.test(val)) return BigInt(val);
         if (/^\d+$/.test(val)) return BigInt(val);
