@@ -1246,6 +1246,8 @@ bot.command('mcap', async (ctx) => {
   return ctx.reply(lines);
 });
 
+// Tracks which limit ids have already been warned about MCAP unavailability
+const limitSkipNotified = new Set<number>();
 /* ---------- LIMIT ENGINE ---------- */
 const LIMIT_CHECK_MS = Number(process.env.LIMIT_CHECK_MS ?? 15000);
 
