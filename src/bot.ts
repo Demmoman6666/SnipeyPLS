@@ -900,9 +900,13 @@ async function renderSellMenu(ctx: any) {
   const w = getActiveWallet(ctx.from.id);
   const pct = u?.sell_pct ?? 100;
 
+  const tokenAddrFull: string | undefined = u?.token_address || undefined;
+
   let header = '🟥 <b>SELL MENU</b>';
-  let walletLine = `<b>Wallet:</b> ${w ? `<code>${esc(short(w.address))}</code>` : '—'}`;
-  let tokenLine  = `<b>Token:</b> ${u?.token_address ? `<code>${esc(short(u.token_address))}</code>` : '—'}`;
+
+  // Full addresses + line break between Wallet and Token
+  let walletLine = `<b>Wallet:</b> ${w ? `\n<code>${esc(w.address)}</code>` : '—'}`;
+  let tokenLine  = `<b>Token:</b> ${tokenAddrFull ? `\n<code>${esc(tokenAddrFull)}</code>` : '—'}`;
 
   let priceLine = `📈 Price: —`;
   let mcapLine  = `💰 Market Cap: —`;
@@ -912,46 +916,47 @@ async function renderSellMenu(ctx: any) {
   let outLine = '• <b>Est. Out:</b> —';
   let entryLine = '• <b>Entry:</b> —';
   let pnlLine = '• <b>Net PnL:</b> —';
-  let metaSymbol = 'TOKEN';
 
-  if (u?.token_address) {
-    const tokenAddr = u.token_address as string;
+  // We'll fill this so the header can show "(SYMBOL)" after the token address
+  let metaSymbol = '';
+
+  // Metrics (price/liquidity/mcap)
+  if (tokenAddrFull) {
     try {
       const [ds, cap] = await Promise.all([
-        fetchDexScreener(tokenAddr),
-        mcapFor(tokenAddr),
+        fetchDexScreener(tokenAddrFull),
+        mcapFor(tokenAddrFull),
       ]);
-      const pUsd = await priceUSDPerToken(tokenAddr);
+      const pUsd = await priceUSDPerToken(tokenAddrFull);
       priceLine = `📈 Price: ${fmtUsdPrice(pUsd)}`;
       if (ds.marketCapUSD != null) mcapLine = `💰 Market Cap: ${fmtUsdCompact(ds.marketCapUSD)} (DexScreener)`;
       else if (cap.ok && cap.mcapUSD != null) mcapLine = `💰 Market Cap: ${fmtUsdCompact(cap.mcapUSD)}`;
-      if (ds.liquidityUSD != null)       liqLine  = `💧 Liquidity: ${fmtUsdCompact(ds.liquidityUSD)}`;
-    } catch {}
+      if (ds.liquidityUSD != null) liqLine  = `💧 Liquidity: ${fmtUsdCompact(ds.liquidityUSD)}`;
+    } catch { /* keep defaults */ }
   }
 
-  if (w && u?.token_address) {
+  // Balance, route, entry & PnL — also capture symbol for the header
+  if (w && tokenAddrFull) {
     try {
-      const tokenAddr = u.token_address as string;
-
-      const meta = await tokenMeta(tokenAddr);
+      const meta = await tokenMeta(tokenAddrFull);
       const dec = meta.decimals ?? 18;
-      metaSymbol = meta.symbol || meta.name || 'TOKEN';
+      metaSymbol = (meta.symbol || meta.name || '').toString();
 
-      const c = erc20(tokenAddr);
+      const c = erc20(tokenAddrFull);
       const [bal, best] = await Promise.all([
         c.balanceOf(w.address),
         (async () => {
           const amt = await c.balanceOf(w.address);
           const sellAmt = (amt * BigInt(Math.round(pct))) / 100n;
-          return (sellAmt > 0n) ? bestQuoteSell(sellAmt, tokenAddr) : null;
+          return (sellAmt > 0n) ? bestQuoteSell(sellAmt, tokenAddrFull) : null;
         })()
       ]);
 
-      balLine = `• <b>Balance:</b> ${esc(fmtDec(ethers.formatUnits(bal, dec)))} ${esc(metaSymbol)}`;
+      balLine = `• <b>Balance:</b> ${esc(fmtDec(ethers.formatUnits(bal, dec)))} ${esc(metaSymbol || 'TOKEN')}`;
 
       if (best) outLine = `• <b>Est. Out:</b> ${esc(fmtPls(best.amountOut))} PLS  (Route: ${esc(best.route.key)})`;
 
-      const avg = getAvgEntry(ctx.from.id, tokenAddr, dec);
+      const avg = getAvgEntry(ctx.from.id, tokenAddrFull, dec);
       if (avg && best) {
         const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
         const amtTok = Number(ethers.formatUnits(amountIn, dec));
@@ -960,16 +965,24 @@ async function renderSellMenu(ctx: any) {
         const pnlPls = curPls - (avg.avgPlsPerToken * amtTok);
         const pnlPct = avg.avgPlsPerToken > 0 ? (curAvg / avg.avgPlsPerToken - 1) * 100 : 0;
 
-        entryLine = `• <b>Entry:</b> ${esc(NF.format(avg.avgPlsPerToken))} PLS / ${esc(metaSymbol)}`;
+        entryLine = `• <b>Entry:</b> ${esc(NF.format(avg.avgPlsPerToken))} PLS / ${esc(metaSymbol || 'TOKEN')}`;
         pnlLine   = `• <b>Net PnL:</b> ${pnlPls >= 0 ? '🟢' : '🔴'} ${esc(NF.format(pnlPls))} PLS  (${esc(NF.format(pnlPct))}%)`;
       }
     } catch { /* keep defaults */ }
   }
 
+  // Now that we know the symbol, update the token header line to include it
+  if (tokenAddrFull) {
+    tokenLine = `<b>Token:</b>\n<code>${esc(tokenAddrFull)}</code>${metaSymbol ? ` (${esc(metaSymbol)})` : ''}`;
+  }
+
+  // Compose — Wallet, blank line, Token, then metrics
   const text = [
     header,
     '',
-    `${walletLine}    |    ${tokenLine}`,
+    walletLine,
+    '',
+    tokenLine,
     priceLine,
     mcapLine,
     liqLine,
