@@ -193,7 +193,7 @@ async function postTradeSuccess(ctx: any, args: PostTradeArgs) {
   if (usdPerPls != null) {
     const priceUSDnum = Number(pricePLS || '0') * usdPerPls;
     const priceUSDstr = priceUSDnum < 0.01
-      ? formatTinyDecimalStr(priceUSDnum.toString())
+      ? formatTinyDecimalStr(String(priceUSDnum))
       : priceUSDnum.toLocaleString('en-GB', { maximumFractionDigits: 8 });
     priceLine = `📊 ${action[0]}${action.slice(1).toLowerCase()} Price: $${priceUSDstr}`;
   } else {
@@ -902,12 +902,12 @@ async function renderSellMenu(ctx: any) {
 
   const tokenAddrFull: string | undefined = u?.token_address || undefined;
 
-  let header = '🟥 <b>SELL MENU</b>';
+  const header = '🟥 <b>SELL MENU</b>';
 
   // Full addresses + line break between Wallet and Token
-  let walletLine = `<b>Wallet:</b> ${w ? `\n<code>${esc(w.address)}</code>` : '—'}`;
+  let walletLine = `<b>Wallet:</b>\n<code>${w ? esc(w.address) : '—'}</code>`;
   let tokenLine  = `<b>Token:</b> ${tokenAddrFull ? `\n<code>${esc(tokenAddrFull)}</code>` : '—'}`;
-  '',                
+
   let priceLine = `📈 Price: —`;
   let mcapLine  = `💰 Market Cap: —`;
   let liqLine   = `💧 Liquidity: —`;
@@ -976,13 +976,14 @@ async function renderSellMenu(ctx: any) {
     tokenLine = `<b>Token:</b>\n<code>${esc(tokenAddrFull)}</code>${metaSymbol ? ` (${esc(metaSymbol)})` : ''}`;
   }
 
-  // Compose — Wallet, blank line, Token, then metrics
+  // Compose — Wallet, blank line, Token, blank line, then metrics
   const text = [
     header,
     '',
     walletLine,
     '',
     tokenLine,
+    '',               // ← extra blank line between TOKEN and PRICE (per your request)
     priceLine,
     mcapLine,
     liqLine,
@@ -1576,7 +1577,7 @@ bot.on('text', async (ctx, next) => {
 
       draft.delete(ctx.from.id);
       pending.delete(ctx.from.id);
-      await ctx.reply(`Limit ${d.side} #${id} created: ${d.trigger} @ ${NF.format(val)} ${d.side === 'BUY' ? `for ${fmtDec(ethers.formatEther((d.amountPlsWei ?? 0n))) } PLS` : `${d.sellPct}%`}`);
+      await ctx.reply(`Limit ${d.side} #${id} created: ${d.trigger} @ ${NF.format(val)} ${d.side === 'BUY' ? `for ${fmtDec(ethers.formatEther((d.amountPlsWei ?? 0n)))} PLS` : `${d.sellPct}%`}`);
       if (d.side === 'BUY') return renderBuyMenu(ctx);
       return renderSellMenu(ctx);
     }
