@@ -907,7 +907,7 @@ async function renderSellMenu(ctx: any) {
   // Full addresses + line break between Wallet and Token
   let walletLine = `<b>Wallet:</b> ${w ? `\n<code>${esc(w.address)}</code>` : '—'}`;
   let tokenLine  = `<b>Token:</b> ${tokenAddrFull ? `\n<code>${esc(tokenAddrFull)}</code>` : '—'}`;
-
+  '',                
   let priceLine = `📈 Price: —`;
   let mcapLine  = `💰 Market Cap: —`;
   let liqLine   = `💧 Liquidity: —`;
