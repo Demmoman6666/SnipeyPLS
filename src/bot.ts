@@ -610,10 +610,11 @@ async function renderWalletsList(ctx: any) {
     balances.some(b => !b.ok) ? '\n⚠️ Some balances didn’t load from the RPC. Use /rpc_check.' : ''
   ].filter(Boolean).join('\n');
 
-  // 🔁 Show per-user index (i+1) instead of the global DB id
+  // ⬇️ Added a 3rd button per row: 📋 Copy (sends a copyable code block)
   const kb = rows.map((w, i) => [
-    Markup.button.callback(`${i + 1}. ${short(w.address)}`, `wallet_manage:${w.id}`),
+    Markup.button.callback(`${w.id}. ${short(w.address)}`, `wallet_manage:${w.id}`),
     Markup.button.callback(`${fmtPls(balances[i].value)} PLS`, 'noop'),
+    copyAddrBtn(w.address)
   ]);
   kb.push([Markup.button.callback('➕ Generate', 'wallet_generate'), Markup.button.callback('📥 Add (Import)', 'wallet_add')]);
   kb.push([Markup.button.callback('⬅️ Back', 'main_back')]);
