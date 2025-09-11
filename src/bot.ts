@@ -393,20 +393,30 @@ async function upsertPinnedPosition(ctx: any) {
 
 /* ---------- utilities ---------- */
 const BAL_TIMEOUT_MS = 8000;
+
 function withTimeout<T>(p: Promise<T>, ms = BAL_TIMEOUT_MS): Promise<T> {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error('timeout')), ms);
-    p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+    p.then(
+      v => { clearTimeout(t); resolve(v); },
+      e => { clearTimeout(t); reject(e); }
+    );
   });
 }
+
 async function getBalanceFast(address: string): Promise<{ value: bigint; ok: boolean }> {
-  try { const v = await withTimeout(provider.getBalance(address)); return { value: v, ok: true }; }
-  catch { return { value: 0n, ok: false }; }
+  try {
+    const v = await withTimeout(provider.getBalance(address));
+    return { value: v, ok: true };
+  } catch {
+    return { value: 0n, ok: false };
+  }
 }
 
-async function computeGas(telegramId: number, extraPct = 0): Promise<{
-  maxPriorityFeePerGas: bigint; maxFeePerGas: bigint; gasLimit: bigint;
-}> {
+async function computeGas(
+  telegramId: number,
+  extraPct = 0
+): Promise<{ maxPriorityFeePerGas: bigint; maxFeePerGas: bigint; gasLimit: bigint }> {
   const u = getUserSettings(telegramId);
   const fee = await provider.getFeeData();
   const baseMax = Number(ethers.formatUnits((fee.maxFeePerGas ?? fee.gasPrice ?? 0n), 'gwei'));
@@ -423,6 +433,13 @@ async function computeGas(telegramId: number, extraPct = 0): Promise<{
   };
 }
 
+/* ➕ Per-user wallet numbering helper (shows 1,2,3… for each user's list) */
+function displayNumberForWallet(uid: number, walletId: number): number {
+  const rows = listWallets(uid);
+  const idx = rows.findIndex(w => w.id === walletId);
+  return idx >= 0 ? idx + 1 : walletId; // fallback to DB id if not found
+}
+
 /* warm token meta + best route quote */
 function warmTokenAsync(userId: number, address: string) {
   tokenMeta(address).catch(() => {});
@@ -432,8 +449,16 @@ function warmTokenAsync(userId: number, address: string) {
 
 /* in-memory selections */
 const selectedWallets = new Map<number, Set<number>>();
-function getSelSet(uid: number) { let s = selectedWallets.get(uid); if (!s) { s = new Set<number>(); selectedWallets.set(uid, s); } return s; }
-function chunk<T>(arr: T[], size = 6): T[][] { const out: T[][] = []; for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size)); return out; }
+function getSelSet(uid: number) {
+  let s = selectedWallets.get(uid);
+  if (!s) { s = new Set<number>(); selectedWallets.set(uid, s); }
+  return s;
+}
+function chunk<T>(arr: T[], size = 6): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
 
 /* --- parsing helpers --- */
 function parseNumHuman(s: string): number | null {
@@ -571,8 +596,9 @@ async function renderWalletsList(ctx: any) {
     balances.some(b => !b.ok) ? '\n⚠️ Some balances didn’t load from the RPC. Use /rpc_check.' : ''
   ].filter(Boolean).join('\n');
 
+  // 🔁 Show per-user index (i+1) instead of the global DB id
   const kb = rows.map((w, i) => [
-    Markup.button.callback(`${w.id}. ${short(w.address)}`, `wallet_manage:${w.id}`),
+    Markup.button.callback(`${i + 1}. ${short(w.address)}`, `wallet_manage:${w.id}`),
     Markup.button.callback(`${fmtPls(balances[i].value)} PLS`, 'noop'),
   ]);
   kb.push([Markup.button.callback('➕ Generate', 'wallet_generate'), Markup.button.callback('📥 Add (Import)', 'wallet_add')]);
@@ -585,9 +611,10 @@ async function renderWalletManage(ctx: any, walletId: number) {
   const w = getWalletById(ctx.from.id, walletId);
   if (!w) return showMenu(ctx, 'Wallet not found.');
   const { value: bal, ok } = await getBalanceFast(w.address);
+  const n = displayNumberForWallet(ctx.from.id, walletId);
+
   const lines = [
-    'Wallet', '',
-    `ID: ${walletId}`,
+    `Wallet #${n}`, '',
     `Address: ${w.address}`,
     `Balance: ${fmtPls(bal)} PLS${ok ? '' : '  (RPC issue)'}`,
   ].join('\n');
@@ -651,16 +678,32 @@ bot.action(/^wallet_withdraw:(\d+)$/, async (ctx: any) => {
 bot.action(/^wallet_remove:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const id = Number(ctx.match[1]);
-  return showMenu(ctx, `Remove wallet ID ${id}? This does NOT revoke keys on-chain.`,
+  return showMenu(
+    ctx,
+    `Remove wallet ID ${id}? This does NOT revoke keys on-chain.`,
     Markup.inlineKeyboard([
       [Markup.button.callback('❌ Confirm Remove', `wallet_remove_confirm:${id}`)],
       [Markup.button.callback('⬅️ Back', `wallet_manage:${id}`)],
-    ]));
+    ])
+  );
 });
+
 bot.action(/^wallet_remove_confirm:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
-  removeWallet(ctx.from.id, Number(ctx.match[1]));
-  await ctx.reply('Wallet removed.');
+  const id = Number(ctx.match[1]);
+
+  try {
+    removeWallet(ctx.from.id, id);
+
+    // also unselect this wallet if it was selected in the multi-buy UI
+    const sel = selectedWallets.get(ctx.from.id);
+    if (sel) sel.delete(id);
+
+    await ctx.reply('Wallet removed.');
+  } catch (e: any) {
+    await ctx.reply('Failed to remove wallet: ' + (e?.message ?? 'unknown error'));
+  }
+
   return renderWalletsList(ctx);
 });
 bot.action(/^wallet_refresh:(\d+)$/, async (ctx: any) => { await ctx.answerCbQuery(); return renderWalletManage(ctx, Number(ctx.match[1])); });
