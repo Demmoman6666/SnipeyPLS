@@ -1132,12 +1132,31 @@ bot.action(/^limit_cancel:(\d+)$/, async (ctx: any) => {
   return showMenu(ctx, changed ? `Limit #${id} cancelled.` : `Couldn’t cancel #${id}.`, mainMenu());
 });
 
+/* ===== Sell menu wallet selection (state + handlers) ===== */
+const sellWalletSel = new Map<number, number>(); // uid -> walletId
+
+bot.action(/^sell_wallet_select:(\d+)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const id = Number(ctx.match[1]);
+  sellWalletSel.set(ctx.from.id, id);
+  return renderSellMenu(ctx);
+});
+
+bot.action('sell_wallet_clear', async (ctx: any) => {
+  await ctx.answerCbQuery();
+  sellWalletSel.delete(ctx.from.id);
+  return renderSellMenu(ctx);
+});
+
 /* ---------- SELL MENU (HTML + metrics) ---------- */
 async function renderSellMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
-  const w = getActiveWallet(ctx.from.id);
-  const pct = u?.sell_pct ?? 100;
 
+  // ✅ Use selected wallet (if any), otherwise active wallet
+  const selectedId = sellWalletSel.get(ctx.from.id);
+  const w = selectedId ? getWalletById(ctx.from.id, selectedId) : getActiveWallet(ctx.from.id);
+
+  const pct = u?.sell_pct ?? 100;
   const tokenAddrFull: string | undefined = u?.token_address || undefined;
 
   const header = '🟥 <b>SELL MENU</b>';
@@ -1233,7 +1252,36 @@ async function renderSellMenu(ctx: any) {
     pnlLine,
   ].join('\n');
 
-  await showMenu(ctx, text, { parse_mode: 'HTML', ...sellMenu() });
+  // ✅ Wallet selector UI (rows of W1, W2… with check on current)
+  const all = listWallets(ctx.from.id);
+  const activeId = getActiveWallet(ctx.from.id)?.id;
+  const currentId = selectedId ?? activeId;
+  const walletButtons = chunk(
+    all.map((row, i) =>
+      Markup.button.callback(`${currentId === row.id ? '✅ ' : ''}W${i + 1}`, `sell_wallet_select:${row.id}`)
+    ),
+    6
+  );
+
+  // Build base keyboard and inject our extras
+  const base = sellMenu() as any;
+  const extra: any = { parse_mode: 'HTML', ...(base || {}) };
+  extra.reply_markup = extra.reply_markup || {};
+  const existing = (extra.reply_markup.inline_keyboard || []) as any[];
+
+  // Optional: copy/explorer for the currently previewed wallet
+  const topRow = w
+    ? [[copyAddrBtn(w.address), Markup.button.url('🔍 Explorer', addrExplorer(w.address))]]
+    : [];
+
+  extra.reply_markup.inline_keyboard = [
+    ...topRow,
+    ...walletButtons,
+    ...(all.length > 1 ? [[Markup.button.callback('🧭 Use Active Wallet', 'sell_wallet_clear')]] : []),
+    ...existing,
+  ];
+
+  await showMenu(ctx, text, extra);
 }
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSellMenu(ctx); });
@@ -1246,7 +1294,13 @@ bot.action('sell_pct_100', async (ctx) => { await ctx.answerCbQuery(); setSellPc
 bot.action('sell_approve', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
-  const w = getActiveWallet(ctx.from.id) || listWallets(ctx.from.id)[0];
+
+  // ✅ Use selected wallet if present, else active or first wallet
+  const selectedId = sellWalletSel.get(ctx.from.id);
+  const w = selectedId
+    ? getWalletById(ctx.from.id, selectedId)
+    : (getActiveWallet(ctx.from.id) || listWallets(ctx.from.id)[0]);
+
   if (!w || !u?.token_address) return showMenu(ctx, 'Need a wallet and token set first.', sellMenu());
   if (u.token_address.toLowerCase() === WPLS)
     return showMenu(ctx, 'WPLS doesn’t require approval.', sellMenu());
@@ -1272,7 +1326,11 @@ bot.action('sell_set_token', async (ctx) => {
 bot.action('sell_exec', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
-  const w = getActiveWallet(ctx.from.id);
+
+  // ✅ Use selected wallet if present, else active
+  const selectedId = sellWalletSel.get(ctx.from.id);
+  const w = selectedId ? getWalletById(ctx.from.id, selectedId) : getActiveWallet(ctx.from.id);
+
   if (!w || !u?.token_address) return showMenu(ctx, 'Need active wallet and token set.', sellMenu());
 
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
@@ -1362,7 +1420,6 @@ bot.command('rpc_check', async (ctx) => {
   ].join('\n');
   await replyHTML(ctx, lines);
 });
-
 /* ---------- Explorer totalSupply fallbacks ---------- */
 function explorerApiBase(): string | null {
   const b = (process.env.EXPLORER_API_BASE || '').trim();
