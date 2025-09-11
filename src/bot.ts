@@ -38,6 +38,20 @@ const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 const WPLS = (process.env.WPLS_ADDRESS || '0xA1077a294dDE1B09bB078844df40758a5D0f9a27').toLowerCase(); // Pulse WPLS
 
+// 🔗 Address helpers + tap-to-copy
+const addrExplorer = (addr: string) => `https://otter.pulsechain.com/address/${addr}`;
+const copyAddrBtn = (addr: string, label = '📋 Copy') =>
+  Markup.button.callback(label, `copy:${addr.toLowerCase()}`);
+const explorerAddrBtn = (addr: string, label = '🔍 Explorer') =>
+  Markup.button.url(label, addrExplorer(addr));
+
+// Sends a copyable code block when user taps 📋 Copy
+bot.action(/^copy:(0x[a-fA-F0-9]{40})$/, async (ctx: any) => {
+  await ctx.answerCbQuery('Address sent below');
+  const addr = ctx.match[1];
+  return ctx.reply(`Address:\n\`${addr}\``, { parse_mode: 'Markdown', disable_web_page_preview: true });
+});
+
 /* ---------- Referral: config + helpers ---------- */
 const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@/, '');
 const REF_PREFIX = 'ref_';
