@@ -626,10 +626,9 @@ async function renderWalletManage(ctx: any, walletId: number) {
   const w = getWalletById(ctx.from.id, walletId);
   if (!w) return showMenu(ctx, 'Wallet not found.');
   const { value: bal, ok } = await getBalanceFast(w.address);
-  const n = displayNumberForWallet(ctx.from.id, walletId);
-
   const lines = [
-    `Wallet #${n}`, '',
+    'Wallet', '',
+    `ID: ${walletId}`,
     `Address: ${w.address}`,
     `Balance: ${fmtPls(bal)} PLS${ok ? '' : '  (RPC issue)'}`,
   ].join('\n');
@@ -637,6 +636,8 @@ async function renderWalletManage(ctx: any, walletId: number) {
   const kb = Markup.inlineKeyboard([
     [Markup.button.callback('🔑 Show Private Key', `wallet_pk:${walletId}`), Markup.button.callback('🔄 Refresh', `wallet_refresh:${walletId}`)],
     [Markup.button.callback('🧹 Clear Pending', `wallet_clear:${walletId}`), Markup.button.callback('🏧 Withdraw', `wallet_withdraw:${walletId}`)],
+    // ⬇️ New row: copy + explorer
+    [copyAddrBtn(w.address), Markup.button.url('🔍 Explorer', addrExplorer(w.address))],
     [Markup.button.callback('🗑 Remove', `wallet_remove:${walletId}`), Markup.button.callback('⬅️ Back', 'wallets')],
   ]);
 
