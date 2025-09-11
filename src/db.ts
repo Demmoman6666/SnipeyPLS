@@ -98,7 +98,7 @@ export async function initDb() {
       telegram_id INTEGER PRIMARY KEY,
       payout_address TEXT NOT NULL
     );
-  ");
+  `);
 
   // ---------- Best-effort migrations (covers existing DBs) ----------
   tryExec(`ALTER TABLE users ADD COLUMN gwei_boost_gwei REAL DEFAULT 0.0;`);
@@ -310,11 +310,11 @@ export function setReferrerOnce(telegramId: number, referrerId: number): boolean
   return res.changes > 0;
 }
 
-// (Optional) Helpers you may want later:
 export function getReferrerOf(telegramId: number): number | null {
   const row = getDb().prepare(`SELECT referrer_id FROM referrals WHERE telegram_id = ?`).get(telegramId) as any;
   return row?.referrer_id ?? null;
 }
+
 export function countReferrals(referrerId: number): number {
   const row = getDb().prepare(`SELECT COUNT(*) AS c FROM referrals WHERE referrer_id = ?`).get(referrerId) as any;
   return Number(row?.c ?? 0);
