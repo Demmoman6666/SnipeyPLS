@@ -1,3 +1,4 @@
+// src/db.ts
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -83,6 +84,14 @@ export async function initDb() {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    -- Referrals (each user can have at most one referrer)
+    CREATE TABLE IF NOT EXISTS referrals (
+      telegram_id INTEGER PRIMARY KEY,
+      referrer_id INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id);
   `);
 
   // ---------- Best-effort migrations (covers existing DBs) ----------
@@ -273,4 +282,34 @@ export function markLimitError(id: number, err: string) {
     SET status = 'ERROR', last_error = ?, updated_at = strftime('%s','now')
     WHERE id = ? AND status = 'OPEN'
   `).run(err.slice(0, 500), id).changes;
+}
+
+/* ==================== referrals ===================== */
+
+/**
+ * One-time assignment of a referrer for a user.
+ * - Ignores if telegramId == referrerId (no self-referrals)
+ * - Ignores if the user already has a referrer (PRIMARY KEY constraint + OR IGNORE)
+ * Returns true if a row was inserted, false otherwise.
+ */
+export function setReferrerOnce(telegramId: number, referrerId: number): boolean {
+  if (!Number.isFinite(telegramId) || !Number.isFinite(referrerId)) return false;
+  if (telegramId === referrerId) return false;
+
+  const stmt = getDb().prepare(`
+    INSERT OR IGNORE INTO referrals (telegram_id, referrer_id, created_at)
+    VALUES (?, ?, strftime('%s','now'))
+  `);
+  const res = stmt.run(telegramId, referrerId);
+  return res.changes > 0;
+}
+
+// (Optional) Helpers you may want later:
+export function getReferrerOf(telegramId: number): number | null {
+  const row = getDb().prepare(`SELECT referrer_id FROM referrals WHERE telegram_id = ?`).get(telegramId) as any;
+  return row?.referrer_id ?? null;
+}
+export function countReferrals(referrerId: number): number {
+  const row = getDb().prepare(`SELECT COUNT(*) AS c FROM referrals WHERE referrer_id = ?`).get(referrerId) as any;
+  return Number(row?.c ?? 0);
 }
