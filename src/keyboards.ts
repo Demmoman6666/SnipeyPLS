@@ -10,6 +10,8 @@ export function mainMenu() {
     // Row 2
     [Markup.button.callback('👛 Wallets', 'wallets'),
      Markup.button.callback('⚙️ Settings', 'settings')],
+    // Row 3 (NEW)
+    [Markup.button.callback('🤝 Referrals', 'referrals')],
   ]);
 }
 
@@ -99,4 +101,13 @@ export function limitTriggerMenu(side: 'BUY' | 'SELL') {
   }
   rows.push([Markup.button.callback('⬅️ Back', side === 'BUY' ? 'menu_buy' : 'menu_sell')]);
   return Markup.inlineKeyboard(rows);
+}
+
+/** Referrals menu (NEW) */
+export function referralMenu(link?: string) {
+  return Markup.inlineKeyboard([
+    [Markup.button.url('🔗 Your Referral Link', link || 'https://t.me/')],
+    [Markup.button.callback('📊 Refresh', 'referrals_refresh'),
+     Markup.button.callback('⬅️ Back', 'main_back')],
+  ]);
 }
