@@ -18,6 +18,8 @@ import {
   recordTrade, getAvgEntry, addLimitOrder, listLimitOrders,
   getOpenLimitOrders, cancelLimitOrder, markLimitFilled, markLimitError,
   setReferrerOnce,
+  // ✅ NEW imports for referral payout storage
+  getReferralPayout, setReferralPayout,
 } from './db.js';
 
 const cfg = getConfig();
@@ -287,6 +289,32 @@ async function renderHome(ctx: any) {
   await showMenu(ctx, homeScreenText(), { parse_mode: 'HTML', disable_web_page_preview: true, ...mainMenu() });
 }
 
+/* ---------- REFERRALS MENU ---------- */
+async function renderReferrals(ctx: any) {
+  const link = buildRefLink(ctx.from.id);
+  const payout = (await getReferralPayout(ctx.from.id)) || '— not set —';
+
+  const lines = [
+    '🤝 <b>REFERRALS</b>',
+    '',
+    '<b>Your invite link</b>',
+    link ? `<code>${esc(link)}</code>` : '— set BOT_USERNAME in env to enable links —',
+    '',
+    '<b>Rewards payout wallet</b>',
+    `<code>${esc(payout)}</code>`,
+    '',
+    'Rewards are sent to your payout wallet. You can change it any time.',
+  ].join('\n');
+
+  const kb = Markup.inlineKeyboard([
+    ...(link ? [[Markup.button.url('🔗 Open Link', link)]] : []),
+    [Markup.button.callback('🏦 Set Payout Wallet', 'ref_set_payout')],
+    [Markup.button.callback('⬅️ Back', 'main_back')],
+  ]);
+
+  await showMenu(ctx, lines, { parse_mode: 'HTML', disable_web_page_preview: true, ...kb } as any);
+}
+
 /* ---------- message lifecycle ---------- */
 const lastMenuMsg = new Map<number, number>();
 const pinnedPosMsg = new Map<number, number>();
@@ -422,7 +450,9 @@ function parseNumHuman(s: string): number | null {
 type Pending =
   | { type: 'set_amount' } | { type: 'set_token' } | { type: 'set_token_sell' } | { type: 'gen_name' } | { type: 'import_wallet' }
   | { type: 'withdraw'; walletId: number } | { type: 'set_gl' } | { type: 'set_gb' } | { type: 'set_defpct' }
-  | { type: 'auto_amt' } | { type: 'lb_amt' } | { type: 'ls_pct' } | { type: 'limit_value' };
+  | { type: 'auto_amt' } | { type: 'lb_amt' } | { type: 'ls_pct' } | { type: 'limit_value' }
+  // ✅ NEW pending type for referral payout wallet input
+  | { type: 'ref_payout' };
 const pending = new Map<number, Pending>();
 
 /* ---------- /start (capture referrer) ---------- */
@@ -437,19 +467,8 @@ bot.start(async (ctx) => {
     try { await setReferrerOnce(ctx.from.id, refId); } catch { /* ignore */ }
   }
 
+  // Just render home — no auto referral message here anymore
   await renderHome(ctx);
-
-  // Show user their personal referral link
-  try {
-    const myLink = buildRefLink(ctx.from.id);
-    if (myLink) {
-      const kb = Markup.inlineKeyboard([[Markup.button.url('🔗 Your Referral Link', myLink)]]);
-      await ctx.reply(
-        `🤝 Referral program\nShare your personal invite link:\n${myLink}`,
-        kb as any
-      );
-    }
-  } catch { /* ignore */ }
 });
 
 /* ---------- Handy: /ref shows the personal link ---------- */
@@ -458,6 +477,31 @@ bot.command('ref', async (ctx) => {
   if (!link) return ctx.reply('Set BOT_USERNAME in env to enable referral links.');
   const kb = Markup.inlineKeyboard([[Markup.button.url('🔗 Open Link', link)]]);
   return ctx.reply(`Your personal referral link:\n${link}`, kb as any);
+});
+
+/* ---------- REFERRALS: actions ---------- */
+// Open the referrals menu from the main menu button (callback data must be 'referrals')
+bot.action('referrals', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.delete(ctx.from.id);
+  return renderReferrals(ctx);
+});
+
+// Start "set payout wallet" flow from the referrals menu
+bot.action('ref_set_payout', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.set(ctx.from.id, { type: 'ref_payout' });
+  return showMenu(
+    ctx,
+    'Send the <b>PLS wallet address</b> to receive referral rewards (format: <code>0x...</code>).',
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'referrals')]]) }
+  );
+});
+
+// Optional: refresh button inside referrals menu (prevents callback timeout)
+bot.action('ref_refresh', async (ctx) => {
+  await ctx.answerCbQuery();
+  return renderReferrals(ctx);
 });
 
 /* ---------- SETTINGS ---------- */
@@ -1644,136 +1688,153 @@ bot.on('text', async (ctx, next) => {
       pending.delete(ctx.from.id); return renderSettings(ctx);
     }
 
-    // Limit order building
-    if (p.type === 'lb_amt') {
-      const v = Number(msg);
-      if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number of PLS (e.g., 0.5).');
-      const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Buy.'); }
-      d.amountPlsWei = ethers.parseEther(String(v));
-      draft.set(ctx.from.id, d);
-      pending.delete(ctx.from.id);
-      return showMenu(ctx, 'Choose a trigger:', limitTriggerMenu('BUY'));
-    }
-
-    if (p.type === 'ls_pct') {
-      const v = Number(msg);
-      if (!Number.isFinite(v) || v <= 0 || v > 100) return ctx.reply('Send a percent between 1 and 100.');
-      const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Sell.'); }
-      d.sellPct = v; draft.set(ctx.from.id, d);
-      pending.delete(ctx.from.id);
-      return showMenu(ctx, 'Choose a trigger:', limitTriggerMenu('SELL'));
-    }
-
-    if (p.type === 'limit_value') {
-      const d = draft.get(ctx.from.id);
-      if (!d || !d.trigger) { pending.delete(ctx.from.id); return ctx.reply('Start a Limit order first.'); }
-      const val = parseNumHuman(msg);
-      if (val == null || !(val > 0)) return ctx.reply('Send a positive number (supports `k`/`m`).');
-
-      const id = addLimitOrder({
-        telegramId: ctx.from.id,
-        walletId: d.walletId,
-        token: d.token,
-        side: d.side,
-        amountPlsWei: d.side === 'BUY' ? (d.amountPlsWei ?? ethers.parseEther('0')) : undefined,
-        sellPct: d.side === 'SELL' ? (d.sellPct ?? 100) : undefined,
-        trigger: d.trigger!,
-        value: val
-      });
-
-      draft.delete(ctx.from.id);
-      pending.delete(ctx.from.id);
-      await ctx.reply(`Limit ${d.side} #${id} created: ${d.trigger} @ ${NF.format(val)} ${d.side === 'BUY' ? `for ${fmtDec(ethers.formatEther((d.amountPlsWei ?? 0n)))} PLS` : `${d.sellPct}%`}`);
-      if (d.side === 'BUY') return renderBuyMenu(ctx);
-      return renderSellMenu(ctx);
-    }
-
-    return;
-  }
-
-  // Auto-detect token address when no prompt is active (powers auto-buy)
-  const text = String(ctx.message.text).trim();
-  if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
-    setToken(ctx.from.id, text);
-    warmTokenAsync(ctx.from.id, text);
-
-    const u = getUserSettings(ctx.from.id);
-    if (u?.auto_buy_enabled) {
-      const w = getActiveWallet(ctx.from.id);
-      if (!w) { await ctx.reply('Select or create a wallet first.'); return renderBuyMenu(ctx); }
-
-      const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
-      const amountIn = ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01));
-
-      const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
-
-      try {
-        const gas = await computeGas(ctx.from.id);
-        const r = await buyAutoRoute(getPrivateKey(w), text, amountIn, 0n, gas);
-        const hash = (r as any)?.hash;
-
-        let preOut: bigint = 0n;
-        let tokDec = 18;
-        let tokSym = 'TOKEN';
-
-        if (hash) {
-          const link = otter(hash);
-
-          try {
-            await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
-          } catch {
-            await ctx.reply(`transaction sent ${link}`);
-          }
-
-          try {
-            const meta = await tokenMeta(text);
-            tokDec = meta.decimals ?? 18;
-            tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-            const preQuote = await bestQuoteBuy(amountIn, text);
-            if (preQuote?.amountOut) {
-              preOut = preQuote.amountOut;
-              recordTrade(ctx.from.id, w.address, text, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-            }
-          } catch {}
-
-          try {
-            if (text.toLowerCase() !== WPLS) {
-              approveAllRouters(getPrivateKey(w), text, gas).catch(() => {});
-            }
-          } catch {}
-
-          provider.waitForTransaction(hash).then(async () => {
-            try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
-            await postTradeSuccess(ctx, {
-              action: 'BUY',
-              spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-              receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-              tokenAddress: text,
-              explorerUrl: link
-            });
-            await sendRefNudgeTo(ctx.from.id);
-          }).catch(() => {/* ignore */});
-        } else {
-          try {
-            await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
-          } catch {}
-        }
-      } catch (e: any) {
-        try {
-          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Auto-buy failed: ${e?.message ?? String(e)}`);
-        } catch {
-          await ctx.reply(`❌ Auto-buy failed: ${e?.message ?? String(e)}`);
-        }
+    // ✅ INSERTED: referral payout wallet handler
+    if (p.type === 'ref_payout') {
+      const addr = msg.trim();
+      if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) {
+        return ctx.reply('Please send a valid wallet address (0x…40 hex).');
       }
-
-      await upsertPinnedPosition(ctx);
-      return renderBuyMenu(ctx);
-    } else {
-      return renderBuyMenu(ctx);
+      try {
+        await setReferralPayout(ctx.from.id, addr);
+        pending.delete(ctx.from.id);
+        await ctx.reply('Referral rewards payout wallet set ✅');
+        return renderReferrals(ctx);
+      } catch (e: any) {
+        pending.delete(ctx.from.id);
+        return ctx.reply('Failed to save payout wallet: ' + (e?.message ?? 'unknown error'));
+      }
     }
-  }
 
-  return next();
+   // Limit order building
+if (p.type === 'lb_amt') {
+  const v = Number(msg);
+  if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number of PLS (e.g., 0.5).');
+  const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Buy.'); }
+  d.amountPlsWei = ethers.parseEther(String(v));
+  draft.set(ctx.from.id, d);
+  pending.delete(ctx.from.id);
+  return showMenu(ctx, 'Choose a trigger:', limitTriggerMenu('BUY'));
+}
+
+if (p.type === 'ls_pct') {
+  const v = Number(msg);
+  if (!Number.isFinite(v) || v <= 0 || v > 100) return ctx.reply('Send a percent between 1 and 100.');
+  const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Sell.'); }
+  d.sellPct = v; draft.set(ctx.from.id, d);
+  pending.delete(ctx.from.id);
+  return showMenu(ctx, 'Choose a trigger:', limitTriggerMenu('SELL'));
+}
+
+if (p.type === 'limit_value') {
+  const d = draft.get(ctx.from.id);
+  if (!d || !d.trigger) { pending.delete(ctx.from.id); return ctx.reply('Start a Limit order first.'); }
+  const val = parseNumHuman(msg);
+  if (val == null || !(val > 0)) return ctx.reply('Send a positive number (supports `k`/`m`).');
+
+  const id = addLimitOrder({
+    telegramId: ctx.from.id,
+    walletId: d.walletId,
+    token: d.token,
+    side: d.side,
+    amountPlsWei: d.side === 'BUY' ? (d.amountPlsWei ?? ethers.parseEther('0')) : undefined,
+    sellPct: d.side === 'SELL' ? (d.sellPct ?? 100) : undefined,
+    trigger: d.trigger!,
+    value: val
+  });
+
+  draft.delete(ctx.from.id);
+  pending.delete(ctx.from.id);
+  await ctx.reply(`Limit ${d.side} #${id} created: ${d.trigger} @ ${NF.format(val)} ${d.side === 'BUY' ? `for ${fmtDec(ethers.formatEther((d.amountPlsWei ?? 0n)))} PLS` : `${d.sellPct}%`}`);
+  if (d.side === 'BUY') return renderBuyMenu(ctx);
+  return renderSellMenu(ctx);
+}
+
+return;
+}
+
+// Auto-detect token address when no prompt is active (powers auto-buy)
+const text = String(ctx.message.text).trim();
+if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
+  setToken(ctx.from.id, text);
+  warmTokenAsync(ctx.from.id, text);
+
+  const u = getUserSettings(ctx.from.id);
+  if (u?.auto_buy_enabled) {
+    const w = getActiveWallet(ctx.from.id);
+    if (!w) { await ctx.reply('Select or create a wallet first.'); return renderBuyMenu(ctx); }
+
+    const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
+    const amountIn = ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01));
+
+    const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
+
+    try {
+      const gas = await computeGas(ctx.from.id);
+      const r = await buyAutoRoute(getPrivateKey(w), text, amountIn, 0n, gas);
+      const hash = (r as any)?.hash;
+
+      let preOut: bigint = 0n;
+      let tokDec = 18;
+      let tokSym = 'TOKEN';
+
+      if (hash) {
+        const link = otter(hash);
+
+        try {
+          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
+        } catch {
+          await ctx.reply(`transaction sent ${link}`);
+        }
+
+        try {
+          const meta = await tokenMeta(text);
+          tokDec = meta.decimals ?? 18;
+          tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+          const preQuote = await bestQuoteBuy(amountIn, text);
+          if (preQuote?.amountOut) {
+            preOut = preQuote.amountOut;
+            recordTrade(ctx.from.id, w.address, text, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+          }
+        } catch {}
+
+        try {
+          if (text.toLowerCase() !== WPLS) {
+            approveAllRouters(getPrivateKey(w), text, gas).catch(() => {});
+          }
+        } catch {}
+
+        provider.waitForTransaction(hash).then(async () => {
+          try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
+          await postTradeSuccess(ctx, {
+            action: 'BUY',
+            spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
+            receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
+            tokenAddress: text,
+            explorerUrl: link
+          });
+          await sendRefNudgeTo(ctx.from.id);
+        }).catch(() => {/* ignore */});
+      } else {
+        try {
+          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
+        } catch {}
+      }
+    } catch (e: any) {
+      try {
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Auto-buy failed: ${e?.message ?? String(e)}`);
+      } catch {
+        await ctx.reply(`❌ Auto-buy failed: ${e?.message ?? String(e)}`);
+      }
+    }
+
+    await upsertPinnedPosition(ctx);
+    return renderBuyMenu(ctx);
+  } else {
+    return renderBuyMenu(ctx);
+  }
+}
+
+return next();
 });
 
 /* ---------- shortcuts ---------- */
