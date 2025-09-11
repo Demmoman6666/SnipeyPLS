@@ -27,7 +27,10 @@ export const bot = new Telegraf(cfg.BOT_TOKEN, { handlerTimeout: 60_000 });
 const NF = new Intl.NumberFormat('en-GB', { maximumFractionDigits: 6 });
 const short = (a: string) => (a ? a.slice(0, 6) + '…' + a.slice(-4) : '—');
 const fmtInt = (s: string) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-const fmtDec = (s: string) => { const [i, d] = s.split('.'); return d ? `${fmtInt(i)}.${d}` : fmtInt(i); };
+const fmtDec = (s: string) => {
+  const [i, d] = s.split('.');
+  return d ? `${fmtInt(i)}.${d}` : fmtInt(i);
+};
 const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
@@ -63,7 +66,7 @@ async function sendRefNudgeTo(telegramId: number) {
 }
 
 /* ---- HTML escape + reply helper ---- */
-const esc = (s: string) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const esc = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 function replyHTML(ctx: any, html: string, extra: any = {}) {
   return ctx.reply(html, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
 }
@@ -72,9 +75,9 @@ function replyHTML(ctx: any, html: string, extra: any = {}) {
 function fmtUsdCompact(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return '—';
   const v = Math.abs(n);
-  if (v >= 1e9)  return '$' + (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
-  if (v >= 1e6)  return '$' + (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
-  if (v >= 1e3)  return '$' + (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+  if (v >= 1e9) return '$' + (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+  if (v >= 1e6) return '$' + (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (v >= 1e3) return '$' + (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
   return '$' + n.toLocaleString('en-GB', { maximumFractionDigits: 2 });
 }
 function fmtUsdPrice(n: number | null | undefined): string {
@@ -443,7 +446,7 @@ bot.start(async (ctx) => {
       const kb = Markup.inlineKeyboard([[Markup.button.url('🔗 Your Referral Link', myLink)]]);
       await ctx.reply(
         `🤝 Referral program\nShare your personal invite link:\n${myLink}`,
-        kb
+        kb as any
       );
     }
   } catch { /* ignore */ }
@@ -454,7 +457,7 @@ bot.command('ref', async (ctx) => {
   const link = buildRefLink(ctx.from.id);
   if (!link) return ctx.reply('Set BOT_USERNAME in env to enable referral links.');
   const kb = Markup.inlineKeyboard([[Markup.button.url('🔗 Open Link', link)]]);
-  return ctx.reply(`Your personal referral link:\n${link}`, kb);
+  return ctx.reply(`Your personal referral link:\n${link}`, kb as any);
 });
 
 /* ---------- SETTINGS ---------- */
@@ -476,19 +479,19 @@ bot.action('settings', async (ctx) => { await ctx.answerCbQuery(); pending.delet
 bot.action('set_gl', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_gl' });
-  return showMenu(ctx, 'Send new *Gas Limit* (e.g., `300000`).', { parse_mode: 'Markdown',
+  return showMenu(ctx, 'Send new *Gas Limit* (e.g., 300000).', { parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
 });
 bot.action('set_gb', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_gb' });
-  return showMenu(ctx, 'Send new *Gwei Booster* in gwei (e.g., `0.2`).', { parse_mode: 'Markdown',
+  return showMenu(ctx, 'Send new *Gwei Booster* in gwei (e.g., 0.2).', { parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
 });
 bot.action('set_defpct', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_defpct' });
-  return showMenu(ctx, 'Send *Default Gas %* over market (e.g., `10`).', { parse_mode: 'Markdown',
+  return showMenu(ctx, 'Send *Default Gas %* over market (e.g., 10).', { parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
 });
 bot.action('auto_toggle', async (ctx) => {
@@ -500,7 +503,7 @@ bot.action('auto_toggle', async (ctx) => {
 bot.action('auto_amt', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'auto_amt' });
-  return showMenu(ctx, 'Send *Auto-buy amount* in PLS (e.g., `0.5`).', { parse_mode: 'Markdown',
+  return showMenu(ctx, 'Send *Auto-buy amount* in PLS (e.g., 0.5).', { parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
 });
 
@@ -564,8 +567,11 @@ bot.action(/^wallet_pk:(\d+)$/, async (ctx: any) => {
   const w = getWalletById(ctx.from.id, id);
   if (!w) return showMenu(ctx, 'Wallet not found.');
   const masked = getPrivateKey(w).replace(/^(.{6}).+(.{4})$/, '$1…$2');
-  return showMenu(ctx, `Private key (masked): ${masked}\nRevealing exposes full control of funds.`,
-    Markup.inlineKeyboard([[Markup.button.callback('⚠️ Reveal', `wallet_pk_reveal:${id}`)], [Markup.button.callback('⬅️ Back', `wallet_manage:${id}`)]]));
+  return showMenu(
+    ctx,
+    `Private key (masked): ${masked}\nRevealing exposes full control of funds.`,
+    Markup.inlineKeyboard([[Markup.button.callback('⚠️ Reveal', `wallet_pk_reveal:${id}`)], [Markup.button.callback('⬅️ Back', `wallet_manage:${id}`)]])
+  );
 });
 bot.action(/^wallet_pk_reveal:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
@@ -595,7 +601,7 @@ bot.action(/^wallet_withdraw:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const id = Number(ctx.match[1]);
   pending.set(ctx.from.id, { type: 'withdraw', walletId: id });
-  return showMenu(ctx, 'Reply with: `address amount_pls` (e.g., `0xabc... 0.5`)',
+  return showMenu(ctx, 'Reply with: address amount_pls (e.g., 0xabc... 0.5)',
     Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', `wallet_manage:${id}`)]]));
 });
 bot.action(/^wallet_remove:(\d+)$/, async (ctx: any) => {
@@ -610,7 +616,7 @@ bot.action(/^wallet_remove:(\d+)$/, async (ctx: any) => {
 bot.action(/^wallet_remove_confirm:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   removeWallet(ctx.from.id, Number(ctx.match[1]));
-  await ctx.reply(`Wallet removed.`);
+  await ctx.reply('Wallet removed.');
   return renderWalletsList(ctx);
 });
 bot.action(/^wallet_refresh:(\d+)$/, async (ctx: any) => { await ctx.answerCbQuery(); return renderWalletManage(ctx, Number(ctx.match[1])); });
@@ -619,13 +625,13 @@ bot.action(/^wallet_refresh:(\d+)$/, async (ctx: any) => { await ctx.answerCbQue
 bot.action('wallet_generate', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'gen_name' });
-  return showMenu(ctx, 'Send a name for the new wallet (e.g., `trader1`).', { parse_mode: 'Markdown',
+  return showMenu(ctx, 'Send a name for the new wallet (e.g., trader1).', { parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]) });
 });
 bot.action('wallet_add', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'import_wallet' });
-  return showMenu(ctx, 'Reply: `name privkey` (e.g., `hot1 0x...`)', { parse_mode: 'Markdown',
+  return showMenu(ctx, 'Reply: name privkey (e.g., hot1 0x...)', { parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]) });
 });
 
@@ -733,7 +739,7 @@ bot.action('buy_refresh', async (ctx) => { await ctx.answerCbQuery(); return ren
 bot.action('buy_set_amount', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_amount' });
-  return showMenu(ctx, 'Send *amount in PLS* (e.g., `0.05`).', { parse_mode: 'Markdown',
+  return showMenu(ctx, 'Send *amount in PLS* (e.g., 0.05).', { parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_buy')]]) });
 });
 bot.action('buy_set_token', async (ctx) => {
@@ -842,7 +848,7 @@ bot.action('buy_exec', async (ctx) => {
         }).catch(() => {/* ignore */});
       } else {
         try {
-          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent (no hash yet)`);
+          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
         } catch {}
       }
     } catch (e: any) {
@@ -913,7 +919,7 @@ bot.action('buy_exec_all', async (ctx) => {
         }).catch(() => {/* ignore */});
       } else {
         try {
-          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent (no hash yet)`);
+          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
         } catch {}
       }
     } catch (e: any) {
