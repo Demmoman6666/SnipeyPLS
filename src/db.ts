@@ -92,7 +92,13 @@ export async function initDb() {
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id);
-  `);
+
+    -- Referral payout destination (1:1 user -> payout wallet)
+    CREATE TABLE IF NOT EXISTS referral_payouts (
+      telegram_id INTEGER PRIMARY KEY,
+      payout_address TEXT NOT NULL
+    );
+  ");
 
   // ---------- Best-effort migrations (covers existing DBs) ----------
   tryExec(`ALTER TABLE users ADD COLUMN gwei_boost_gwei REAL DEFAULT 0.0;`);
@@ -312,4 +318,23 @@ export function getReferrerOf(telegramId: number): number | null {
 export function countReferrals(referrerId: number): number {
   const row = getDb().prepare(`SELECT COUNT(*) AS c FROM referrals WHERE referrer_id = ?`).get(referrerId) as any;
   return Number(row?.c ?? 0);
+}
+
+/* ============== referral payout wallet ============== */
+
+export function getReferralPayout(telegramId: number): string | null {
+  const row = getDb()
+    .prepare(`SELECT payout_address FROM referral_payouts WHERE telegram_id = ?`)
+    .get(telegramId) as any;
+  return row?.payout_address ?? null;
+}
+
+export function setReferralPayout(telegramId: number, addr: string): boolean {
+  const clean = String(addr).toLowerCase();
+  const res = getDb().prepare(`
+    INSERT INTO referral_payouts (telegram_id, payout_address)
+    VALUES (?, ?)
+    ON CONFLICT(telegram_id) DO UPDATE SET payout_address = excluded.payout_address
+  `).run(telegramId, clean);
+  return res.changes > 0;
 }
