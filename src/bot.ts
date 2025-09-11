@@ -601,54 +601,60 @@ bot.action('auto_amt', async (ctx) => {
 async function renderWalletsList(ctx: any) {
   const rows = listWallets(ctx.from.id);
   if (!rows.length) {
-    return showMenu(ctx, 'No wallets yet.',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('➕ Generate', 'wallet_generate'), Markup.button.callback('📥 Add (Import)', 'wallet_add')],
-        [Markup.button.callback('⬅️ Back', 'main_back')],
-      ]));
+    return showMenu(
+      ctx,
+      '<b>No wallets yet.</b>',
+      { parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('➕ Generate', 'wallet_generate'), Markup.button.callback('📥 Add (Import)', 'wallet_add')],
+          [Markup.button.callback('⬅️ Back', 'main_back')],
+        ])
+      }
+    );
   }
-  const balances = await Promise.all(rows.map(w => getBalanceFast(w.address)));
 
+  const balances = await Promise.all(rows.map(w => getBalanceFast(w.address)));
   const lines = [
-    'Your Wallets', '',
-    'Address                              | Balance (PLS)',
-    '-------------------------------------|----------------',
-    ...rows.map((w, i) => `${w.address} | ${fmtPls(balances[i].value)}`),
+    '👛 <b>Your Wallets</b>',
+    '',
+    ...rows.map((w, i) => `W${i + 1} • <code>${w.address}</code>\nBalance: ${fmtPls(balances[i].value)} PLS`),
     balances.some(b => !b.ok) ? '\n⚠️ Some balances didn’t load from the RPC. Use /rpc_check.' : ''
   ].filter(Boolean).join('\n');
 
-  // ⬇️ Added a 3rd button per row: 📋 Copy (sends a copyable code block)
   const kb = rows.map((w, i) => [
-    Markup.button.callback(`${w.id}. ${short(w.address)}`, `wallet_manage:${w.id}`),
-    Markup.button.callback(`${fmtPls(balances[i].value)} PLS`, 'noop'),
-    copyAddrBtn(w.address)
+    Markup.button.callback(`W${i + 1} • Manage`, `wallet_manage:${w.id}`),
+    Markup.button.callback('📋 Copy', `copy:${w.address.toLowerCase()}`),
+    Markup.button.url('🔍 Explorer', addrExplorer(w.address)),
   ]);
+
   kb.push([Markup.button.callback('➕ Generate', 'wallet_generate'), Markup.button.callback('📥 Add (Import)', 'wallet_add')]);
   kb.push([Markup.button.callback('⬅️ Back', 'main_back')]);
 
-  await showMenu(ctx, lines, Markup.inlineKeyboard(kb));
+  await showMenu(ctx, lines, { parse_mode: 'HTML', ...Markup.inlineKeyboard(kb) });
 }
 
 async function renderWalletManage(ctx: any, walletId: number) {
   const w = getWalletById(ctx.from.id, walletId);
   if (!w) return showMenu(ctx, 'Wallet not found.');
   const { value: bal, ok } = await getBalanceFast(w.address);
+
   const lines = [
-    'Wallet', '',
-    `ID: ${walletId}`,
-    `Address: ${w.address}`,
-    `Balance: ${fmtPls(bal)} PLS${ok ? '' : '  (RPC issue)'}`,
+    '👛 <b>Wallet</b>',
+    '',
+    `<b>ID:</b> ${walletId}`,
+    `<b>Address:</b>\n<code>${w.address}</code>`,
+    `<b>Balance:</b> ${fmtPls(bal)} PLS${ok ? '' : '  (RPC issue)'}`,
   ].join('\n');
 
   const kb = Markup.inlineKeyboard([
     [Markup.button.callback('🔑 Show Private Key', `wallet_pk:${walletId}`), Markup.button.callback('🔄 Refresh', `wallet_refresh:${walletId}`)],
     [Markup.button.callback('🧹 Clear Pending', `wallet_clear:${walletId}`), Markup.button.callback('🏧 Withdraw', `wallet_withdraw:${walletId}`)],
-    // ⬇️ New row: copy + explorer
-    [copyAddrBtn(w.address), Markup.button.url('🔍 Explorer', addrExplorer(w.address))],
+    // Copy + Explorer row (reliable copy via callback)
+    [Markup.button.callback('📋 Copy', `copy:${w.address.toLowerCase()}`), Markup.button.url('🔍 Explorer', addrExplorer(w.address))],
     [Markup.button.callback('🗑 Remove', `wallet_remove:${walletId}`), Markup.button.callback('⬅️ Back', 'wallets')],
   ]);
 
-  await showMenu(ctx, lines, kb);
+  await showMenu(ctx, lines, { parse_mode: 'HTML', ...kb });
 }
 
 bot.action('wallets', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderWalletsList(ctx); });
@@ -774,23 +780,23 @@ async function renderBuyMenu(ctx: any) {
   const gl = u?.gas_limit ?? 250000;
   const gb = u?.gwei_boost_gwei ?? 0;
 
-  let tokenLine = 'Token: —';
-  let pairLine = `Pair: ${process.env.WPLS_ADDRESS || '0xA1077a294dDE1B09bB078844df40758a5D0f9a27'} (WPLS)`;
-  let priceLine = '📈 Price: —';
-  let mcapLine  = '💰 Market Cap: —';
-  let liqLine   = '💧 Liquidity: —';
-  let outLine = 'Amount out: unavailable';
+  let tokenLine = '<b>Token:</b> —';
+  let pairLine = `<b>Pair:</b> ${process.env.WPLS_ADDRESS || '0xA1077a294dDE1B09bB078844df40758a5D0f9a27'} (WPLS)`;
+  let priceLine = '📈 <b>Price:</b> —';
+  let mcapLine  = '💰 <b>Market Cap:</b> —';
+  let liqLine   = '💧 <b>Liquidity:</b> —';
+  let outLine   = '<b>Amount out:</b> unavailable';
 
   if (u?.token_address) {
     const tokenAddr = u.token_address as string;
     try {
       const meta = await tokenMeta(tokenAddr);
-      tokenLine = `Token: ${tokenAddr} (${meta.symbol || meta.name || 'TOKEN'})`;
+      tokenLine = `<b>Token:</b>\n<code>${tokenAddr}</code>${meta.symbol ? ` (${meta.symbol})` : ''}`;
 
       const best = await bestQuoteBuy(ethers.parseEther(String(amt)), tokenAddr);
       if (best) {
         const dec = meta.decimals ?? 18;
-        outLine = `Amount out: ${fmtDec(ethers.formatUnits(best.amountOut, dec))} ${meta.symbol || 'TOKEN'}   ·   Route: ${best.route.key}`;
+        outLine = `<b>Amount out:</b> ${fmtDec(ethers.formatUnits(best.amountOut, dec))} ${meta.symbol || 'TOKEN'}   ·   Route: ${best.route.key}`;
       }
 
       const [ds, capFallback] = await Promise.all([
@@ -799,24 +805,24 @@ async function renderBuyMenu(ctx: any) {
       ]);
 
       const priceUsdVal = ds.priceUSD != null ? ds.priceUSD : await priceUSDPerToken(tokenAddr);
-      priceLine = `📈 Price: ${fmtUsdPrice(priceUsdVal)}`;
+      priceLine = `📈 <b>Price:</b> ${fmtUsdPrice(priceUsdVal)}`;
 
       if (ds.marketCapUSD != null) {
-        mcapLine = `💰 Market Cap: ${fmtUsdCompact(ds.marketCapUSD)} (DexScreener)`;
+        mcapLine = `💰 <b>Market Cap:</b> ${fmtUsdCompact(ds.marketCapUSD)} (DexScreener)`;
       } else if (capFallback.ok && capFallback.mcapUSD != null) {
-        mcapLine = `💰 Market Cap: ${fmtUsdCompact(capFallback.mcapUSD)}`;
+        mcapLine = `💰 <b>Market Cap:</b> ${fmtUsdCompact(capFallback.mcapUSD)}`;
       }
 
       if (ds.liquidityUSD != null) {
-        liqLine = `💧 Liquidity: ${fmtUsdCompact(ds.liquidityUSD)}`;
+        liqLine = `💧 <b>Liquidity:</b> ${fmtUsdCompact(ds.liquidityUSD)}`;
       }
     } catch {}
   }
 
   const lines = [
-    'BUY MENU',
+    '🟩 <b>BUY MENU</b>',
     '',
-    `Wallet: ${aw ? aw.address : '— (Select)'}`,
+    `<b>Wallet:</b>\n${aw ? `<code>${aw.address}</code>` : '— (Select)'}`,
     '',
     tokenLine,
     '',
@@ -826,9 +832,9 @@ async function renderBuyMenu(ctx: any) {
     mcapLine,
     liqLine,
     '',
-    `Amount in: ${fmtDec(String(amt))} PLS`,
-    `Gas boost: +${NF.format(pct)}% over market`,
-    `Gas limit: ${fmtInt(String(gl))}  |  Booster: ${NF.format(gb)} gwei`,
+    `<b>Amount in:</b> ${fmtDec(String(amt))} PLS`,
+    `<b>Gas boost:</b> +${NF.format(pct)}% over market`,
+    `<b>Gas limit:</b> ${fmtInt(String(gl))}  |  <b>Booster:</b> ${NF.format(gb)} gwei`,
     '',
     outLine,
   ].join('\n');
@@ -840,7 +846,19 @@ async function renderBuyMenu(ctx: any) {
     6
   );
 
-  await showMenu(ctx, lines, buyMenu(Math.round(pct), walletButtons));
+  // start from existing buy keyboard, then inject parse_mode + Copy/Explorer for active wallet
+  const base = buyMenu(Math.round(pct), walletButtons) as any;
+  const extra: any = { parse_mode: 'HTML', ...(base || {}) };
+  if (aw) {
+    extra.reply_markup = extra.reply_markup || {};
+    extra.reply_markup.inline_keyboard = extra.reply_markup.inline_keyboard || [];
+    extra.reply_markup.inline_keyboard.unshift([
+      Markup.button.callback('📋 Copy', `copy:${aw.address.toLowerCase()}`),
+      Markup.button.url('🔍 Explorer', `https://otter.pulsechain.com/address/${aw.address}`)
+    ]);
+  }
+
+  await showMenu(ctx, lines, extra);
 }
 
 bot.action('menu_buy', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderBuyMenu(ctx); });
