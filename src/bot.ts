@@ -888,25 +888,25 @@ bot.action('buy_exec', async (ctx) => {
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
   const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
 
-  for (const w of wallets) {
+  // 🔁 Fire all transactions simultaneously
+  const tasks = wallets.map(async (w) => {
     const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
-
     try {
       const gas = await computeGas(ctx.from.id);
-      const r = await buyAutoRoute(getPrivateKey(w), u.token_address, amountIn, 0n, gas);
+      const r = await buyAutoRoute(getPrivateKey(w), u.token_address!, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
       let preOut: bigint = 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
       try {
-        const meta = await tokenMeta(u.token_address);
+        const meta = await tokenMeta(u.token_address!);
         tokDec = meta.decimals ?? 18;
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-        const preQuote = await bestQuoteBuy(amountIn, u.token_address);
+        const preQuote = await bestQuoteBuy(amountIn, u.token_address!);
         if (preQuote?.amountOut) {
           preOut = preQuote.amountOut;
-          recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+          recordTrade(ctx.from.id, w.address, u.token_address!, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
         }
       } catch {}
 
@@ -918,8 +918,8 @@ bot.action('buy_exec', async (ctx) => {
           await ctx.reply(`transaction sent ${link}`);
         }
 
-        if (u.token_address.toLowerCase() !== WPLS) {
-          approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
+        if (u.token_address!.toLowerCase() !== WPLS) {
+          approveAllRouters(getPrivateKey(w), u.token_address!, gas).catch(() => {});
         }
 
         provider.waitForTransaction(hash).then(async () => {
@@ -928,7 +928,7 @@ bot.action('buy_exec', async (ctx) => {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
             receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-            tokenAddress: u.token_address!,   // assert non-null
+            tokenAddress: u.token_address!,
             explorerUrl: link
           });
           await sendRefNudgeTo(ctx.from.id);
@@ -945,7 +945,9 @@ bot.action('buy_exec', async (ctx) => {
         await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
       }
     }
-  }
+  });
+
+  await Promise.allSettled(tasks);
 
   await upsertPinnedPosition(ctx);
   return renderBuyMenu(ctx);
@@ -960,24 +962,25 @@ bot.action('buy_exec_all', async (ctx) => {
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
   const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
 
-  for (const w of rows) {
+  // 🔁 Fire all transactions simultaneously
+  const tasks = rows.map(async (w) => {
     const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
     try {
       const gas = await computeGas(ctx.from.id);
-      const r = await buyAutoRoute(getPrivateKey(w), u.token_address, amountIn, 0n, gas);
+      const r = await buyAutoRoute(getPrivateKey(w), u.token_address!, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
       let preOut: bigint = 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
       try {
-        const meta = await tokenMeta(u.token_address);
+        const meta = await tokenMeta(u.token_address!);
         tokDec = meta.decimals ?? 18;
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-        const preQuote = await bestQuoteBuy(amountIn, u.token_address);
+        const preQuote = await bestQuoteBuy(amountIn, u.token_address!);
         if (preQuote?.amountOut) {
           preOut = preQuote.amountOut;
-          recordTrade(ctx.from.id, w.address, u.token_address, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+          recordTrade(ctx.from.id, w.address, u.token_address!, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
         }
       } catch {}
 
@@ -989,8 +992,8 @@ bot.action('buy_exec_all', async (ctx) => {
           await ctx.reply(`transaction sent ${link}`);
         }
 
-        if (u.token_address.toLowerCase() !== WPLS) {
-          approveAllRouters(getPrivateKey(w), u.token_address, gas).catch(() => {});
+        if (u.token_address!.toLowerCase() !== WPLS) {
+          approveAllRouters(getPrivateKey(w), u.token_address!, gas).catch(() => {});
         }
 
         provider.waitForTransaction(hash).then(async () => {
@@ -999,7 +1002,7 @@ bot.action('buy_exec_all', async (ctx) => {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
             receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-            tokenAddress: u.token_address!,   // assert non-null
+            tokenAddress: u.token_address!,
             explorerUrl: link
           });
           await sendRefNudgeTo(ctx.from.id);
@@ -1016,7 +1019,9 @@ bot.action('buy_exec_all', async (ctx) => {
         await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
       }
     }
-  }
+  });
+
+  await Promise.allSettled(tasks);
 
   await upsertPinnedPosition(ctx);
   return renderBuyMenu(ctx);
