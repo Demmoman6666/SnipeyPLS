@@ -17,6 +17,7 @@ import {
 import {
   recordTrade, getAvgEntry, addLimitOrder, listLimitOrders,
   getOpenLimitOrders, cancelLimitOrder, markLimitFilled, markLimitError,
+  setReferrerOnce,
 } from './db.js';
 
 const cfg = getConfig();
@@ -31,6 +32,35 @@ const fmtPls = (wei: bigint) => fmtDec(ethers.formatEther(wei));
 const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash}` : '');
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 const WPLS = (process.env.WPLS_ADDRESS || '0xA1077a294dDE1B09bB078844df40758a5D0f9a27').toLowerCase(); // Pulse WPLS
+
+/* ---------- Referral: config + helpers ---------- */
+const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@/, '');
+const REF_PREFIX = 'ref_';
+function buildRefLink(telegramId: number): string {
+  if (!BOT_USERNAME) return '';
+  return `https://t.me/${BOT_USERNAME}?start=${REF_PREFIX}${telegramId}`;
+}
+function parseRefPayload(payload?: string | null): number | null {
+  if (!payload) return null;
+  const p = payload.trim();
+  let m = p.match(new RegExp(`^${REF_PREFIX}(\\d{4,15})$`, 'i'));
+  if (!m) m = p.match(/^(\d{4,15})$/); // allow bare number too
+  if (!m) return null;
+  const id = Number(m[1]);
+  return Number.isFinite(id) ? id : null;
+}
+async function sendRefNudgeTo(telegramId: number) {
+  const link = buildRefLink(telegramId);
+  if (!link) return;
+  const kb = Markup.inlineKeyboard([[Markup.button.url('🔗 Your Referral Link', link)]]);
+  try {
+    await bot.telegram.sendMessage(
+      telegramId,
+      `🤝 Referral program\nShare your personal invite link:\n${link}`,
+      kb as any
+    );
+  } catch {/* ignore */}
+}
 
 /* ---- HTML escape + reply helper ---- */
 const esc = (s: string) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -218,6 +248,7 @@ async function postTradeSuccess(ctx: any, args: PostTradeArgs) {
 
   await replyHTML(ctx, body);
 }
+
 // === Branding + Home screen ===
 const BRAND_NAME = process.env.BRAND_NAME || 'SNIPEY';
 const BRAND_TWITTER = process.env.BRAND_TWITTER_URL || 'https://twitter.com/yourhandle';
@@ -252,6 +283,7 @@ function homeScreenText() {
 async function renderHome(ctx: any) {
   await showMenu(ctx, homeScreenText(), { parse_mode: 'HTML', disable_web_page_preview: true, ...mainMenu() });
 }
+
 /* ---------- message lifecycle ---------- */
 const lastMenuMsg = new Map<number, number>();
 const pinnedPosMsg = new Map<number, number>();
@@ -390,8 +422,40 @@ type Pending =
   | { type: 'auto_amt' } | { type: 'lb_amt' } | { type: 'ls_pct' } | { type: 'limit_value' };
 const pending = new Map<number, Pending>();
 
-/* ---------- /start ---------- */
-bot.start(async (ctx) => { await renderHome(ctx); });
+/* ---------- /start (capture referrer) ---------- */
+bot.start(async (ctx) => {
+  // Extract payload after /start
+  const raw = String(ctx.message?.text ?? '');
+  const m = raw.match(/^\/start(?:@[\w_]+)?\s+(.+)$/i);
+  const payload = (m ? m[1] : '').trim();
+  const refId = parseRefPayload(payload);
+
+  if (refId && refId !== ctx.from.id) {
+    try { await setReferrerOnce(ctx.from.id, refId); } catch { /* ignore */ }
+  }
+
+  await renderHome(ctx);
+
+  // Show user their personal referral link
+  try {
+    const myLink = buildRefLink(ctx.from.id);
+    if (myLink) {
+      const kb = Markup.inlineKeyboard([[Markup.button.url('🔗 Your Referral Link', myLink)]]);
+      await ctx.reply(
+        `🤝 Referral program\nShare your personal invite link:\n${myLink}`,
+        kb
+      );
+    }
+  } catch { /* ignore */ }
+});
+
+/* ---------- Handy: /ref shows the personal link ---------- */
+bot.command('ref', async (ctx) => {
+  const link = buildRefLink(ctx.from.id);
+  if (!link) return ctx.reply('Set BOT_USERNAME in env to enable referral links.');
+  const kb = Markup.inlineKeyboard([[Markup.button.url('🔗 Open Link', link)]]);
+  return ctx.reply(`Your personal referral link:\n${link}`, kb);
+});
 
 /* ---------- SETTINGS ---------- */
 async function renderSettings(ctx: any) {
@@ -774,6 +838,7 @@ bot.action('buy_exec', async (ctx) => {
             tokenAddress: u.token_address!,   // assert non-null
             explorerUrl: link
           });
+          await sendRefNudgeTo(ctx.from.id);
         }).catch(() => {/* ignore */});
       } else {
         try {
@@ -844,6 +909,7 @@ bot.action('buy_exec_all', async (ctx) => {
             tokenAddress: u.token_address!,   // assert non-null
             explorerUrl: link
           });
+          await sendRefNudgeTo(ctx.from.id);
         }).catch(() => {/* ignore */});
       } else {
         try {
@@ -1016,7 +1082,7 @@ async function renderSellMenu(ctx: any) {
     walletLine,
     '',
     tokenLine,
-    '',               // ← extra blank line between TOKEN and PRICE (per your request)
+    '',               // extra blank line between TOKEN and PRICE
     priceLine,
     mcapLine,
     liqLine,
@@ -1276,7 +1342,7 @@ async function mcapFor(token: string): Promise<{
   }
 }
 
-/* ---------- /mcap command (will match DexScreener when available) ---------- */
+/* ---------- /mcap command (parity with DexScreener when available) ---------- */
 bot.command('mcap', async (ctx) => {
   const u = getUserSettings(ctx.from.id);
   const token = u?.token_address;
@@ -1419,6 +1485,7 @@ async function checkLimitsOnce() {
               tokenAddress: r.token_address,
               explorerUrl: link
             });
+            await sendRefNudgeTo(r.telegram_id);
             unmarkProcessing(r.id);
           }).catch(() => { unmarkProcessing(r.id); });
         } else {
@@ -1678,6 +1745,7 @@ bot.on('text', async (ctx, next) => {
               tokenAddress: text,
               explorerUrl: link
             });
+            await sendRefNudgeTo(ctx.from.id);
           }).catch(() => {/* ignore */});
         } else {
           try {
@@ -1707,7 +1775,8 @@ bot.action('main_back', async (ctx) => {
   await ctx.answerCbQuery();
   pending.delete(ctx.from.id);
   return renderHome(ctx);
-});bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
+});
+bot.action('price', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /price after setting a token.', mainMenu()); });
 bot.action('balances', async (ctx) => { await ctx.answerCbQuery(); return showMenu(ctx, 'Use /balances after selecting a wallet.', mainMenu()); });
 
 // no-op
