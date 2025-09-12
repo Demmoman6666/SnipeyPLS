@@ -598,20 +598,24 @@ async function renderSettings(ctx: any) {
     6
   );
 
-  const kb = Markup.inlineKeyboard([
-    [Markup.button.callback('⬅️ Back', 'main_back')],
+const kb = Markup.inlineKeyboard([
+  [Markup.button.callback('⬅️ Back', 'main_back')],
 
-    [Markup.button.callback('— Gas Settings —', 'noop')],
-    [Markup.button.callback('Default Gas %', 'set_defpct')],
-    [Markup.button.callback('Gas Limit', 'set_gl'), Markup.button.callback('Gwei Booster', 'set_gb')],
+  [Markup.button.callback('— Gas Settings —', 'noop')],
+  [Markup.button.callback('Default Gas %', 'set_defpct')],
+  [Markup.button.callback('Gas Limit', 'set_gl'), Markup.button.callback('Gwei Booster', 'set_gb')],
 
-    [Markup.button.callback('— Auto Buy —', 'noop')],
-    [Markup.button.callback(`${autoEmoji} Auto-Buy: ${autoOn ? 'ON' : 'OFF'}`, 'auto_toggle')],
-    [Markup.button.callback('Auto Buy Amount', 'auto_amt')],
+  [Markup.button.callback('— Auto Buy —', 'noop')],
+  [Markup.button.callback(`${autoEmoji} Auto-Buy: ${autoOn ? 'ON' : 'OFF'}`, 'auto_toggle')],
+  [Markup.button.callback('Auto Buy Amount', 'auto_amt')],
 
-    [Markup.button.callback('— Wallets —', 'noop')],
-    ...walletButtons,
-  ]);
+  // 👇 NEW: Quick Buy / Sell editor section
+  [Markup.button.callback('— Edit Quick Buy / Sell —', 'noop')],
+  [Markup.button.callback('🟢 Edit Buy Buttons', 'qb_edit'), Markup.button.callback('🔴 Edit Sell %', 'sp_edit')],
+
+  [Markup.button.callback('— Wallets —', 'noop')],
+  ...walletButtons,
+]);
 
   await showMenu(ctx, lines, { parse_mode: 'HTML', ...kb });
 }
