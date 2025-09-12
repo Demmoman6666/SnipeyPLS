@@ -1280,10 +1280,12 @@ async function renderSellMenu(ctx: any) {
     6
   );
 
+  // Gas on its own top row; then Back/Refresh on the next row.
   const kb: any[][] = [
-    // Top bar
+    // Top gas adjuster (alone)
+    [Markup.button.callback(`⛽️ Gas % (${NF.format(u?.gas_pct ?? 0)}%)`, 'gas_pct_open')],
+    // Back / Refresh beneath gas
     [
-      Markup.button.callback(`⛽️ Gas % (${NF.format(u?.gas_pct ?? 0)}%)`, 'gas_pct_open'),
       Markup.button.callback('⬅️ Back', 'main_back'),
       Markup.button.callback('🔄 Refresh', 'sell_refresh'),
     ],
@@ -1298,7 +1300,7 @@ async function renderSellMenu(ctx: any) {
     [Markup.button.callback('Wallets', 'noop')],
     // Wallet rows
     ...walletButtons,
-    ...(all.length > 1 ? [[Markup.button.callback('🧭 Use Active Wallet', 'sell_wallet_clear')]] : []),
+    // (Removed: "🧭 Use Active Wallet")
     // Amount % / Sell All
     [
       Markup.button.callback('Amount', 'sell_pct_menu'),
