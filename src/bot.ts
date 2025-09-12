@@ -2235,8 +2235,8 @@ if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
 
   const u = getUserSettings(ctx.from.id);
   if (u?.auto_buy_enabled) {
-    // ✅ Use the real in-file selector, not globalThis
-    const selSet = getAutoSel(ctx.from.id);             // Set<number>
+    // ✅ FIX: use getAutoSelSet (returns Set<number>)
+    const selSet = getAutoSelSet(ctx.from.id);
     const selectedIds: number[] = selSet ? Array.from(selSet) : [];
 
     // Build wallet list: all selected (if any) else the active wallet
@@ -2308,7 +2308,7 @@ if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
               tokenAddress: token,
               explorerUrl: link
             });
-            // 🔇 no referral nudge in auto-buy
+            // no referral nudge in auto-buy
           }).catch(() => {/* ignore */});
         } else {
           try {
@@ -2334,7 +2334,6 @@ if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
     return renderBuyMenu(ctx);
   }
 }
-
 return next();
 });
 
