@@ -2890,32 +2890,44 @@ bot.on('text', async (ctx, next) => {
       }
     }
 
-    // ✅ INSERTED: Quick-Buy label editor
-    if (p.type === 'edit_qb') {
-      const idx = (p as any).idx as number;
-      const raw = msg;
-      // must be N, Nk, Nm, Nb
-      if (!/^\d+(k|m|b)?$/i.test(raw)) {
-        return ctx.reply('Please send a number (optionally with K/M/B), e.g., 250k, 1m, 500000.');
-      }
-      setQuickLabel(ctx.from.id, idx, raw.toUpperCase());
-      pending.delete(ctx.from.id);
-      await ctx.reply(`Updated Quick Buy #${idx + 1} → ${raw.toUpperCase()} PLS`);
-      return (bot.telegram as any).answerCbQuery?.((ctx as any).callbackQuery?.id).catch?.(() => {});
-    }
+// ✅ INSERTED: Quick-Buy label editor
+if (p.type === 'edit_qb') {
+  // index comes from the button the user clicked earlier
+  const idx = Math.max(0, Math.min(5, Number((p as any).idx)));
+  const raw = String(msg).trim();
 
-    // ✅ INSERTED: Sell % preset editor
-    if (p.type === 'edit_sp') {
-      const idx = (p as any).idx as number;
-      const v = Number(msg);
-      if (!Number.isFinite(v) || v < 1 || v > 100) {
-        return ctx.reply('Please send a whole number between 1 and 100.');
-      }
-      setSellPreset(ctx.from.id, idx, Math.round(v));
-      pending.delete(ctx.from.id);
-      await ctx.reply(`Updated Sell % preset #${idx + 1} → ${Math.round(v)}%`);
-      return (bot.telegram as any).answerCbQuery?.((ctx as any).callbackQuery?.id).catch?.(() => {});
-    }
+  // must be N, Nk, Nm, or Nb (e.g., 250k, 1m, 500000)
+  if (!/^\d+(k|m|b)?$/i.test(raw)) {
+    await ctx.reply('Please send a number (optionally with K/M/B), e.g., 250k, 1m, 500000.');
+    return;
+  }
+
+  setQuickLabel(ctx.from.id, idx, raw.toUpperCase());
+  pending.delete(ctx.from.id);
+
+  await ctx.reply(`Updated Quick Buy #${idx + 1} → ${raw.toUpperCase()} PLS`);
+  // Return the user to Settings (or your editor screen if you have one)
+  return renderSettings(ctx);
+}
+
+// ✅ INSERTED: Sell % preset editor
+if (p.type === 'edit_sp') {
+  // index comes from the button the user clicked earlier
+  const idx = Math.max(0, Math.min(3, Number((p as any).idx)));
+  const v = Number(String(msg).trim());
+
+  if (!Number.isFinite(v) || v < 1 || v > 100) {
+    await ctx.reply('Please send a whole number between 1 and 100.');
+    return;
+  }
+
+  setSellPreset(ctx.from.id, idx, Math.round(v));
+  pending.delete(ctx.from.id);
+
+  await ctx.reply(`Updated Sell % preset #${idx + 1} → ${Math.round(v)}%`);
+  // Return the user to Settings (or your editor screen if you have one)
+  return renderSettings(ctx);
+}
 
    // Limit order building
    if (p.type === 'lb_amt') {
