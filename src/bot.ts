@@ -2235,21 +2235,15 @@ if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
 
   const u = getUserSettings(ctx.from.id);
   if (u?.auto_buy_enabled) {
-    // Read selected auto-buy wallets from the Settings selector (getAutoSel).
-    // If it's not defined for any reason, treat as "none selected".
-    const getAutoSelMaybe = (globalThis as any).getAutoSel as
-      | ((uid: number) => Set<number>)
-      | undefined;
+    // ✅ Use the real in-file selector, not globalThis
+    const selSet = getAutoSel(ctx.from.id);             // Set<number>
+    const selectedIds: number[] = selSet ? Array.from(selSet) : [];
 
-    const selectedIds = getAutoSelMaybe ? Array.from(getAutoSelMaybe(ctx.from.id)) : [];
-
-    // Build wallet list: selected (if any) else the active wallet
+    // Build wallet list: all selected (if any) else the active wallet
+    const active = getActiveWallet(ctx.from.id);
     let wallets = selectedIds.length
       ? listWallets(ctx.from.id).filter(w => selectedIds.includes(w.id))
-      : ((): any[] => {
-          const w = getActiveWallet(ctx.from.id);
-          return w ? [w] : [];
-        })();
+      : (active ? [active] : []);
 
     if (!wallets.length) {
       await ctx.reply('Select or create a wallet first.');
@@ -2260,7 +2254,7 @@ if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
     const amountIn = ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01));
     const token = text;
 
-    // small local helper to compress noisy errors
+    // Brief error helper
     const briefErr = (e: any): string => {
       const s = String(e?.reason || e?.message || e || '');
       if (/insufficient funds/i.test(s)) return 'insufficient funds';
@@ -2314,7 +2308,7 @@ if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
               tokenAddress: token,
               explorerUrl: link
             });
-            // NOTE: no referral nudge in auto-buy
+            // 🔇 no referral nudge in auto-buy
           }).catch(() => {/* ignore */});
         } else {
           try {
