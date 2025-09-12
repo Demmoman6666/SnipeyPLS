@@ -835,6 +835,37 @@ bot.action('wallet_add', async (ctx) => {
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'wallets')]]) });
 });
 
+/* ---------- Error compactor (short, human-friendly) ---------- */
+function conciseError(err: any): string {
+  const code = String(err?.code ?? '').toUpperCase();
+
+  const raw =
+    err?.error?.message ||
+    err?.info?.error?.message ||
+    err?.shortMessage ||
+    err?.reason ||
+    err?.message ||
+    '';
+
+  const msg = String(raw).toLowerCase();
+
+  if (code === 'INSUFFICIENT_FUNDS' || msg.includes('insufficient funds')) return 'insufficient funds';
+  if (msg.includes('nonce too low') || msg.includes('already been used') || code === 'NONCE_EXPIRED')
+    return 'nonce too low / already used';
+  if ((msg.includes('replacement') && (msg.includes('underpriced') || msg.includes('fee too low'))) ||
+      code === 'REPLACEMENT_UNDERPRICED')
+    return 'replacement underpriced (raise gas)';
+  if (code === 'UNPREDICTABLE_GAS_LIMIT' || msg.includes('cannot estimate gas') || msg.includes('gas required exceeds allowance'))
+    return 'cannot estimate gas';
+  if (msg.includes('intrinsic gas too low')) return 'gas limit too low';
+  if (msg.includes('insufficient allowance')) return 'insufficient allowance (approve first)';
+  if (msg.includes('execution reverted')) return 'execution reverted';
+  if (msg.includes('user rejected') || code === 'ACTION_REJECTED') return 'user rejected';
+
+  const firstLine = String(raw).split('\n')[0].trim();
+  return firstLine ? firstLine.slice(0, 140) : 'failed';
+}
+
 /* ---------- Price helpers used below ---------- */
 async function pricePLSPerToken(token: string): Promise<number | null> {
   try {
@@ -1062,10 +1093,11 @@ bot.action('buy_exec', async (ctx) => {
         } catch {}
       }
     } catch (e: any) {
+      const brief = conciseError(e);
       try {
-        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Buy failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Buy failed for ${short(w.address)}: ${brief}`);
       } catch {
-        await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+        await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${brief}`);
       }
     }
   });
@@ -1137,10 +1169,11 @@ bot.action('buy_exec_all', async (ctx) => {
         } catch {}
       }
     } catch (e: any) {
+      const brief = conciseError(e);
       try {
-        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Buy failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Buy failed for ${short(w.address)}: ${brief}`);
       } catch {
-        await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+        await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${brief}`);
       }
     }
   });
@@ -1268,6 +1301,9 @@ bot.action('sell_pct_menu', async (ctx) => {
 });
 
 bot.action('sell_refresh', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
+
+/* Provide a noop handler for disabled labels */
+bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
 
 /* ---------- SELL MENU (HTML + metrics) ---------- */
 async function renderSellMenu(ctx: any) {
@@ -1405,7 +1441,6 @@ async function renderSellMenu(ctx: any) {
     [Markup.button.callback('Wallets', 'noop')],
     // Wallet rows
     ...walletButtons,
-    // (Removed: "🧭 Use Active Wallet")
     // Amount % / Sell All
     [
       Markup.button.callback('Amount', 'sell_pct_menu'),
@@ -1449,7 +1484,7 @@ bot.action('sell_approve', async (ctx) => {
     const results = await approveAllRouters(getPrivateKey(w), token, gas);
     await ctx.reply(`Approve sent:\n${results.join('\n')}`);
   } catch (e: any) {
-    await ctx.reply('Approve failed: ' + (e?.message ?? String(e)));
+    await ctx.reply('Approve failed: ' + conciseError(e));
   }
   return renderSellMenu(ctx);
 });
@@ -1531,10 +1566,11 @@ bot.action('sell_exec', async (ctx) => {
       } catch {}
     }
   } catch (e: any) {
+    const brief = conciseError(e);
     try {
-      await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Sell failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+      await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Sell failed for ${short(w.address)}: ${brief}`);
     } catch {
-      await ctx.reply(`❌ Sell failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+      await ctx.reply(`❌ Sell failed for ${short(w.address)}: ${brief}`);
     }
   }
 
@@ -1606,10 +1642,11 @@ bot.action('sell_exec_all', async (ctx) => {
         try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)'); } catch {}
       }
     } catch (e: any) {
+      const brief = conciseError(e);
       try {
-        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Sell failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Sell failed for ${short(w.address)}: ${brief}`);
       } catch {
-        await ctx.reply(`❌ Sell failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+        await ctx.reply(`❌ Sell failed for ${short(w.address)}: ${brief}`);
       }
     }
   });
