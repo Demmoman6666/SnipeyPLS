@@ -819,10 +819,15 @@ async function renderBuyMenu(ctx: any) {
     } catch {}
   }
 
+  // Wallet line with tap-to-copy (HTML)
+  const walletLine = `Wallet: ${aw
+    ? `<a href="tg://copy?text=${aw.address}"><code>${esc(aw.address)}</code></a>`
+    : '— (Select)'}`;
+
   const lines = [
     'BUY MENU',
     '',
-    `Wallet: ${aw ? aw.address : '— (Select)'}`,
+    walletLine,
     '',
     tokenLine,
     '',
@@ -846,20 +851,9 @@ async function renderBuyMenu(ctx: any) {
     6
   );
 
-  await showMenu(ctx, lines, buyMenu(Math.round(pct), walletButtons));
-}
-
-  // start from existing buy keyboard, then inject parse_mode + Copy/Explorer for active wallet
+  // Use HTML so the wallet address link is tappable; no Copy/Explorer row injected
   const base = buyMenu(Math.round(pct), walletButtons) as any;
   const extra: any = { parse_mode: 'HTML', ...(base || {}) };
-  if (aw) {
-    extra.reply_markup = extra.reply_markup || {};
-    extra.reply_markup.inline_keyboard = extra.reply_markup.inline_keyboard || [];
-    extra.reply_markup.inline_keyboard.unshift([
-      Markup.button.callback('📋 Copy', `copy:${aw.address.toLowerCase()}`),
-      Markup.button.url('🔍 Explorer', `https://otter.pulsechain.com/address/${aw.address}`)
-    ]);
-  }
 
   await showMenu(ctx, lines, extra);
 }
@@ -1266,11 +1260,11 @@ async function renderSellMenu(ctx: any) {
     6
   );
 
-  // Build base keyboard and inject our extras (no copy/explorer row)
+  // Build base keyboard and inject our extras (no copy/explorer row at top)
   const base = sellMenu() as any;
   const extra: any = { parse_mode: 'HTML', ...(base || {}) };
   extra.reply_markup = extra.reply_markup || {};
-  const existing = (extra.reply_markup.inline_keyboard || []) as any[];
+  const existing: any[][] = (extra.reply_markup.inline_keyboard || []) as any[][];
 
   // Contract + Sell All rows
   const contractRow = tokenAddrFull
@@ -1344,13 +1338,11 @@ bot.action('sell_exec', async (ctx) => {
   try {
     const c = erc20(u.token_address);
     const bal = await c.balanceOf(w.address);
-    const pct = u?.sell_pct ?? 100;
-    const amount = (bal * BigInt(Math.round(pct))) / 100n;
+    const percent = u?.sell_pct ?? 100;
+    const amount = (bal * BigInt(Math.round(percent))) / 100n;
 
     if (amount <= 0n) {
-      try {
-        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'Nothing to sell.');
-      } catch {}
+      try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'Nothing to sell.'); } catch {}
       await upsertPinnedPosition(ctx);
       return renderSellMenu(ctx);
     }
@@ -1417,14 +1409,14 @@ bot.action('sell_exec_all', async (ctx) => {
   if (!u?.token_address) return showMenu(ctx, 'Set token first.', sellMenu());
 
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
-  const pct = u?.sell_pct ?? 100;
+  const percent = u?.sell_pct ?? 100;
 
   const tasks = rows.map(async (w) => {
     const pendingMsg = await ctx.reply(`⏳ Sending sell for ${short(w.address)}…`);
     try {
       const c = erc20(u.token_address);
       const bal = await c.balanceOf(w.address);
-      const amount = (bal * BigInt(Math.round(pct))) / 100n;
+      const amount = (bal * BigInt(Math.round(percent))) / 100n;
 
       if (amount <= 0n) {
         try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'Nothing to sell.'); } catch {}
