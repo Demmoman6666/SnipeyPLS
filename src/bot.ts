@@ -1739,7 +1739,7 @@ bot.action('sell_wallet_clear', async (ctx: any) => {
   return renderSellMenu(ctx);
 });
 
-/* small inline picker for sell % */
+/* small inline picker for sell % (still available, but we'll also show quick 25/50/75/100 in the main menu) */
 bot.action('sell_pct_menu', async (ctx) => {
   await ctx.answerCbQuery();
   const kb = Markup.inlineKeyboard([
@@ -1754,10 +1754,44 @@ bot.action('sell_pct_menu', async (ctx) => {
   return showMenu(ctx, 'Choose *Sell %*:', { parse_mode: 'Markdown', ...kb });
 });
 
+/* quick setters */
 bot.action('sell_refresh', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
+bot.action('sell_pct_25', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 25); return renderSellMenu(ctx); });
+bot.action('sell_pct_50', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 50); return renderSellMenu(ctx); });
+bot.action('sell_pct_75', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 75); return renderSellMenu(ctx); });
+bot.action('sell_pct_100', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 100); return renderSellMenu(ctx); });
 
-/* Provide a noop handler for disabled labels */
-bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
+/* ===== Slippage (per-user, in basis points) ===== */
+const slipBpsMap = new Map<number, number>(); // uid -> bps; default 100 (=1.0%)
+
+function getSlipBps(uid: number): number { return slipBpsMap.get(uid) ?? 100; }
+function setSlipBps(uid: number, bps: number) { slipBpsMap.set(uid, Math.max(0, Math.min(5000, bps))); }
+
+function fmtSlip(bps: number): string {
+  return (bps % 100 === 0) ? String(bps / 100) : (bps / 100).toFixed(1);
+}
+
+bot.action('slip_open', async (ctx) => {
+  await ctx.answerCbQuery();
+  const cur = getSlipBps(ctx.from.id);
+  const opts = [
+    { t: '0.5%', v: 50 }, { t: '1%', v: 100 }, { t: '2%', v: 200 },
+    { t: '3%', v: 300 }, { t: '5%', v: 500 }
+  ];
+  const rows = chunk(
+    opts.map(o => Markup.button.callback(`${o.t}${o.v === cur ? ' ✅' : ''}`, `slip_set:${o.v}`)),
+    3
+  );
+  rows.push([Markup.button.callback('⬅️ Back', 'menu_sell')]);
+  return showMenu(ctx, 'Choose *Slippage*:', { parse_mode: 'Markdown', ...Markup.inlineKeyboard(rows) });
+});
+
+bot.action(/^slip_set:(\d+)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const bps = Number(ctx.match[1]);
+  setSlipBps(ctx.from.id, bps);
+  return renderSellMenu(ctx);
+});
 
 /* ---------- SELL MENU (HTML + metrics) ---------- */
 async function renderSellMenu(ctx: any) {
@@ -1769,6 +1803,7 @@ async function renderSellMenu(ctx: any) {
 
   const pct = u?.sell_pct ?? 100;
   const tokenAddrFull: string | undefined = u?.token_address || undefined;
+  const slipBps = getSlipBps(ctx.from.id);
 
   const header = '🟥 <b>SELL MENU</b>';
 
@@ -1822,7 +1857,10 @@ async function renderSellMenu(ctx: any) {
 
       balLine = `• <b>Balance:</b> ${esc(fmtDec(ethers.formatUnits(bal, dec)))} ${esc(metaSymbol || 'TOKEN')}`;
 
-      if (best) outLine = `• <b>Est. Out:</b> ${esc(fmtPls(best.amountOut))} PLS  (Route: ${esc(best.route.key)})`;
+      if (best) {
+        // Clarify the estimate reflects the current sell %
+        outLine = `• <b>Est. Out (${esc(NF.format(pct))}%):</b> ${esc(fmtPls(best.amountOut))} PLS  (Route: ${esc(best.route.key)})`;
+      }
 
       const avg = getAvgEntry(ctx.from.id, tokenAddrFull, dec);
       if (avg && best) {
@@ -1863,7 +1901,7 @@ async function renderSellMenu(ctx: any) {
     pnlLine,
   ].join('\n');
 
-  /* ===== Keyboard to mirror the BUY layout ===== */
+  /* ===== Keyboard to mirror the BUY layout (plus Slippage row) ===== */
   const all = listWallets(ctx.from.id);
   const activeId = getActiveWallet(ctx.from.id)?.id;
   const currentId = selectedId ?? activeId;
@@ -1875,11 +1913,12 @@ async function renderSellMenu(ctx: any) {
     6
   );
 
-  // Gas on its own top row; then Back/Refresh on the next row.
   const kb: any[][] = [
     // Top gas adjuster (alone)
     [Markup.button.callback(`⛽️ Gas % (${NF.format(u?.gas_pct ?? 0)}%)`, 'gas_pct_open')],
-    // Back / Refresh beneath gas
+    // Slippage row, its own line between gas and Back/Refresh
+    [Markup.button.callback(`🎯 Slippage (${fmtSlip(slipBps)}%)`, 'slip_open')],
+    // Back / Refresh beneath slippage
     [
       Markup.button.callback('⬅️ Back', 'main_back'),
       Markup.button.callback('🔄 Refresh', 'sell_refresh'),
@@ -1895,11 +1934,16 @@ async function renderSellMenu(ctx: any) {
     [Markup.button.callback('Wallets', 'noop')],
     // Wallet rows
     ...walletButtons,
-    // Amount % / Sell All
+    // Sell amount/method label + quick % row
+    [Markup.button.callback('Sell Amount / Method', 'noop')],
     [
-      Markup.button.callback('Amount', 'sell_pct_menu'),
-      Markup.button.callback('Sell All Wallets', 'sell_exec_all'),
+      Markup.button.callback('25%', 'sell_pct_25'),
+      Markup.button.callback('50%', 'sell_pct_50'),
+      Markup.button.callback('75%', 'sell_pct_75'),
+      Markup.button.callback('100%', 'sell_pct_100'),
     ],
+    // Sell All Wallets button
+    [Markup.button.callback('Sell All Wallets', 'sell_exec_all')],
     // Limit Sell / Orders
     [
       Markup.button.callback('Limit Sell', 'limit_sell'),
@@ -1913,10 +1957,6 @@ async function renderSellMenu(ctx: any) {
 }
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSellMenu(ctx); });
-bot.action('sell_pct_25', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 25); return renderSellMenu(ctx); });
-bot.action('sell_pct_50', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 50); return renderSellMenu(ctx); });
-bot.action('sell_pct_75', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 75); return renderSellMenu(ctx); });
-bot.action('sell_pct_100', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 100); return renderSellMenu(ctx); });
 
 /* Sell ▸ Approve */
 bot.action('sell_approve', async (ctx) => {
@@ -1938,7 +1978,7 @@ bot.action('sell_approve', async (ctx) => {
     const results = await approveAllRouters(getPrivateKey(w), token, gas);
     await ctx.reply(`Approve sent:\n${results.join('\n')}`);
   } catch (e: any) {
-    await ctx.reply('Approve failed: ' + conciseError(e));
+    await ctx.reply('Approve failed: ' + (e?.message ?? String(e)));
   }
   return renderSellMenu(ctx);
 });
@@ -1978,31 +2018,32 @@ bot.action('sell_exec', async (ctx) => {
       return renderSellMenu(ctx);
     }
 
+    // Pre-quote for slippage & logging
+    let q: any = null;
+    try { q = await bestQuoteSell(amount, token); } catch {}
+    const slipBps = getSlipBps(ctx.from.id);
+    const minOut = q?.amountOut ? (q.amountOut * BigInt(10000 - slipBps)) / 10000n : 0n;
+
     const gas = await computeGas(ctx.from.id);
-    const r = await sellAutoRoute(getPrivateKey(w), token, amount, 0n, gas);
+    const r = await sellAutoRoute(getPrivateKey(w), token, amount, minOut, gas);
     const hash = (r as any)?.hash;
 
-    let outPls: bigint = 0n;
+    let outPls: bigint = q?.amountOut ?? 0n;
     let tokDec = 18;
     let tokSym = 'TOKEN';
     try {
       const meta = await tokenMeta(token);
       tokDec = meta.decimals ?? 18;
       tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-      const q = await bestQuoteSell(amount, token);
       if (q?.amountOut) {
-        outPls = q.amountOut;
-        recordTrade(ctx.from.id, w.address, token, 'SELL', q.amountOut, amount, q.route.key);
+        recordTrade(ctx.from.id, w.address, token, 'SELL', q.amountOut, amount, q.route?.key ?? 'AUTO');
       }
     } catch {}
 
     if (hash) {
       const link = otter(hash);
-      try {
-        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
-      } catch {
-        await ctx.reply(`transaction sent ${link}`);
-      }
+      try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`); }
+      catch { await ctx.reply(`transaction sent ${link}`); }
 
       provider.waitForTransaction(hash).then(async () => {
         try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
@@ -2015,9 +2056,8 @@ bot.action('sell_exec', async (ctx) => {
         });
       }).catch(() => {/* ignore */});
     } else {
-      try {
-        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
-      } catch {}
+      try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)'); }
+      catch {}
     }
   } catch (e: any) {
     const brief = conciseError(e);
@@ -2043,6 +2083,7 @@ bot.action('sell_exec_all', async (ctx) => {
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
   const percent = u?.sell_pct ?? 100;
   const token = u.token_address!;
+  const slipBps = getSlipBps(ctx.from.id);
 
   const tasks = rows.map(async (w) => {
     const pendingMsg = await ctx.reply(`⏳ Sending sell for ${short(w.address)}…`);
@@ -2056,31 +2097,31 @@ bot.action('sell_exec_all', async (ctx) => {
         return;
       }
 
+      // Pre-quote for slippage & logging
+      let q: any = null;
+      try { q = await bestQuoteSell(amount, token); } catch {}
+      const minOut = q?.amountOut ? (q.amountOut * BigInt(10000 - slipBps)) / 10000n : 0n;
+
       const gas = await computeGas(ctx.from.id);
-      const r = await sellAutoRoute(getPrivateKey(w), token, amount, 0n, gas);
+      const r = await sellAutoRoute(getPrivateKey(w), token, amount, minOut, gas);
       const hash = (r as any)?.hash;
 
-      let outPls: bigint = 0n;
+      let outPls: bigint = q?.amountOut ?? 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
       try {
         const meta = await tokenMeta(token);
         tokDec = meta.decimals ?? 18;
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-        const q = await bestQuoteSell(amount, token);
         if (q?.amountOut) {
-          outPls = q.amountOut;
-          recordTrade(ctx.from.id, w.address, token, 'SELL', q.amountOut, amount, q.route.key);
+          recordTrade(ctx.from.id, w.address, token, 'SELL', q.amountOut, amount, q.route?.key ?? 'AUTO');
         }
       } catch {}
 
       if (hash) {
         const link = otter(hash);
-        try {
-          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
-        } catch {
-          await ctx.reply(`transaction sent ${link}`);
-        }
+        try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`); }
+        catch { await ctx.reply(`transaction sent ${link}`); }
 
         provider.waitForTransaction(hash).then(async () => {
           try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
@@ -2127,6 +2168,10 @@ bot.command('rpc_check', async (ctx) => {
   ].join('\n');
   await replyHTML(ctx, lines);
 });
+
+/* No-op label handler reused */
+bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
+
 /* ---------- Explorer totalSupply fallbacks ---------- */
 function explorerApiBase(): string | null {
   const b = (process.env.EXPLORER_API_BASE || '').trim();
