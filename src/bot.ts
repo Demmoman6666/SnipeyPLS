@@ -2023,6 +2023,14 @@ bot.action('sell_pct_50', async (ctx) => { await ctx.answerCbQuery(); setSellPct
 bot.action('sell_pct_75', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 75); return renderSellMenu(ctx); });
 bot.action('sell_pct_100', async (ctx) => { await ctx.answerCbQuery(); setSellPct(ctx.from.id, 100); return renderSellMenu(ctx); });
 
+/* NEW: generic setter used by the "Edit Sell %" screen (supports any 1–100 value) */
+bot.action(/^sell_pct_set:(\d{1,3})$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const pct = Math.max(1, Math.min(100, Number(ctx.match[1])));
+  setSellPct(ctx.from.id, pct);
+  return renderSellMenu(ctx);
+});
+
 /* ===== Slippage (per-user, in basis points) ===== */
 const slipBpsMap = new Map<number, number>(); // uid -> bps; default 100 (=1.0%)
 
