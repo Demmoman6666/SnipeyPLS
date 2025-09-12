@@ -866,23 +866,28 @@ function conciseError(err: any): string {
   return firstLine ? firstLine.slice(0, 140) : 'failed';
 }
 
-/* ---------- Trade logging: never block on DB ---------- */
-async function safeRecordTrade(...args: any[]) {
-  try {
-    // Try to call the existing recordTrade. If it supports an explicit timestamp, provide Date.now().
-    const rt: any = (globalThis as any).recordTrade || (recordTrade as any);
-    if (typeof rt !== 'function') return;
-    // Heuristic: some implementations expect (uid, wallet, token, side, spend, receive, routeKey, ts)
-    if (rt.length >= 8) {
-      await rt(args[0], args[1], args[2], args[3], args[4], args[5], args[6], Date.now());
-    } else {
-      await rt(args[0], args[1], args[2], args[3], args[4], args[5], args[6]);
-    }
-  } catch (e) {
-    // Swallow DB/logging errors so they never surface as "Buy failed"
-    try { console.error('recordTrade failed (ignored):', (e as any)?.message || e); } catch {}
-  }
+/* ---------- Quick-Buy helpers (labels + parser) ---------- */
+const QB_DEFAULTS = ['250K','500K','1M','2M','4M','5M'];
+const quickBuyLabels = new Map<number, string[]>(); // uid -> 6 labels
+
+function getQuickLabels(uid: number): string[] {
+  const v = quickBuyLabels.get(uid);
+  return (v && v.length === 6) ? v : QB_DEFAULTS;
 }
+
+/** Turn "250k"/"1m" into a plain PLS number string (no decimals) */
+function kmbToPls(label: string): string {
+  const t = (label || '').trim().toLowerCase().replace(/[, _]/g, '');
+  const m = t.match(/^(\d+)(k|m|b)?$/i);
+  if (!m) return '0';
+  const num = BigInt(m[1]);
+  const suf = (m[2] || '').toLowerCase();
+  const mul = suf === 'k' ? 1_000n : suf === 'm' ? 1_000_000n : suf === 'b' ? 1_000_000_000n : 1n;
+  return (num * mul).toString();
+}
+
+/* swallow clicks for "unclickable" labels */
+bot.action('noop', async (ctx) => { try { await ctx.answerCbQuery(); } catch {} });
 
 /* ---------- Price helpers used below ---------- */
 async function pricePLSPerToken(token: string): Promise<number | null> {
@@ -984,9 +989,40 @@ async function renderBuyMenu(ctx: any) {
     6
   );
 
-  // Use HTML so the wallet address link is tappable
+  // Base keyboard + HTML
   const base = buyMenu(Math.round(pct), walletButtons) as any;
   const extra: any = { parse_mode: 'HTML', ...(base || {}) };
+
+  // Inject the Quick-Buy section just above the "Amount" row if present
+  extra.reply_markup = extra.reply_markup || {};
+  const kb: any[][] = (extra.reply_markup.inline_keyboard || []) as any[][];
+  const amountRowIdx = kb.findIndex(row =>
+    row?.some?.((b: any) =>
+      String(b?.text || '').toLowerCase().includes('amount') ||
+      String(b?.callback_data || '').startsWith('buy_set_amount')
+    )
+  );
+
+  const labels = getQuickLabels(ctx.from.id).map(l => `${l} PLS`);
+  const qbLabelRow = [Markup.button.callback('BUY AMOUNT / METHOD', 'noop')];
+  const qbRow1 = [
+    Markup.button.callback(labels[0], 'buy_qb:0'),
+    Markup.button.callback(labels[1], 'buy_qb:1'),
+    Markup.button.callback(labels[2], 'buy_qb:2'),
+  ];
+  const qbRow2 = [
+    Markup.button.callback(labels[3], 'buy_qb:3'),
+    Markup.button.callback(labels[4], 'buy_qb:4'),
+    Markup.button.callback(labels[5], 'buy_qb:5'),
+  ];
+
+  if (amountRowIdx >= 0) {
+    kb.splice(amountRowIdx, 0, qbLabelRow, qbRow1, qbRow2);
+  } else {
+    // fallback: put it near the top if we can't find the Amount row
+    kb.unshift(qbLabelRow, qbRow1, qbRow2);
+  }
+  extra.reply_markup.inline_keyboard = kb;
 
   await showMenu(ctx, lines, extra);
 }
@@ -1027,6 +1063,88 @@ bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
   const id = Number(ctx.match[1]);
   const s = getSelSet(ctx.from.id);
   if (s.has(id)) s.delete(id); else s.add(id);
+  return renderBuyMenu(ctx);
+});
+
+/* ----- Quick Buy actions (instant PLS spends) ----- */
+bot.action(/^buy_qb:(\d+)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const idx = Number(ctx.match[1] ?? -1);
+  if (idx < 0 || idx > 5) return;
+
+  const u = getUserSettings(ctx.from.id);
+  const token = u?.token_address;
+  if (!token) return showMenu(ctx, 'Set token first.', buyMenu(u?.gas_pct ?? 0));
+
+  const selIds = Array.from(getSelSet(ctx.from.id));
+  const active = getActiveWallet(ctx.from.id);
+  const wallets = selIds.length
+    ? listWallets(ctx.from.id).filter((w) => selIds.includes(w.id))
+    : (active ? [active] : []);
+
+  if (!wallets.length) return showMenu(ctx, 'Select a wallet first (Wallets page).', buyMenu(u?.gas_pct ?? 0));
+
+  // Parse label -> PLS (e.g., "250K" -> "250000")
+  const label = getQuickLabels(ctx.from.id)[idx] || '0';
+  const plsStr = kmbToPls(label);
+  let amountIn: bigint;
+  try {
+    amountIn = ethers.parseEther(plsStr);
+  } catch {
+    return showMenu(ctx, `Bad amount: ${label} PLS`, buyMenu(u?.gas_pct ?? 0));
+  }
+  if (amountIn <= 0n) return showMenu(ctx, `Bad amount: ${label} PLS`, buyMenu(u?.gas_pct ?? 0));
+
+  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
+
+  const tasks = wallets.map(async (w) => {
+    const pendingMsg = await ctx.reply(`⏳ Sending buy (${label} PLS) for ${short(w.address)}…`);
+    try {
+      const gas = await computeGas(ctx.from.id);
+      const r = await buyAutoRoute(getPrivateKey(w), token!, amountIn, 0n, gas);
+      const hash = (r as any)?.hash;
+
+      // Pre-quote for success card + logging
+      let preOut: bigint = 0n, tokDec = 18, tokSym = 'TOKEN';
+      try {
+        const meta = await tokenMeta(token!);
+        tokDec = meta.decimals ?? 18;
+        tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+        const pre = await bestQuoteBuy(amountIn, token!);
+        if (pre?.amountOut) {
+          preOut = pre.amountOut;
+          try { recordTrade(ctx.from.id, w.address, token!, 'BUY', amountIn, pre.amountOut, pre.route.key); } catch {}
+        }
+      } catch {}
+
+      if (hash) {
+        const link = otter(hash);
+        try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`); }
+        catch { await ctx.reply(`transaction sent ${link}`); }
+
+        provider.waitForTransaction(hash).then(async () => {
+          try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
+          await postTradeSuccess(ctx, {
+            action: 'BUY',
+            spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
+            receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
+            tokenAddress: token!,
+            explorerUrl: link
+          });
+        }).catch(() => {});
+      } else {
+        try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)'); }
+        catch {}
+      }
+    } catch (e: any) {
+      const brief = conciseError(e);
+      try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Buy failed for ${short(w.address)}: ${brief}`); }
+      catch { await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${brief}`); }
+    }
+  });
+
+  await Promise.allSettled(tasks);
+  await upsertPinnedPosition(ctx);
   return renderBuyMenu(ctx);
 });
 
@@ -1078,8 +1196,7 @@ bot.action('buy_exec', async (ctx) => {
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
           preOut = preQuote.amountOut;
-          // 🔒 Never let logging break the flow
-          safeRecordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+          try { recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key); } catch {}
         }
       } catch {}
 
@@ -1155,8 +1272,7 @@ bot.action('buy_exec_all', async (ctx) => {
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
           preOut = preQuote.amountOut;
-          // 🔒 Never let logging break the flow
-          safeRecordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+          try { recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key); } catch {}
         }
       } catch {}
 
@@ -1182,83 +1298,6 @@ bot.action('buy_exec_all', async (ctx) => {
             explorerUrl: link
           });
           // (referral nudge removed)
-        }).catch(() => {/* ignore */});
-      } else {
-        try {
-          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
-        } catch {}
-      }
-    } catch (e: any) {
-      const brief = conciseError(e);
-      try {
-        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Buy failed for ${short(w.address)}: ${brief}`);
-      } catch {
-        await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${brief}`);
-      }
-    }
-  });
-
-  await Promise.allSettled(tasks);
-
-  await upsertPinnedPosition(ctx);
-  return renderBuyMenu(ctx);
-});
-
-bot.action('buy_exec_all', async (ctx) => {
-  await ctx.answerCbQuery();
-  const rows = listWallets(ctx.from.id); const u = getUserSettings(ctx.from.id);
-  if (!rows.length) return showMenu(ctx, 'No wallets.', buyMenu(u?.gas_pct ?? 0));
-  if (!u?.token_address) return showMenu(ctx, 'Set token first.', buyMenu(u?.gas_pct ?? 0));
-
-  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
-  const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
-  const token = u.token_address!;
-
-  // 🔁 Fire all transactions simultaneously
-  const tasks = rows.map(async (w) => {
-    const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
-    try {
-      const gas = await computeGas(ctx.from.id);
-      const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, 0n, gas);
-      const hash = (r as any)?.hash;
-
-      let preOut: bigint = 0n;
-      let tokDec = 18;
-      let tokSym = 'TOKEN';
-      try {
-        const meta = await tokenMeta(token);
-        tokDec = meta.decimals ?? 18;
-        tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-        const preQuote = await bestQuoteBuy(amountIn, token);
-        if (preQuote?.amountOut) {
-          preOut = preQuote.amountOut;
-          // 🔒 Never let logging break the flow
-          safeRecordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-        }
-      } catch {}
-
-      if (hash) {
-        const link = otter(hash);
-        try {
-          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
-        } catch {
-          await ctx.reply(`transaction sent ${link}`);
-        }
-
-        if (token.toLowerCase() !== WPLS) {
-          approveAllRouters(getPrivateKey(w), token, gas).catch(() => {});
-        }
-
-        provider.waitForTransaction(hash).then(async () => {
-          try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
-          await postTradeSuccess(ctx, {
-            action: 'BUY',
-            spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-            receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-            tokenAddress: token,
-            explorerUrl: link
-          });
-          await sendRefNudgeTo(ctx.from.id);
         }).catch(() => {/* ignore */});
       } else {
         try {
