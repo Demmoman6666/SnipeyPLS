@@ -2171,61 +2171,63 @@ async function renderSellMenu(ctx: any) {
     pnlLine,
   ].join('\n');
 
-  /* ===== Keyboard to mirror the BUY layout (plus Slippage row) ===== */
-  const all = listWallets(ctx.from.id);
-  const activeId = getActiveWallet(ctx.from.id)?.id;
-  const currentId = selectedId ?? activeId;
+/* ===== Keyboard to mirror the BUY layout (plus Slippage row) ===== */
+const all = listWallets(ctx.from.id);
+const activeId = getActiveWallet(ctx.from.id)?.id;
+const currentId = selectedId ?? activeId;
 
-  const walletButtons = chunk(
-    all.map((row, i) =>
-      Markup.button.callback(`${currentId === row.id ? '✅ ' : ''}W${i + 1}`, `sell_wallet_select:${row.id}`)
-    ),
-    6
-  );
+const walletButtons = chunk(
+  all.map((row, i) =>
+    Markup.button.callback(`${currentId === row.id ? '✅ ' : ''}W${i + 1}`, `sell_wallet_select:${row.id}`)
+  ),
+  6
+);
 
-  const curPct = u?.sell_pct ?? 100;
-  const pctBtn = (n: 25 | 50 | 75 | 100, action: string) =>
-    Markup.button.callback(`${curPct === n ? '✅ ' : ''}${n}%`, action);
+/* --- DYNAMIC Sell % row (Step 4) --- */
+const curPct = u?.sell_pct ?? 100;
+// assumes you added getSellPresets(uid) earlier (defaults: [25,50,75,100])
+const sellPresets = getSellPresets(ctx.from.id);
+const pctRows = chunk(
+  sellPresets.map((n) =>
+    Markup.button.callback(`${curPct === n ? '✅ ' : ''}${n}%`, `sell_pct_set:${n}`)
+  ),
+  4 // show up to 4 per row
+);
 
-  const kb: any[][] = [
-    // Top gas adjuster (alone)
-    [Markup.button.callback(`⛽️ Gas % (${NF.format(u?.gas_pct ?? 0)}%)`, 'gas_pct_open')],
-    // Slippage row, its own line between gas and Back/Refresh
-    [Markup.button.callback(`🎯 Slippage (${fmtSlip(slipBps)}%)`, 'slip_open')],
-    // Back / Refresh beneath slippage
-    [
-      Markup.button.callback('⬅️ Back', 'main_back'),
-      Markup.button.callback('🔄 Refresh', 'sell_refresh'),
-    ],
-    // Edit sell data (disabled label via noop)
-    [Markup.button.callback('EDIT SELL DATA', 'noop')],
-    // Contract / Pair
-    [
-      Markup.button.callback('Contract', 'sell_set_token'),
-      Markup.button.callback('Pair', 'pair_info'),
-    ],
-    // Wallets label
-    [Markup.button.callback('Wallets', 'noop')],
-    // Wallet rows
-    ...walletButtons,
-    // Sell amount/method label + quick % row (with ✅ on current)
-    [Markup.button.callback('Sell Amount / Method', 'noop')],
-    [
-      pctBtn(25,  'sell_pct_25'),
-      pctBtn(50,  'sell_pct_50'),
-      pctBtn(75,  'sell_pct_75'),
-      pctBtn(100, 'sell_pct_100'),
-    ],
-    // Sell All Wallets button
-    [Markup.button.callback('Sell All Wallets', 'sell_exec_all')],
-    // Limit Sell / Orders
-    [
-      Markup.button.callback('Limit Sell', 'limit_sell'),
-      Markup.button.callback('Orders', 'limit_list'),
-    ],
-    // Primary action
-    [Markup.button.callback('🟥 Sell Now', 'sell_exec')],
-  ];
+/* now compose the keyboard */
+const kb: any[][] = [
+  // Top gas adjuster (alone)
+  [Markup.button.callback(`⛽️ Gas % (${NF.format(u?.gas_pct ?? 0)}%)`, 'gas_pct_open')],
+  // Slippage row
+  [Markup.button.callback(`🎯 Slippage (${fmtSlip(slipBps)}%)`, 'slip_open')],
+  // Back / Refresh
+  [
+    Markup.button.callback('⬅️ Back', 'main_back'),
+    Markup.button.callback('🔄 Refresh', 'sell_refresh'),
+  ],
+  // Edit sell data (disabled label)
+  [Markup.button.callback('EDIT SELL DATA', 'noop')],
+  // Contract / Pair
+  [
+    Markup.button.callback('Contract', 'sell_set_token'),
+    Markup.button.callback('Pair', 'pair_info'),
+  ],
+  // Wallets label + wallet rows
+  [Markup.button.callback('Wallets', 'noop')],
+  ...walletButtons,
+
+  // 🔻 Dynamic "Sell Amount / Method" label + dynamic preset rows
+  [Markup.button.callback('Sell Amount / Method', 'noop')],
+  ...pctRows,
+
+  // Sell all wallets, limits, primary action
+  [Markup.button.callback('Sell All Wallets', 'sell_exec_all')],
+  [
+    Markup.button.callback('Limit Sell', 'limit_sell'),
+    Markup.button.callback('Orders', 'limit_list'),
+  ],
+  [Markup.button.callback('🟥 Sell Now', 'sell_exec')],
+];
 
   await showMenu(ctx, text, { parse_mode: 'HTML', ...Markup.inlineKeyboard(kb) });
 }
