@@ -550,51 +550,144 @@ bot.action('ref_refresh', async (ctx) => {
   return renderReferrals(ctx);
 });
 
-/* ---------- SETTINGS ---------- */
-async function renderSettings(ctx: any) {
-  const u = getUserSettings(ctx.from.id);
-  const lines = [
-    'SETTINGS',
-    '',
-    `Gas Limit: ${fmtInt(String(u?.gas_limit ?? 250000))}`,
-    `Gwei Booster: ${NF.format(u?.gwei_boost_gwei ?? 0)} gwei`,
-    `Default Gas % over market: ${NF.format(u?.default_gas_pct ?? 0)}%`,
-    `Auto-buy: ${(u?.auto_buy_enabled ? 'ON' : 'OFF')}  |  Amount: ${fmtDec(String(u?.auto_buy_amount_pls ?? 0.01))} PLS`,
-  ].join('\n');
-  await showMenu(ctx, lines, settingsMenu());
+/* ---------- SETTINGS (reworked) ---------- */
+
+// Per-user Auto-Buy wallet selection (in-memory)
+const autoBuySelected = new Map<number, Set<number>>();
+function getAutoSelSet(uid: number) {
+  let s = autoBuySelected.get(uid);
+  if (!s) { s = new Set<number>(); autoBuySelected.set(uid, s); }
+  return s;
 }
 
-bot.action('settings', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSettings(ctx); });
+async function renderSettings(ctx: any) {
+  const u = getUserSettings(ctx.from.id);
+  const defPct  = u?.default_gas_pct ?? 0;
+  const curGL   = u?.gas_limit ?? 250000;
+  const curGB   = u?.gwei_boost_gwei ?? 0;
+  const autoOn  = !!u?.auto_buy_enabled;
+  const autoAmt = u?.auto_buy_amount_pls ?? 0.01;
 
+  const lines = [
+    '⚙️ <b>SETTINGS</b>',
+    '',
+    '<b>Gas Settings</b>',
+    `• Default Gas %: <code>${NF.format(defPct)}</code>%`,
+    `• Gas Limit: <code>${fmtInt(String(curGL))}</code>`,
+    `• Gwei Booster: <code>${NF.format(curGB)}</code> gwei`,
+    '',
+    '<b>Auto Buy</b>',
+    `• Status: <b>${autoOn ? 'ON' : 'OFF'}</b>`,
+    `• Amount: <code>${fmtDec(String(autoAmt))}</code> PLS`,
+    '',
+    '<b>Auto-Buy Wallets</b>',
+    'Select wallets that should participate when Auto-Buy triggers.',
+  ].join('\n');
+
+  // Wallet toggles: ✅ W1, W2 … (per-user list order)
+  const rows = listWallets(ctx.from.id);
+  const sel = getAutoSelSet(ctx.from.id);
+  const walletButtons = chunk(
+    rows.map((w, i) =>
+      Markup.button.callback(`${sel.has(w.id) ? '✅ ' : ''}W${i + 1}`, `auto_wallet_toggle:${w.id}`)
+    ),
+    6
+  );
+
+  // Keyboard layout:
+  // Back
+  // — Gas Settings — (label)
+  // Default Gas %
+  // Gas Limit | Gwei Booster
+  // — Auto Buy — (label)
+  // Toggle On/Off
+  // Auto Buy Amount
+  // — Wallets — (label)
+  // W1..Wn
+  const kb = Markup.inlineKeyboard([
+    [Markup.button.callback('⬅️ Back', 'main_back')],
+
+    [Markup.button.callback('— Gas Settings —', 'noop')],
+    [Markup.button.callback('Default Gas %', 'set_defpct')],
+    [Markup.button.callback('Gas Limit', 'set_gl'), Markup.button.callback('Gwei Booster', 'set_gb')],
+
+    [Markup.button.callback('— Auto Buy —', 'noop')],
+    [Markup.button.callback('Toggle On/Off', 'auto_toggle')],
+    [Markup.button.callback('Auto Buy Amount', 'auto_amt')],
+
+    [Markup.button.callback('— Wallets —', 'noop')],
+    ...walletButtons,
+  ]);
+
+  await showMenu(ctx, lines, { parse_mode: 'HTML', ...kb });
+}
+
+// Open Settings
+bot.action('settings', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.delete(ctx.from.id);
+  return renderSettings(ctx);
+});
+
+// Gas: set gas limit
 bot.action('set_gl', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_gl' });
-  return showMenu(ctx, 'Send new *Gas Limit* (e.g., 300000).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
+  return showMenu(
+    ctx,
+    'Send new <b>Gas Limit</b> (e.g., <code>300000</code>).',
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) }
+  );
 });
+
+// Gas: set gwei booster
 bot.action('set_gb', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_gb' });
-  return showMenu(ctx, 'Send new *Gwei Booster* in gwei (e.g., 0.2).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
+  return showMenu(
+    ctx,
+    'Send new <b>Gwei Booster</b> in gwei (e.g., <code>0.2</code>).',
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) }
+  );
 });
+
+// Gas: set default gas %
 bot.action('set_defpct', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'set_defpct' });
-  return showMenu(ctx, 'Send *Default Gas %* over market (e.g., 10).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
+  return showMenu(
+    ctx,
+    'Send <b>Default Gas %</b> over market (e.g., <code>10</code>).',
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) }
+  );
 });
+
+// Auto-Buy: toggle
 bot.action('auto_toggle', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
   setAutoBuyEnabled(ctx.from.id, !(u?.auto_buy_enabled ?? 0));
   return renderSettings(ctx);
 });
+
+// Auto-Buy: amount
 bot.action('auto_amt', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'auto_amt' });
-  return showMenu(ctx, 'Send *Auto-buy amount* in PLS (e.g., 0.5).', { parse_mode: 'Markdown',
-    ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) });
+  return showMenu(
+    ctx,
+    'Send <b>Auto-Buy amount</b> in PLS (e.g., <code>0.5</code>).',
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'settings')]]) }
+  );
+});
+
+// Auto-Buy: wallet selection toggles
+bot.action(/^auto_wallet_toggle:(\d+)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const id = Number(ctx.match[1]);
+  const s = getAutoSelSet(ctx.from.id);
+  if (s.has(id)) s.delete(id); else s.add(id);
+  return renderSettings(ctx);
 });
 
 /* ---------- Wallets: list/manage ---------- */
