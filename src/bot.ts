@@ -851,7 +851,7 @@ async function renderBuyMenu(ctx: any) {
     6
   );
 
-  // Use HTML so the wallet address link is tappable; no Copy/Explorer row injected
+  // Use HTML so the wallet address link is tappable
   const base = buyMenu(Math.round(pct), walletButtons) as any;
   const extra: any = { parse_mode: 'HTML', ...(base || {}) };
 
@@ -1147,6 +1147,23 @@ bot.action('sell_wallet_clear', async (ctx: any) => {
   return renderSellMenu(ctx);
 });
 
+/* small inline picker for sell % */
+bot.action('sell_pct_menu', async (ctx) => {
+  await ctx.answerCbQuery();
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.callback('25%', 'sell_pct_25'),
+      Markup.button.callback('50%', 'sell_pct_50'),
+      Markup.button.callback('75%', 'sell_pct_75'),
+      Markup.button.callback('100%', 'sell_pct_100'),
+    ],
+    [Markup.button.callback('⬅️ Back', 'menu_sell')],
+  ]);
+  return showMenu(ctx, 'Choose *Sell %*:', { parse_mode: 'Markdown', ...kb });
+});
+
+bot.action('sell_refresh', async (ctx) => { await ctx.answerCbQuery(); return renderSellMenu(ctx); });
+
 /* ---------- SELL MENU (HTML + metrics) ---------- */
 async function renderSellMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
@@ -1251,10 +1268,11 @@ async function renderSellMenu(ctx: any) {
     pnlLine,
   ].join('\n');
 
-  // Wallet selector UI (rows of W1, W2… with check on current)
+  /* ===== Keyboard to mirror the BUY layout ===== */
   const all = listWallets(ctx.from.id);
   const activeId = getActiveWallet(ctx.from.id)?.id;
   const currentId = selectedId ?? activeId;
+
   const walletButtons = chunk(
     all.map((row, i) =>
       Markup.button.callback(`${currentId === row.id ? '✅ ' : ''}W${i + 1}`, `sell_wallet_select:${row.id}`)
@@ -1262,27 +1280,40 @@ async function renderSellMenu(ctx: any) {
     6
   );
 
-  // Build base keyboard and inject our extras (no copy/explorer row at top)
-  const base = sellMenu() as any;
-  const extra: any = { parse_mode: 'HTML', ...(base || {}) };
-  extra.reply_markup = extra.reply_markup || {};
-  const existing: any[][] = (extra.reply_markup.inline_keyboard || []) as any[][];
-
-  // Contract + Sell All rows
-  const contractRow = tokenAddrFull
-    ? [Markup.button.callback('📄 Contract', `copy:${tokenAddrFull.toLowerCase()}`)]
-    : [];
-  const sellAllRow = [Markup.button.callback('🧨 Sell All Wallets', 'sell_exec_all')];
-
-  extra.reply_markup.inline_keyboard = [
+  const kb: any[][] = [
+    // Top bar
+    [
+      Markup.button.callback(`⛽️ Gas % (${NF.format(u?.gas_pct ?? 0)}%)`, 'gas_pct_open'),
+      Markup.button.callback('⬅️ Back', 'main_back'),
+      Markup.button.callback('🔄 Refresh', 'sell_refresh'),
+    ],
+    // Edit sell data (disabled label via noop)
+    [Markup.button.callback('EDIT SELL DATA', 'noop')],
+    // Contract / Pair
+    [
+      Markup.button.callback('Contract', 'sell_set_token'),
+      Markup.button.callback('Pair', 'pair_info'),
+    ],
+    // Wallets label
+    [Markup.button.callback('Wallets', 'noop')],
+    // Wallet rows
     ...walletButtons,
     ...(all.length > 1 ? [[Markup.button.callback('🧭 Use Active Wallet', 'sell_wallet_clear')]] : []),
-    ...(contractRow.length ? [contractRow] : []),
-    sellAllRow,
-    ...existing,
+    // Amount % / Sell All
+    [
+      Markup.button.callback('Amount', 'sell_pct_menu'),
+      Markup.button.callback('Sell All Wallets', 'sell_exec_all'),
+    ],
+    // Limit Sell / Orders
+    [
+      Markup.button.callback('Limit Sell', 'limit_sell'),
+      Markup.button.callback('Orders', 'limit_list'),
+    ],
+    // Primary action
+    [Markup.button.callback('🟥 Sell Now', 'sell_exec')],
   ];
 
-  await showMenu(ctx, text, extra);
+  await showMenu(ctx, text, { parse_mode: 'HTML', ...Markup.inlineKeyboard(kb) });
 }
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSellMenu(ctx); });
