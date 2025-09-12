@@ -1112,23 +1112,44 @@ bot.action('limit_list', async (ctx) => {
   await ctx.answerCbQuery();
   const rows = listLimitOrders(ctx.from.id);
   if (!rows.length) return showMenu(ctx, 'No limit orders yet.');
-  const lines = rows.map((r: any) => {
-    const base = `#${r.id} ${r.side} ${short(r.token_address)}  ${r.trigger_type}=${NF.format(r.trigger_value)}  [${r.status}]`;
-    if (r.side === 'BUY' && r.amount_pls_wei) return `${base}  amt=${fmtDec(ethers.formatEther(BigInt(r.amount_pls_wei)))} PLS`;
-    if (r.side === 'SELL' && r.sell_pct != null) return `${base}  ${r.sell_pct}%`;
+
+  // Show per-user numbering (1..n) while keeping real DB ids internally
+  const lines = rows.map((r: any, i: number) => {
+    const base = `#${i + 1} ${r.side} ${short(r.token_address)}  ${r.trigger_type}=${NF.format(r.trigger_value)}  [${r.status}]`;
+    if (r.side === 'BUY' && r.amount_pls_wei) {
+      return `${base}  amt=${fmtDec(ethers.formatEther(BigInt(r.amount_pls_wei)))} PLS`;
+    }
+    if (r.side === 'SELL' && r.sell_pct != null) {
+      return `${base}  ${r.sell_pct}%`;
+    }
     return base;
   });
-  const kb = rows.filter((r: any) => r.status === 'OPEN')
-    .map((r: any) => [Markup.button.callback(`❌ Cancel #${r.id}`, `limit_cancel:${r.id}`)]);
+
+  // Buttons display per-user numbers, callbacks carry true DB id
+  const kb = rows
+    .map((r: any, i: number) =>
+      r.status === 'OPEN'
+        ? [Markup.button.callback(`❌ Cancel #${i + 1}`, `limit_cancel:${r.id}`)]
+        : null
+    )
+    .filter(Boolean) as any[];
+
   kb.push([Markup.button.callback('⬅️ Back', 'main_back')]);
+
   return showMenu(ctx, lines.join('\n'), Markup.inlineKeyboard(kb));
 });
 
 bot.action(/^limit_cancel:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
-  const id = Number(ctx.match[1]);
+  const id = Number(ctx.match[1]); // real DB id
+
+  // Work out the user-visible number for this row
+  const rows = listLimitOrders(ctx.from.id);
+  const idx = rows.findIndex((r: any) => r.id === id);
+  const disp = idx >= 0 ? `#${idx + 1}` : `#${id}`;
+
   const changed = cancelLimitOrder(ctx.from.id, id);
-  return showMenu(ctx, changed ? `Limit #${id} cancelled.` : `Couldn’t cancel #${id}.`, mainMenu());
+  return showMenu(ctx, changed ? `Limit ${disp} cancelled.` : `Couldn’t cancel ${disp}.`, mainMenu());
 });
 
 /* ===== Sell menu wallet selection (state + handlers) ===== */
