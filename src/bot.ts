@@ -886,6 +886,97 @@ function kmbToPls(label: string): string {
   return (num * mul).toString();
 }
 
+/* ---------- Editable Quick-Buy labels & Sell % presets ---------- */
+
+// Update a single Quick-Buy label for a user (keeps K/M/B visible in UI)
+function setQuickLabel(uid: number, idx: number, label: string) {
+  const norm = String(label).trim().toUpperCase();
+  const cur = [...getQuickLabels(uid)];
+  if (idx >= 0 && idx < 6) cur[idx] = norm;
+  quickBuyLabels.set(uid, cur);
+}
+
+// Sell % presets (per user)
+const SELL_PRESETS_DEFAULT = [25, 50, 75, 100];
+const sellPctPresets = new Map<number, number[]>();
+
+function getSellPresets(uid: number): number[] {
+  const v = sellPctPresets.get(uid);
+  return (v && v.length === 4) ? v : SELL_PRESETS_DEFAULT;
+}
+
+function setSellPreset(uid: number, idx: number, pct: number) {
+  const cur = [...getSellPresets(uid)];
+  if (idx >= 0 && idx < 4) cur[idx] = Math.max(1, Math.min(100, Math.round(pct)));
+  sellPctPresets.set(uid, cur);
+}
+
+/* ---------- Settings ▸ Edit menus ---------- */
+
+// Open: Edit Quick Buy buttons
+bot.action('edit_qb_open', async (ctx) => {
+  await ctx.answerCbQuery();
+  const labels = getQuickLabels(ctx.from.id);
+  const title = '🟢 <b>Edit Quick Buy Buttons</b>\nTap a button to change its label (supports K/M/B).';
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(`${labels[0]} PLS`, 'edit_qb_idx:0'),
+      Markup.button.callback(`${labels[1]} PLS`, 'edit_qb_idx:1'),
+      Markup.button.callback(`${labels[2]} PLS`, 'edit_qb_idx:2'),
+    ],
+    [
+      Markup.button.callback(`${labels[3]} PLS`, 'edit_qb_idx:3'),
+      Markup.button.callback(`${labels[4]} PLS`, 'edit_qb_idx:4'),
+      Markup.button.callback(`${labels[5]} PLS`, 'edit_qb_idx:5'),
+    ],
+    [Markup.button.callback('⬅️ Back', 'settings')],
+  ]);
+  return showMenu(ctx, title, { parse_mode: 'HTML', ...kb });
+});
+
+// Choose which quick-buy button to edit → ask for new label
+bot.action(/^edit_qb_idx:(\d)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const idx = Number(ctx.match[1]);
+  // @ts-expect-error: pending union extended in a later section
+  pending.set(ctx.from.id, { type: 'edit_qb', idx });
+  return showMenu(
+    ctx,
+    `Send new label for button #${idx + 1} (e.g., <code>250k</code>, <code>1m</code>, <code>500000</code>).`,
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'edit_qb_open')]]) }
+  );
+});
+
+// Open: Edit Sell % presets
+bot.action('edit_sellpct_open', async (ctx) => {
+  await ctx.answerCbQuery();
+  const arr = getSellPresets(ctx.from.id);
+  const title = '🔴 <b>Edit Sell % Presets</b>\nTap a preset to change it (1–100).';
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(`${arr[0]}%`, 'edit_sp_idx:0'),
+      Markup.button.callback(`${arr[1]}%`, 'edit_sp_idx:1'),
+      Markup.button.callback(`${arr[2]}%`, 'edit_sp_idx:2'),
+      Markup.button.callback(`${arr[3]}%`, 'edit_sp_idx:3'),
+    ],
+    [Markup.button.callback('⬅️ Back', 'settings')],
+  ]);
+  return showMenu(ctx, title, { parse_mode: 'HTML', ...kb });
+});
+
+// Choose which Sell % to edit → ask for number
+bot.action(/^edit_sp_idx:(\d)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const idx = Number(ctx.match[1]);
+  // @ts-expect-error: pending union extended in a later section
+  pending.set(ctx.from.id, { type: 'edit_sp', idx });
+  return showMenu(
+    ctx,
+    `Send new percent for preset #${idx + 1} (1–100).`,
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'edit_sellpct_open')]]) }
+  );
+});
+
 /* swallow clicks for "unclickable" labels */
 bot.action('noop', async (ctx) => { try { await ctx.answerCbQuery(); } catch {} });
 
