@@ -2235,76 +2235,108 @@ if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
 
   const u = getUserSettings(ctx.from.id);
   if (u?.auto_buy_enabled) {
-    const w = getActiveWallet(ctx.from.id);
-    if (!w) { await ctx.reply('Select or create a wallet first.'); return renderBuyMenu(ctx); }
+    // Read selected auto-buy wallets from the Settings selector (getAutoSel).
+    // If it's not defined for any reason, treat as "none selected".
+    const getAutoSelMaybe = (globalThis as any).getAutoSel as
+      | ((uid: number) => Set<number>)
+      | undefined;
+
+    const selectedIds = getAutoSelMaybe ? Array.from(getAutoSelMaybe(ctx.from.id)) : [];
+
+    // Build wallet list: selected (if any) else the active wallet
+    let wallets = selectedIds.length
+      ? listWallets(ctx.from.id).filter(w => selectedIds.includes(w.id))
+      : ((): any[] => {
+          const w = getActiveWallet(ctx.from.id);
+          return w ? [w] : [];
+        })();
+
+    if (!wallets.length) {
+      await ctx.reply('Select or create a wallet first.');
+      return renderBuyMenu(ctx);
+    }
 
     const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
     const amountIn = ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01));
+    const token = text;
 
-    const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
+    // small local helper to compress noisy errors
+    const briefErr = (e: any): string => {
+      const s = String(e?.reason || e?.message || e || '');
+      if (/insufficient funds/i.test(s)) return 'insufficient funds';
+      if (/intrinsic transaction cost/i.test(s)) return 'insufficient funds (gas)';
+      if (/replacement fee too low|nonce/i.test(s)) return 'nonce / replacement fee too low';
+      if (/transfer amount exceeds balance|ERC20|insufficient/i.test(s)) return 'insufficient token balance';
+      if (/execution reverted/i.test(s)) return 'execution reverted';
+      return s.split('\n')[0].slice(0, 200);
+    };
 
-    try {
-      const gas = await computeGas(ctx.from.id);
-      const r = await buyAutoRoute(getPrivateKey(w), text, amountIn, 0n, gas);
-      const hash = (r as any)?.hash;
+    // 🔁 Fire all auto-buys simultaneously
+    const tasks = wallets.map(async (w) => {
+      const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
+      try {
+        const gas = await computeGas(ctx.from.id);
+        const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, 0n, gas);
+        const hash = (r as any)?.hash;
 
-      let preOut: bigint = 0n;
-      let tokDec = 18;
-      let tokSym = 'TOKEN';
-
-      if (hash) {
-        const link = otter(hash);
-
+        let preOut: bigint = 0n;
+        let tokDec = 18;
+        let tokSym = 'TOKEN';
         try {
-          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
-        } catch {
-          await ctx.reply(`transaction sent ${link}`);
-        }
-
-        try {
-          const meta = await tokenMeta(text);
+          const meta = await tokenMeta(token);
           tokDec = meta.decimals ?? 18;
           tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-          const preQuote = await bestQuoteBuy(amountIn, text);
+          const preQuote = await bestQuoteBuy(amountIn, token);
           if (preQuote?.amountOut) {
             preOut = preQuote.amountOut;
-            recordTrade(ctx.from.id, w.address, text, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+            recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
           }
         } catch {}
 
-        try {
-          if (text.toLowerCase() !== WPLS) {
-            approveAllRouters(getPrivateKey(w), text, gas).catch(() => {});
+        if (hash) {
+          const link = otter(hash);
+          try {
+            await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
+          } catch {
+            await ctx.reply(`transaction sent ${link}`);
           }
-        } catch {}
 
-        provider.waitForTransaction(hash).then(async () => {
-          try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
-          await postTradeSuccess(ctx, {
-            action: 'BUY',
-            spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-            receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-            tokenAddress: text,
-            explorerUrl: link
-          });
-          await sendRefNudgeTo(ctx.from.id);
-        }).catch(() => {/* ignore */});
-      } else {
+          if (token.toLowerCase() !== WPLS) {
+            approveAllRouters(getPrivateKey(w), token, gas).catch(() => {});
+          }
+
+          provider.waitForTransaction(hash).then(async () => {
+            try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
+            await postTradeSuccess(ctx, {
+              action: 'BUY',
+              spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
+              receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
+              tokenAddress: token,
+              explorerUrl: link
+            });
+            // NOTE: no referral nudge in auto-buy
+          }).catch(() => {/* ignore */});
+        } else {
+          try {
+            await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
+          } catch {}
+        }
+      } catch (e: any) {
+        const msg = `❌ Auto-buy failed for ${short(w.address)}: ${briefErr(e)}`;
         try {
-          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
-        } catch {}
+          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, msg);
+        } catch {
+          await ctx.reply(msg);
+        }
       }
-    } catch (e: any) {
-      try {
-        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Auto-buy failed: ${e?.message ?? String(e)}`);
-      } catch {
-        await ctx.reply(`❌ Auto-buy failed: ${e?.message ?? String(e)}`);
-      }
-    }
+    });
+
+    await Promise.allSettled(tasks);
 
     await upsertPinnedPosition(ctx);
     return renderBuyMenu(ctx);
   } else {
+    // No auto-buy => just open the buy menu with the token warmed
     return renderBuyMenu(ctx);
   }
 }
