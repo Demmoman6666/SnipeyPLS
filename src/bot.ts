@@ -780,23 +780,23 @@ async function renderBuyMenu(ctx: any) {
   const gl = u?.gas_limit ?? 250000;
   const gb = u?.gwei_boost_gwei ?? 0;
 
-  let tokenLine = '<b>Token:</b> —';
-  let pairLine = `<b>Pair:</b> ${process.env.WPLS_ADDRESS || '0xA1077a294dDE1B09bB078844df40758a5D0f9a27'} (WPLS)`;
-  let priceLine = '📈 <b>Price:</b> —';
-  let mcapLine  = '💰 <b>Market Cap:</b> —';
-  let liqLine   = '💧 <b>Liquidity:</b> —';
-  let outLine   = '<b>Amount out:</b> unavailable';
+  let tokenLine = 'Token: —';
+  let pairLine = `Pair: ${process.env.WPLS_ADDRESS || '0xA1077a294dDE1B09bB078844df40758a5D0f9a27'} (WPLS)`;
+  let priceLine = '📈 Price: —';
+  let mcapLine  = '💰 Market Cap: —';
+  let liqLine   = '💧 Liquidity: —';
+  let outLine = 'Amount out: unavailable';
 
   if (u?.token_address) {
     const tokenAddr = u.token_address as string;
     try {
       const meta = await tokenMeta(tokenAddr);
-      tokenLine = `<b>Token:</b>\n<code>${tokenAddr}</code>${meta.symbol ? ` (${meta.symbol})` : ''}`;
+      tokenLine = `Token: ${tokenAddr} (${meta.symbol || meta.name || 'TOKEN'})`;
 
       const best = await bestQuoteBuy(ethers.parseEther(String(amt)), tokenAddr);
       if (best) {
         const dec = meta.decimals ?? 18;
-        outLine = `<b>Amount out:</b> ${fmtDec(ethers.formatUnits(best.amountOut, dec))} ${meta.symbol || 'TOKEN'}   ·   Route: ${best.route.key}`;
+        outLine = `Amount out: ${fmtDec(ethers.formatUnits(best.amountOut, dec))} ${meta.symbol || 'TOKEN'}   ·   Route: ${best.route.key}`;
       }
 
       const [ds, capFallback] = await Promise.all([
@@ -805,24 +805,24 @@ async function renderBuyMenu(ctx: any) {
       ]);
 
       const priceUsdVal = ds.priceUSD != null ? ds.priceUSD : await priceUSDPerToken(tokenAddr);
-      priceLine = `📈 <b>Price:</b> ${fmtUsdPrice(priceUsdVal)}`;
+      priceLine = `📈 Price: ${fmtUsdPrice(priceUsdVal)}`;
 
       if (ds.marketCapUSD != null) {
-        mcapLine = `💰 <b>Market Cap:</b> ${fmtUsdCompact(ds.marketCapUSD)} (DexScreener)`;
+        mcapLine = `💰 Market Cap: ${fmtUsdCompact(ds.marketCapUSD)} (DexScreener)`;
       } else if (capFallback.ok && capFallback.mcapUSD != null) {
-        mcapLine = `💰 <b>Market Cap:</b> ${fmtUsdCompact(capFallback.mcapUSD)}`;
+        mcapLine = `💰 Market Cap: ${fmtUsdCompact(capFallback.mcapUSD)}`;
       }
 
       if (ds.liquidityUSD != null) {
-        liqLine = `💧 <b>Liquidity:</b> ${fmtUsdCompact(ds.liquidityUSD)}`;
+        liqLine = `💧 Liquidity: ${fmtUsdCompact(ds.liquidityUSD)}`;
       }
     } catch {}
   }
 
   const lines = [
-    '🟩 <b>BUY MENU</b>',
+    'BUY MENU',
     '',
-    `<b>Wallet:</b>\n${aw ? `<code>${aw.address}</code>` : '— (Select)'}`,
+    `Wallet: ${aw ? aw.address : '— (Select)'}`,
     '',
     tokenLine,
     '',
@@ -832,9 +832,9 @@ async function renderBuyMenu(ctx: any) {
     mcapLine,
     liqLine,
     '',
-    `<b>Amount in:</b> ${fmtDec(String(amt))} PLS`,
-    `<b>Gas boost:</b> +${NF.format(pct)}% over market`,
-    `<b>Gas limit:</b> ${fmtInt(String(gl))}  |  <b>Booster:</b> ${NF.format(gb)} gwei`,
+    `Amount in: ${fmtDec(String(amt))} PLS`,
+    `Gas boost: +${NF.format(pct)}% over market`,
+    `Gas limit: ${fmtInt(String(gl))}  |  Booster: ${NF.format(gb)} gwei`,
     '',
     outLine,
   ].join('\n');
@@ -845,6 +845,9 @@ async function renderBuyMenu(ctx: any) {
     rows.map((w, i) => Markup.button.callback(`${sel.has(w.id) ? '✅ ' : ''}W${i + 1}`, `wallet_toggle:${w.id}`)),
     6
   );
+
+  await showMenu(ctx, lines, buyMenu(Math.round(pct), walletButtons));
+}
 
   // start from existing buy keyboard, then inject parse_mode + Copy/Explorer for active wallet
   const base = buyMenu(Math.round(pct), walletButtons) as any;
@@ -1152,7 +1155,7 @@ bot.action('sell_wallet_clear', async (ctx: any) => {
 async function renderSellMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
 
-  // ✅ Use selected wallet (if any), otherwise active wallet
+  // Use selected wallet (if any), otherwise active wallet
   const selectedId = sellWalletSel.get(ctx.from.id);
   const w = selectedId ? getWalletById(ctx.from.id, selectedId) : getActiveWallet(ctx.from.id);
 
@@ -1252,7 +1255,7 @@ async function renderSellMenu(ctx: any) {
     pnlLine,
   ].join('\n');
 
-  // ✅ Wallet selector UI (rows of W1, W2… with check on current)
+  // Wallet selector UI (rows of W1, W2… with check on current)
   const all = listWallets(ctx.from.id);
   const activeId = getActiveWallet(ctx.from.id)?.id;
   const currentId = selectedId ?? activeId;
@@ -1263,21 +1266,23 @@ async function renderSellMenu(ctx: any) {
     6
   );
 
-  // Build base keyboard and inject our extras
+  // Build base keyboard and inject our extras (no copy/explorer row)
   const base = sellMenu() as any;
   const extra: any = { parse_mode: 'HTML', ...(base || {}) };
   extra.reply_markup = extra.reply_markup || {};
   const existing = (extra.reply_markup.inline_keyboard || []) as any[];
 
-  // Optional: copy/explorer for the currently previewed wallet
-  const topRow = w
-    ? [[copyAddrBtn(w.address), Markup.button.url('🔍 Explorer', addrExplorer(w.address))]]
+  // Contract + Sell All rows
+  const contractRow = tokenAddrFull
+    ? [Markup.button.callback('📄 Contract', `copy:${tokenAddrFull.toLowerCase()}`)]
     : [];
+  const sellAllRow = [Markup.button.callback('🧨 Sell All Wallets', 'sell_exec_all')];
 
   extra.reply_markup.inline_keyboard = [
-    ...topRow,
     ...walletButtons,
     ...(all.length > 1 ? [[Markup.button.callback('🧭 Use Active Wallet', 'sell_wallet_clear')]] : []),
+    ...(contractRow.length ? [contractRow] : []),
+    sellAllRow,
     ...existing,
   ];
 
@@ -1295,7 +1300,7 @@ bot.action('sell_approve', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
 
-  // ✅ Use selected wallet if present, else active or first wallet
+  // Use selected wallet if present, else active or first wallet
   const selectedId = sellWalletSel.get(ctx.from.id);
   const w = selectedId
     ? getWalletById(ctx.from.id, selectedId)
@@ -1322,12 +1327,12 @@ bot.action('sell_set_token', async (ctx) => {
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_sell')]]) });
 });
 
-/* ---------- SELL EXEC ---------- */
+/* ---------- SELL EXEC (single wallet) ---------- */
 bot.action('sell_exec', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
 
-  // ✅ Use selected wallet if present, else active
+  // Use selected wallet if present, else active
   const selectedId = sellWalletSel.get(ctx.from.id);
   const w = selectedId ? getWalletById(ctx.from.id, selectedId) : getActiveWallet(ctx.from.id);
 
@@ -1399,6 +1404,82 @@ bot.action('sell_exec', async (ctx) => {
     }
   }
 
+  await upsertPinnedPosition(ctx);
+  return renderSellMenu(ctx);
+});
+
+/* ---------- SELL EXEC (ALL wallets, simultaneous) ---------- */
+bot.action('sell_exec_all', async (ctx) => {
+  await ctx.answerCbQuery();
+  const u = getUserSettings(ctx.from.id);
+  const rows = listWallets(ctx.from.id);
+  if (!rows.length) return showMenu(ctx, 'No wallets.', sellMenu());
+  if (!u?.token_address) return showMenu(ctx, 'Set token first.', sellMenu());
+
+  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
+  const pct = u?.sell_pct ?? 100;
+
+  const tasks = rows.map(async (w) => {
+    const pendingMsg = await ctx.reply(`⏳ Sending sell for ${short(w.address)}…`);
+    try {
+      const c = erc20(u.token_address);
+      const bal = await c.balanceOf(w.address);
+      const amount = (bal * BigInt(Math.round(pct))) / 100n;
+
+      if (amount <= 0n) {
+        try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'Nothing to sell.'); } catch {}
+        return;
+      }
+
+      const gas = await computeGas(ctx.from.id);
+      const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
+      const hash = (r as any)?.hash;
+
+      let outPls: bigint = 0n;
+      let tokDec = 18;
+      let tokSym = 'TOKEN';
+      try {
+        const meta = await tokenMeta(u.token_address);
+        tokDec = meta.decimals ?? 18;
+        tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+        const q = await bestQuoteSell(amount, u.token_address);
+        if (q?.amountOut) {
+          outPls = q.amountOut;
+          recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
+        }
+      } catch {}
+
+      if (hash) {
+        const link = otter(hash);
+        try {
+          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
+        } catch {
+          await ctx.reply(`transaction sent ${link}`);
+        }
+
+        provider.waitForTransaction(hash).then(async () => {
+          try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
+          await postTradeSuccess(ctx, {
+            action: 'SELL',
+            spend:   { amount,  decimals: tokDec, symbol: tokSym },
+            receive: { amount: outPls,  decimals: 18,     symbol: 'PLS' },
+            tokenAddress: u.token_address!,
+            explorerUrl: link
+          });
+        }).catch(() => {/* ignore */});
+      } else {
+        try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)'); } catch {}
+      }
+    } catch (e: any) {
+      try {
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Sell failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+      } catch {
+        await ctx.reply(`❌ Sell failed for ${short(w.address)}: ${e?.message ?? String(e)}`);
+      }
+    }
+  });
+
+  await Promise.allSettled(tasks);
   await upsertPinnedPosition(ctx);
   return renderSellMenu(ctx);
 });
