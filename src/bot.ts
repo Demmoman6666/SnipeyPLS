@@ -821,7 +821,7 @@ async function renderBuyMenu(ctx: any) {
 
   // Wallet line with tap-to-copy (HTML)
   const walletLine = `Wallet: ${aw
-    ? `<a href="tg://copy?text=${aw.address}"><code>${esc(aw.address)}</code></a>`
+    ? `<a href="tg://copy?text=${encodeURIComponent(aw.address)}"><code>${esc(aw.address)}</code></a>`
     : '— (Select)'}`;
 
   const lines = [
@@ -925,26 +925,27 @@ bot.action('buy_exec', async (ctx) => {
 
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
   const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
+  const token = u.token_address!;
 
   // 🔁 Fire all transactions simultaneously
   const tasks = wallets.map(async (w) => {
     const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
     try {
       const gas = await computeGas(ctx.from.id);
-      const r = await buyAutoRoute(getPrivateKey(w), u.token_address!, amountIn, 0n, gas);
+      const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
       let preOut: bigint = 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
       try {
-        const meta = await tokenMeta(u.token_address!);
+        const meta = await tokenMeta(token);
         tokDec = meta.decimals ?? 18;
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-        const preQuote = await bestQuoteBuy(amountIn, u.token_address!);
+        const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
           preOut = preQuote.amountOut;
-          recordTrade(ctx.from.id, w.address, u.token_address!, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+          recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
         }
       } catch {}
 
@@ -956,8 +957,8 @@ bot.action('buy_exec', async (ctx) => {
           await ctx.reply(`transaction sent ${link}`);
         }
 
-        if (u.token_address!.toLowerCase() !== WPLS) {
-          approveAllRouters(getPrivateKey(w), u.token_address!, gas).catch(() => {});
+        if (token.toLowerCase() !== WPLS) {
+          approveAllRouters(getPrivateKey(w), token, gas).catch(() => {});
         }
 
         provider.waitForTransaction(hash).then(async () => {
@@ -966,7 +967,7 @@ bot.action('buy_exec', async (ctx) => {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
             receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-            tokenAddress: u.token_address!,
+            tokenAddress: token,
             explorerUrl: link
           });
           await sendRefNudgeTo(ctx.from.id);
@@ -999,26 +1000,27 @@ bot.action('buy_exec_all', async (ctx) => {
 
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
   const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
+  const token = u.token_address!;
 
   // 🔁 Fire all transactions simultaneously
   const tasks = rows.map(async (w) => {
     const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
     try {
       const gas = await computeGas(ctx.from.id);
-      const r = await buyAutoRoute(getPrivateKey(w), u.token_address!, amountIn, 0n, gas);
+      const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
       let preOut: bigint = 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
       try {
-        const meta = await tokenMeta(u.token_address!);
+        const meta = await tokenMeta(token);
         tokDec = meta.decimals ?? 18;
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-        const preQuote = await bestQuoteBuy(amountIn, u.token_address!);
+        const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
           preOut = preQuote.amountOut;
-          recordTrade(ctx.from.id, w.address, u.token_address!, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+          recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
         }
       } catch {}
 
@@ -1030,8 +1032,8 @@ bot.action('buy_exec_all', async (ctx) => {
           await ctx.reply(`transaction sent ${link}`);
         }
 
-        if (u.token_address!.toLowerCase() !== WPLS) {
-          approveAllRouters(getPrivateKey(w), u.token_address!, gas).catch(() => {});
+        if (token.toLowerCase() !== WPLS) {
+          approveAllRouters(getPrivateKey(w), token, gas).catch(() => {});
         }
 
         provider.waitForTransaction(hash).then(async () => {
@@ -1040,7 +1042,7 @@ bot.action('buy_exec_all', async (ctx) => {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
             receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-            tokenAddress: u.token_address!,
+            tokenAddress: token,
             explorerUrl: link
           });
           await sendRefNudgeTo(ctx.from.id);
@@ -1075,7 +1077,7 @@ bot.action('limit_buy', async (ctx) => {
   const w = getActiveWallet(ctx.from.id);
   if (!u?.token_address) return showMenu(ctx, 'Set token first.', buyMenu(u?.gas_pct ?? 0));
   if (!w) return showMenu(ctx, 'Select a wallet first.', buyMenu(u?.gas_pct ?? 0));
-  draft.set(ctx.from.id, { side: 'BUY', walletId: w.id, token: u.token_address });
+  draft.set(ctx.from.id, { side: 'BUY', walletId: w.id, token: u.token_address! });
   pending.set(ctx.from.id, { type: 'lb_amt' });
   return showMenu(ctx, 'Send *limit buy amount* in PLS (e.g., `0.5`, `1.2`):', { parse_mode: 'Markdown' });
 });
@@ -1086,7 +1088,7 @@ bot.action('limit_sell', async (ctx) => {
   const w = getActiveWallet(ctx.from.id);
   if (!u?.token_address) return showMenu(ctx, 'Set token first.', sellMenu());
   if (!w) return showMenu(ctx, 'Select a wallet first.', sellMenu());
-  draft.set(ctx.from.id, { side: 'SELL', walletId: w.id, token: u.token_address });
+  draft.set(ctx.from.id, { side: 'SELL', walletId: w.id, token: u.token_address! });
   pending.set(ctx.from.id, { type: 'ls_pct' });
   return showMenu(ctx, 'What *percent* of your token to sell when triggered? (e.g., `25`, `50`, `100`)', { parse_mode: 'Markdown' });
 });
@@ -1305,7 +1307,8 @@ bot.action('sell_approve', async (ctx) => {
     return showMenu(ctx, 'WPLS doesn’t require approval.', sellMenu());
   try {
     const gas = await computeGas(ctx.from.id);
-    const results = await approveAllRouters(getPrivateKey(w), u.token_address, gas);
+    const token = u.token_address!;
+    const results = await approveAllRouters(getPrivateKey(w), token, gas);
     await ctx.reply(`Approve sent:\n${results.join('\n')}`);
   } catch (e: any) {
     await ctx.reply('Approve failed: ' + (e?.message ?? String(e)));
@@ -1336,7 +1339,8 @@ bot.action('sell_exec', async (ctx) => {
   const pendingMsg = await ctx.reply(`⏳ Sending sell for ${short(w.address)}…`);
 
   try {
-    const c = erc20(u.token_address);
+    const token = u.token_address!;
+    const c = erc20(token);
     const bal = await c.balanceOf(w.address);
     const percent = u?.sell_pct ?? 100;
     const amount = (bal * BigInt(Math.round(percent))) / 100n;
@@ -1348,20 +1352,20 @@ bot.action('sell_exec', async (ctx) => {
     }
 
     const gas = await computeGas(ctx.from.id);
-    const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
+    const r = await sellAutoRoute(getPrivateKey(w), token, amount, 0n, gas);
     const hash = (r as any)?.hash;
 
     let outPls: bigint = 0n;
     let tokDec = 18;
     let tokSym = 'TOKEN';
     try {
-      const meta = await tokenMeta(u.token_address);
+      const meta = await tokenMeta(token);
       tokDec = meta.decimals ?? 18;
       tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-      const q = await bestQuoteSell(amount, u.token_address);
+      const q = await bestQuoteSell(amount, token);
       if (q?.amountOut) {
         outPls = q.amountOut;
-        recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
+        recordTrade(ctx.from.id, w.address, token, 'SELL', q.amountOut, amount, q.route.key);
       }
     } catch {}
 
@@ -1379,7 +1383,7 @@ bot.action('sell_exec', async (ctx) => {
           action: 'SELL',
           spend:   { amount: amount,  decimals: tokDec, symbol: tokSym },
           receive: { amount: outPls,  decimals: 18,     symbol: 'PLS' },
-          tokenAddress: u.token_address!,   // assert non-null
+          tokenAddress: token,
           explorerUrl: link
         });
       }).catch(() => {/* ignore */});
@@ -1410,11 +1414,12 @@ bot.action('sell_exec_all', async (ctx) => {
 
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
   const percent = u?.sell_pct ?? 100;
+  const token = u.token_address!;
 
   const tasks = rows.map(async (w) => {
     const pendingMsg = await ctx.reply(`⏳ Sending sell for ${short(w.address)}…`);
     try {
-      const c = erc20(u.token_address);
+      const c = erc20(token);
       const bal = await c.balanceOf(w.address);
       const amount = (bal * BigInt(Math.round(percent))) / 100n;
 
@@ -1424,20 +1429,20 @@ bot.action('sell_exec_all', async (ctx) => {
       }
 
       const gas = await computeGas(ctx.from.id);
-      const r = await sellAutoRoute(getPrivateKey(w), u.token_address, amount, 0n, gas);
+      const r = await sellAutoRoute(getPrivateKey(w), token, amount, 0n, gas);
       const hash = (r as any)?.hash;
 
       let outPls: bigint = 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
       try {
-        const meta = await tokenMeta(u.token_address);
+        const meta = await tokenMeta(token);
         tokDec = meta.decimals ?? 18;
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-        const q = await bestQuoteSell(amount, u.token_address);
+        const q = await bestQuoteSell(amount, token);
         if (q?.amountOut) {
           outPls = q.amountOut;
-          recordTrade(ctx.from.id, w.address, u.token_address, 'SELL', q.amountOut, amount, q.route.key);
+          recordTrade(ctx.from.id, w.address, token, 'SELL', q.amountOut, amount, q.route.key);
         }
       } catch {}
 
@@ -1455,7 +1460,7 @@ bot.action('sell_exec_all', async (ctx) => {
             action: 'SELL',
             spend:   { amount,  decimals: tokDec, symbol: tokSym },
             receive: { amount: outPls,  decimals: 18,     symbol: 'PLS' },
-            tokenAddress: u.token_address!,
+            tokenAddress: token,
             explorerUrl: link
           });
         }).catch(() => {/* ignore */});
