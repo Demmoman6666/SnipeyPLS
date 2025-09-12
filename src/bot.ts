@@ -611,7 +611,7 @@ const kb = Markup.inlineKeyboard([
 
   // 👇 NEW: Quick Buy / Sell editor section
   [Markup.button.callback('— Edit Quick Buy / Sell —', 'noop')],
-  [Markup.button.callback('🟢 Edit Buy Buttons', 'qb_edit'), Markup.button.callback('🔴 Edit Sell %', 'sp_edit')],
+  [Markup.button.callback('🟢 Edit Buy Buttons', 'edit_qb_open'), Markup.button.callback('🔴 Edit Sell %', 'edit_sellpct_open')],
 
   [Markup.button.callback('— Wallets —', 'noop')],
   ...walletButtons,
@@ -945,7 +945,6 @@ bot.action('edit_qb_open', async (ctx) => {
 bot.action(/^edit_qb_idx:(\d)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const idx = Number(ctx.match[1]);
-  // @ts-expect-error: pending union extended in a later section
   pending.set(ctx.from.id, { type: 'edit_qb', idx });
   return showMenu(
     ctx,
@@ -975,7 +974,6 @@ bot.action('edit_sellpct_open', async (ctx) => {
 bot.action(/^edit_sp_idx:(\d)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const idx = Number(ctx.match[1]);
-  // @ts-expect-error: pending union extended in a later section
   pending.set(ctx.from.id, { type: 'edit_sp', idx });
   return showMenu(
     ctx,
