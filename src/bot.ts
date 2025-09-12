@@ -886,6 +886,59 @@ async function priceUSDPerToken(token: string): Promise<number | null> {
   return null;
 }
 
+/* ---------- Quick-Buy helpers (labels + amount solver) ---------- */
+
+// Per-user editable labels (falls back to defaults if none set yet).
+const QB_DEFAULTS = ['250K','500K','1M','2M','4M','5M'];
+const quickBuyLabels = new Map<number, string[]>(); // uid -> 6 labels
+
+function getQuickLabels(uid: number): string[] {
+  const v = quickBuyLabels.get(uid);
+  return (v && v.length === 6) ? v : QB_DEFAULTS;
+}
+function setQuickLabel(uid: number, idx: number, label: string) {
+  const cur = [...getQuickLabels(uid)];
+  cur[idx] = label;
+  quickBuyLabels.set(uid, cur);
+}
+
+/** Turn "250k"/"1m"/"5" into an integer string (no decimals) */
+function expandKMB(label: string): string {
+  const t = label.trim().toLowerCase().replace(/[, _]/g, '');
+  const m = t.match(/^(\d+)(k|m|b)?$/i);
+  if (!m) return '0';
+  const num = BigInt(m[1]);
+  const suf = (m[2] || '').toLowerCase();
+  const mul = suf === 'k' ? 1_000n : suf === 'm' ? 1_000_000n : suf === 'b' ? 1_000_000_000n : 1n;
+  return (num * mul).toString();
+}
+
+/** Estimate minimum PLS needed to buy `targetOutWei` tokens via best route */
+async function estimatePlsForTokens(token: string, targetOutWei: bigint): Promise<bigint> {
+  if (targetOutWei <= 0n) return 0n;
+
+  // Exponential search to find upper bound quickly
+  let low = 0n;
+  let high = ethers.parseEther('0.01');
+  for (let i = 0; i < 40; i++) {
+    const q = await bestQuoteBuy(high, token).catch(() => null);
+    const out = q?.amountOut ?? 0n;
+    if (out >= targetOutWei) break;
+    low = high;
+    high *= 2n;
+    if (high > ethers.parseEther('1000000')) break; // safety cap
+  }
+
+  // Binary search refine
+  for (let i = 0; i < 24; i++) {
+    const mid = (low + high) >> 1n;
+    const q = await bestQuoteBuy(mid, token).catch(() => null);
+    const out = q?.amountOut ?? 0n;
+    if (out >= targetOutWei) high = mid; else low = mid;
+  }
+  return high;
+}
+
 /* ---------- BUY MENU ---------- */
 async function renderBuyMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
@@ -970,6 +1023,32 @@ async function renderBuyMenu(ctx: any) {
   const base = buyMenu(Math.round(pct), walletButtons) as any;
   const extra: any = { parse_mode: 'HTML', ...(base || {}) };
 
+  // Inject "BUY AMOUNT / METHOD" section (two rows of 3) right after wallet rows
+  extra.reply_markup = extra.reply_markup || {};
+  const kb: any[][] = (extra.reply_markup.inline_keyboard || []) as any[][];
+
+  const labels = getQuickLabels(ctx.from.id);
+  const qbRows: any[][] = [
+    [0,1,2].map(i => Markup.button.callback(labels[i], `qbuy:${i}`)),
+    [3,4,5].map(i => Markup.button.callback(labels[i], `qbuy:${i}`)),
+  ];
+
+  // Find last wallet row by matching W1/W2… button text; then insert after it.
+  let lastWalletIdx = -1;
+  for (let i = 0; i < kb.length; i++) {
+    const firstText = String(kb[i]?.[0]?.text || '');
+    if (/^(✅\s*)?W\d+$/i.test(firstText)) lastWalletIdx = i;
+  }
+
+  if (lastWalletIdx >= 0) {
+    kb.splice(lastWalletIdx + 1, 0, [Markup.button.callback('BUY AMOUNT / METHOD', 'noop')], ...qbRows);
+  } else {
+    // fallback: append near the top
+    kb.unshift([Markup.button.callback('BUY AMOUNT / METHOD', 'noop')], ...qbRows);
+  }
+
+  extra.reply_markup.inline_keyboard = kb;
+
   await showMenu(ctx, lines, extra);
 }
 
@@ -1003,6 +1082,9 @@ bot.action('pair_info', async (ctx) => {
   return ctx.reply(`Base pair is WPLS:\n${W}`);
 });
 
+// No-op for label buttons (unclickable UX)
+bot.action('noop', async (ctx) => { await ctx.answerCbQuery(); });
+
 /* Toggle wallet in selection set */
 bot.action(/^wallet_toggle:(\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
@@ -1024,6 +1106,98 @@ async function notifyPendingThenSuccess(ctx: any, kind: 'Buy'|'Sell', hash?: str
     await ctx.reply(`✅ ${title} ${link}`);
   } catch {}
 }
+
+/* Quick-Buy: instant buy for the i-th preset token amount across selected wallets (else active) */
+bot.action(/^qbuy:([0-5])$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const u = getUserSettings(ctx.from.id);
+  const token = u?.token_address as (string | undefined);
+  if (!token) return showMenu(ctx, 'Set token first.', buyMenu(u?.gas_pct ?? 0));
+
+  let dec = 18;
+  let tokSym = 'TOKEN';
+  try {
+    const meta = await tokenMeta(token);
+    dec = meta.decimals ?? 18;
+    tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+  } catch {}
+
+  const idx = Number(ctx.match[1]);
+  const labels = getQuickLabels(ctx.from.id);
+  const label = labels[idx] || '';
+  const targetOutWei = ethers.parseUnits(expandKMB(label), dec);
+  if (targetOutWei <= 0n) {
+    return ctx.reply('Bad quick-buy amount label.');
+  }
+
+  // Determine wallets: selected set or active
+  const selIds = Array.from(getSelSet(ctx.from.id));
+  const active = getActiveWallet(ctx.from.id);
+  const wallets = selIds.length
+    ? listWallets(ctx.from.id).filter(w => selIds.includes(w.id))
+    : (active ? [active] : []);
+  if (!wallets.length) return showMenu(ctx, 'Select a wallet first (Wallets page).', buyMenu(u?.gas_pct ?? 0));
+
+  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
+
+  // Estimate minimal PLS in required for the target token out
+  let estIn: bigint = 0n;
+  try { estIn = await estimatePlsForTokens(token, targetOutWei); } catch {}
+
+  // Fallback: if estimate failed, use user default buy amount
+  if (estIn <= 0n) estIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
+
+  const tasks = wallets.map(async (w) => {
+    const pendingMsg = await ctx.reply(`⏳ Quick-buy ${label} ${tokSym} for ${short(w.address)}…`);
+    try {
+      const gas = await computeGas(ctx.from.id);
+      // Pre-quote (for record + success card)
+      let preOut: bigint = 0n;
+      try {
+        const q = await bestQuoteBuy(estIn, token);
+        preOut = q?.amountOut ?? 0n;
+      } catch {}
+
+      const r = await buyAutoRoute(getPrivateKey(w), token, estIn, 0n, gas);
+      const hash = (r as any)?.hash;
+
+      if (hash) {
+        const link = otter(hash);
+        try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`); }
+        catch { await ctx.reply(`transaction sent ${link}`); }
+
+        if (preOut > 0n) {
+          recordTrade(ctx.from.id, w.address, token, 'BUY', estIn, preOut, 'QB');
+        }
+
+        provider.waitForTransaction(hash).then(async () => {
+          try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
+          await postTradeSuccess(ctx, {
+            action: 'BUY',
+            spend:   { amount: estIn, decimals: 18, symbol: 'PLS' },
+            receive: { amount: preOut, decimals: dec, symbol: tokSym },
+            tokenAddress: token,
+            explorerUrl: link
+          });
+        }).catch(() => {/* ignore */});
+      } else {
+        try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)'); }
+        catch {}
+      }
+    } catch (e: any) {
+      const brief = conciseError(e);
+      try {
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Buy failed for ${short(w.address)}: ${brief}`);
+      } catch {
+        await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${brief}`);
+      }
+    }
+  });
+
+  await Promise.allSettled(tasks);
+  await upsertPinnedPosition(ctx);
+  return renderBuyMenu(ctx);
+});
 
 /* Buy using selected wallets (or active) + auto-approve + record entry + pin card */
 bot.action('buy_exec', async (ctx) => {
