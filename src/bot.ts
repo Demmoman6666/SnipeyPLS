@@ -2876,8 +2876,35 @@ bot.on('text', async (ctx, next) => {
       }
     }
 
+    // ✅ INSERTED: Quick-Buy label editor
+    if (p.type === 'edit_qb') {
+      const idx = (p as any).idx as number;
+      const raw = msg;
+      // must be N, Nk, Nm, Nb
+      if (!/^\d+(k|m|b)?$/i.test(raw)) {
+        return ctx.reply('Please send a number (optionally with K/M/B), e.g., 250k, 1m, 500000.');
+      }
+      setQuickLabel(ctx.from.id, idx, raw.toUpperCase());
+      pending.delete(ctx.from.id);
+      await ctx.reply(`Updated Quick Buy #${idx + 1} → ${raw.toUpperCase()} PLS`);
+      return (bot.telegram as any).answerCbQuery?.((ctx as any).callbackQuery?.id).catch?.(() => {});
+    }
+
+    // ✅ INSERTED: Sell % preset editor
+    if (p.type === 'edit_sp') {
+      const idx = (p as any).idx as number;
+      const v = Number(msg);
+      if (!Number.isFinite(v) || v < 1 || v > 100) {
+        return ctx.reply('Please send a whole number between 1 and 100.');
+      }
+      setSellPreset(ctx.from.id, idx, Math.round(v));
+      pending.delete(ctx.from.id);
+      await ctx.reply(`Updated Sell % preset #${idx + 1} → ${Math.round(v)}%`);
+      return (bot.telegram as any).answerCbQuery?.((ctx as any).callbackQuery?.id).catch?.(() => {});
+    }
+
    // Limit order building
-if (p.type === 'lb_amt') {
+   if (p.type === 'lb_amt') {
   const v = Number(msg);
   if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number of PLS (e.g., 0.5).');
   const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Buy.'); }
