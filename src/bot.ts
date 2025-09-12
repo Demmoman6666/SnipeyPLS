@@ -1739,15 +1739,27 @@ bot.action('sell_wallet_clear', async (ctx: any) => {
   return renderSellMenu(ctx);
 });
 
-/* small inline picker for sell % (still available, but we'll also show quick 25/50/75/100 in the main menu) */
+/* helper: best-effort unpin if app exposes a remover */
+async function safeRemovePinnedPosition(ctx: any, token?: string) {
+  try {
+    const g: any = globalThis as any;
+    if (typeof g.removePinnedPosition === 'function') {
+      await g.removePinnedPosition(ctx, token);
+    }
+  } catch { /* ignore */ }
+}
+
+/* small inline picker for sell % (shows ✅ on current) */
 bot.action('sell_pct_menu', async (ctx) => {
   await ctx.answerCbQuery();
+  const u = getUserSettings(ctx.from.id);
+  const cur = u?.sell_pct ?? 100;
   const kb = Markup.inlineKeyboard([
     [
-      Markup.button.callback('25%', 'sell_pct_25'),
-      Markup.button.callback('50%', 'sell_pct_50'),
-      Markup.button.callback('75%', 'sell_pct_75'),
-      Markup.button.callback('100%', 'sell_pct_100'),
+      Markup.button.callback(`${cur === 25  ? '✅ ' : ''}25%`,  'sell_pct_25'),
+      Markup.button.callback(`${cur === 50  ? '✅ ' : ''}50%`,  'sell_pct_50'),
+      Markup.button.callback(`${cur === 75  ? '✅ ' : ''}75%`,  'sell_pct_75'),
+      Markup.button.callback(`${cur === 100 ? '✅ ' : ''}100%`, 'sell_pct_100'),
     ],
     [Markup.button.callback('⬅️ Back', 'menu_sell')],
   ]);
@@ -1913,6 +1925,10 @@ async function renderSellMenu(ctx: any) {
     6
   );
 
+  const curPct = u?.sell_pct ?? 100;
+  const pctBtn = (n: 25 | 50 | 75 | 100, action: string) =>
+    Markup.button.callback(`${curPct === n ? '✅ ' : ''}${n}%`, action);
+
   const kb: any[][] = [
     // Top gas adjuster (alone)
     [Markup.button.callback(`⛽️ Gas % (${NF.format(u?.gas_pct ?? 0)}%)`, 'gas_pct_open')],
@@ -1934,13 +1950,13 @@ async function renderSellMenu(ctx: any) {
     [Markup.button.callback('Wallets', 'noop')],
     // Wallet rows
     ...walletButtons,
-    // Sell amount/method label + quick % row
+    // Sell amount/method label + quick % row (with ✅ on current)
     [Markup.button.callback('Sell Amount / Method', 'noop')],
     [
-      Markup.button.callback('25%', 'sell_pct_25'),
-      Markup.button.callback('50%', 'sell_pct_50'),
-      Markup.button.callback('75%', 'sell_pct_75'),
-      Markup.button.callback('100%', 'sell_pct_100'),
+      pctBtn(25,  'sell_pct_25'),
+      pctBtn(50,  'sell_pct_50'),
+      pctBtn(75,  'sell_pct_75'),
+      pctBtn(100, 'sell_pct_100'),
     ],
     // Sell All Wallets button
     [Markup.button.callback('Sell All Wallets', 'sell_exec_all')],
@@ -2014,7 +2030,7 @@ bot.action('sell_exec', async (ctx) => {
 
     if (amount <= 0n) {
       try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'Nothing to sell.'); } catch {}
-      await upsertPinnedPosition(ctx);
+      if (percent < 100) { await upsertPinnedPosition(ctx); } else { await safeRemovePinnedPosition(ctx, token); }
       return renderSellMenu(ctx);
     }
 
@@ -2054,10 +2070,14 @@ bot.action('sell_exec', async (ctx) => {
           tokenAddress: token,
           explorerUrl: link
         });
-      }).catch(() => {/* ignore */});
+        if (percent < 100) { await upsertPinnedPosition(ctx); } else { await safeRemovePinnedPosition(ctx, token); }
+      }).catch(async () => {
+        if (percent < 100) { await upsertPinnedPosition(ctx); } else { await safeRemovePinnedPosition(ctx, token); }
+      });
     } else {
       try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)'); }
       catch {}
+      if (percent < 100) { await upsertPinnedPosition(ctx); } else { await safeRemovePinnedPosition(ctx, token); }
     }
   } catch (e: any) {
     const brief = conciseError(e);
@@ -2066,9 +2086,9 @@ bot.action('sell_exec', async (ctx) => {
     } catch {
       await ctx.reply(`❌ Sell failed for ${short(w.address)}: ${brief}`);
     }
+    // on failure, do not change pins
   }
 
-  await upsertPinnedPosition(ctx);
   return renderSellMenu(ctx);
 });
 
@@ -2147,7 +2167,14 @@ bot.action('sell_exec_all', async (ctx) => {
   });
 
   await Promise.allSettled(tasks);
-  await upsertPinnedPosition(ctx);
+
+  // Pin behavior after batch: skip/try-remove if selling 100%
+  if (percent < 100) {
+    await upsertPinnedPosition(ctx);
+  } else {
+    await safeRemovePinnedPosition(ctx, token);
+  }
+
   return renderSellMenu(ctx);
 });
 
