@@ -550,7 +550,7 @@ bot.action('ref_refresh', async (ctx) => {
   return renderReferrals(ctx);
 });
 
-/* ---------- SETTINGS (reworked) ---------- */
+/* ---------- SETTINGS (with ON/OFF emoji) ---------- */
 
 // Per-user Auto-Buy wallet selection (in-memory)
 const autoBuySelected = new Map<number, Set<number>>();
@@ -567,6 +567,7 @@ async function renderSettings(ctx: any) {
   const curGB   = u?.gwei_boost_gwei ?? 0;
   const autoOn  = !!u?.auto_buy_enabled;
   const autoAmt = u?.auto_buy_amount_pls ?? 0.01;
+  const autoEmoji = autoOn ? '🟢' : '🔴';
 
   const lines = [
     '⚙️ <b>SETTINGS</b>',
@@ -577,7 +578,7 @@ async function renderSettings(ctx: any) {
     `• Gwei Booster: <code>${NF.format(curGB)}</code> gwei`,
     '',
     '<b>Auto Buy</b>',
-    `• Status: <b>${autoOn ? 'ON' : 'OFF'}</b>`,
+    `• Status: <b>${autoEmoji} ${autoOn ? 'ON' : 'OFF'}</b>`,
     `• Amount: <code>${fmtDec(String(autoAmt))}</code> PLS`,
     '',
     '<b>Auto-Buy Wallets</b>',
@@ -594,16 +595,6 @@ async function renderSettings(ctx: any) {
     6
   );
 
-  // Keyboard layout:
-  // Back
-  // — Gas Settings — (label)
-  // Default Gas %
-  // Gas Limit | Gwei Booster
-  // — Auto Buy — (label)
-  // Toggle On/Off
-  // Auto Buy Amount
-  // — Wallets — (label)
-  // W1..Wn
   const kb = Markup.inlineKeyboard([
     [Markup.button.callback('⬅️ Back', 'main_back')],
 
@@ -612,7 +603,7 @@ async function renderSettings(ctx: any) {
     [Markup.button.callback('Gas Limit', 'set_gl'), Markup.button.callback('Gwei Booster', 'set_gb')],
 
     [Markup.button.callback('— Auto Buy —', 'noop')],
-    [Markup.button.callback('Toggle On/Off', 'auto_toggle')],
+    [Markup.button.callback(`${autoEmoji} Auto-Buy: ${autoOn ? 'ON' : 'OFF'}`, 'auto_toggle')],
     [Markup.button.callback('Auto Buy Amount', 'auto_amt')],
 
     [Markup.button.callback('— Wallets —', 'noop')],
