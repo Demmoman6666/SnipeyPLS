@@ -2796,44 +2796,53 @@ async function checkLimitsOnce() {
         const amount = (bal * BigInt(Math.round(pct))) / 100n;
         if (amount <= 0n) { unmarkProcessing(r.id); markLimitError(r.id, 'balance zero'); continue; }
 
-        // Pre-quote for record + success card fields
-        let outPls: bigint = 0n;
-        let tokDec = 18;
-        let tokSym = 'TOKEN';
-        try {
-          const meta = await tokenMeta(r.token_address);
-          tokDec = meta.decimals ?? 18;
-          tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-          const q = await bestQuoteSell(amount, r.token_address);
-          if (q?.amountOut) {
-            outPls = q.amountOut;
-            recordTrade(r.telegram_id, w.address, r.token_address, 'SELL', q.amountOut, amount, q.route.key);
-          }
-        } catch {}
+// Pre-quote for record + success card fields
+let outPls: bigint = 0n;
+let tokDec = 18;
+let tokSym = 'TOKEN';
+try {
+  const meta = await tokenMeta(r.token_address);
+  tokDec = meta.decimals ?? 18;
+  tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+  const q = await bestQuoteSell(amount, r.token_address);
+  if (q?.amountOut) {
+    outPls = q.amountOut;
+    recordTrade(r.telegram_id, w.address, r.token_address, 'SELL', q.amountOut, amount, q.route.key);
+  }
+} catch {}
 
-        const rec = await sellAutoRoute(getPrivateKey(w), r.token_address, amount, 0n, gas);
-        const hash = (rec as any)?.hash;
+// ✅ Apply user slippage (incl. Auto) to limit SELL execution
+const slipBpsLE = getSlipBps(r.telegram_id);
+const minOutLE =
+  outPls > 0n
+    ? (slipBpsLE === SLIP_AUTO
+        ? (outPls * 99n) / 100n
+        : (outPls * BigInt(10000 - slipBpsLE)) / 10000n)
+    : 0n;
 
-        markLimitFilled(r.id, hash);
+const rec = await sellAutoRoute(getPrivateKey(w), r.token_address, amount, minOutLE, gas);
+const hash = (rec as any)?.hash;
 
-        if (hash) {
-          const link = otter(hash);
-          const sentMsg = await bot.telegram.sendMessage(r.telegram_id, `transaction sent ${link}`);
-          provider.waitForTransaction(hash).then(async () => {
-            try { await bot.telegram.deleteMessage(r.telegram_id, sentMsg.message_id); } catch {}
-            await postTradeSuccess(ctxShim, {
-              action: 'SELL',
-              spend:   { amount,  decimals: tokDec, symbol: tokSym },
-              receive: { amount: outPls, decimals: 18,     symbol: 'PLS' },
-              tokenAddress: r.token_address,
-              explorerUrl: link
-            });
-            unmarkProcessing(r.id);
-          }).catch(() => { unmarkProcessing(r.id); });
-        } else {
-          await bot.telegram.sendMessage(r.telegram_id, `transaction sent (no hash yet)`);
-          unmarkProcessing(r.id);
-        }
+markLimitFilled(r.id, hash);
+
+if (hash) {
+  const link = otter(hash);
+  const sentMsg = await bot.telegram.sendMessage(r.telegram_id, `transaction sent ${link}`);
+  provider.waitForTransaction(hash).then(async () => {
+    try { await bot.telegram.deleteMessage(r.telegram_id, sentMsg.message_id); } catch {}
+    await postTradeSuccess(ctxShim, {
+      action: 'SELL',
+      spend:   { amount,  decimals: tokDec, symbol: tokSym },
+      receive: { amount: outPls, decimals: 18,     symbol: 'PLS' },
+      tokenAddress: r.token_address,
+      explorerUrl: link
+    });
+    unmarkProcessing(r.id);
+  }).catch(() => { unmarkProcessing(r.id); });
+} else {
+  await bot.telegram.sendMessage(r.telegram_id, `transaction sent (no hash yet)`);
+  unmarkProcessing(r.id);
+}
       }
     } catch (e: any) {
       unmarkProcessing(r.id);
