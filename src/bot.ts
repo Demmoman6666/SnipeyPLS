@@ -3563,40 +3563,29 @@ bot.on('text', async (ctx, next) => {
 
     // ✅ INSERTED: Quick-Buy label editor
     if (p.type === 'edit_qb') {
-      // index comes from the button the user clicked earlier
       const idx = Math.max(0, Math.min(5, Number((p as any).idx)));
       const raw = String(msg).trim();
-
-      // must be N, Nk, Nm, or Nb (e.g., 250k, 1m, 500000)
       if (!/^\d+(k|m|b)?$/i.test(raw)) {
         await ctx.reply('Please send a number (optionally with K/M/B), e.g., 250k, 1m, 500000.');
         return;
       }
-
       setQuickLabel(ctx.from.id, idx, raw.toUpperCase());
       pending.delete(ctx.from.id);
-
       await ctx.reply(`Updated Quick Buy #${idx + 1} → ${raw.toUpperCase()} PLS`);
-      // Return the user to Settings (or your editor screen if you have one)
       return renderSettings(ctx);
     }
 
     // ✅ INSERTED: Sell % preset editor
     if (p.type === 'edit_sp') {
-      // index comes from the button the user clicked earlier
       const idx = Math.max(0, Math.min(3, Number((p as any).idx)));
       const v = Number(String(msg).trim());
-
       if (!Number.isFinite(v) || v < 1 || v > 100) {
         await ctx.reply('Please send a whole number between 1 and 100.');
         return;
       }
-
       setSellPreset(ctx.from.id, idx, Math.round(v));
       pending.delete(ctx.from.id);
-
       await ctx.reply(`Updated Sell % preset #${idx + 1} → ${Math.round(v)}%`);
-      // Return the user to Settings (or your editor screen if you have one)
       return renderSettings(ctx);
     }
 
@@ -3655,7 +3644,6 @@ bot.on('text', async (ctx, next) => {
 
     const u = getUserSettings(ctx.from.id);
     if (u?.auto_buy_enabled) {
-      // ✅ FIX: use getAutoSelSet (returns Set<number>)
       const selSet = getAutoSelSet(ctx.from.id);
       const selectedIds: number[] = selSet ? Array.from(selSet) : [];
 
@@ -3674,7 +3662,6 @@ bot.on('text', async (ctx, next) => {
       const amountIn = ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01));
       const token = text;
 
-      // Brief error helper
       const briefErr = (e: any): string => {
         const s = String(e?.reason || e?.message || e || '');
         if (/insufficient funds/i.test(s)) return 'insufficient funds';
@@ -3685,11 +3672,9 @@ bot.on('text', async (ctx, next) => {
         return s.split('\n')[0].slice(0, 200);
       };
 
-      // 🔁 Fire all auto-buys simultaneously
       const tasks = wallets.map(async (w) => {
         const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
         try {
-          // ✅ NEW: pre-quote FIRST to compute slippage minOut and log trade
           let preOut: bigint = 0n;
           let tokDec = 18;
           let tokSym = 'TOKEN';
@@ -3704,7 +3689,6 @@ bot.on('text', async (ctx, next) => {
             }
           } catch {}
 
-          // ✅ Use Auto-Buy slippage setting (not the global trade slippage)
           const autoBps = getAutoBuySlipBps(ctx.from.id);
           const minOut =
             preOut > 0n
@@ -3720,7 +3704,7 @@ bot.on('text', async (ctx, next) => {
           if (hash) {
             const link = otter(hash);
             try {
-              await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
+              await bot.telegram.editMessageText(chatId, pendingMsg.message_id, `transaction sent ${link}`);
             } catch {
               await ctx.reply(`transaction sent ${link}`);
             }
@@ -3738,19 +3722,18 @@ bot.on('text', async (ctx, next) => {
                 tokenAddress: token,
                 explorerUrl: link
               });
-              // no referral nudge in auto-buy
             }).catch(() => {/* ignore */});
           } else {
             try {
-              await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
+              await bot.telegram.editMessageText(chatId, pendingMsg.message_id, 'transaction sent (no hash yet)');
             } catch {}
           }
         } catch (e: any) {
-          const msg = `❌ Auto-buy failed for ${short(w.address)}: ${briefErr(e)}`;
+          const errText = `❌ Auto-buy failed for ${short(w.address)}: ${briefErr(e)}`;
           try {
-            await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, msg);
+            await bot.telegram.editMessageText(chatId, pendingMsg.message_id, errText);
           } catch {
-            await ctx.reply(msg);
+            await ctx.reply(errText);
           }
         }
       });
@@ -3760,12 +3743,12 @@ bot.on('text', async (ctx, next) => {
       await upsertPinnedPosition(ctx);
       return renderBuyMenu(ctx);
     } else {
-      // No auto-buy => just open the buy menu with the token warmed
       return renderBuyMenu(ctx);
     }
   }
   return next();
 });
+
 /* ---------- shortcuts ---------- */
 bot.action('main_back', async (ctx) => {
   await ctx.answerCbQuery();
