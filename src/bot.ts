@@ -2029,32 +2029,59 @@ bot.action(/^sell_pct_set:(\d{1,3})$/, async (ctx: any) => {
   return renderSellMenu(ctx);
 });
 
-/* ===== Slippage (per-user, in basis points) ===== */
-const slipBpsMap = new Map<number, number>(); // uid -> bps; default 100 (=1.0%)
+/* ===== Slippage (auto/manual) ===== */
+// -1 means "Auto". Any non-negative number is basis points (0..5000 → 0..50%)
+const SLIP_AUTO = -1;
+const slipBpsMap = new Map<number, number>(); // uid -> bps or -1 (Auto)
 
-function getSlipBps(uid: number): number { return slipBpsMap.get(uid) ?? 100; }
-function setSlipBps(uid: number, bps: number) { slipBpsMap.set(uid, Math.max(0, Math.min(5000, bps))); }
+// default = Auto
+function getSlipBps(uid: number): number {
+  return slipBpsMap.has(uid) ? (slipBpsMap.get(uid) as number) : SLIP_AUTO;
+}
+function setSlipBps(uid: number, bps: number) {
+  // allow -1 for Auto, else clamp 0..5000 bps (0..50%)
+  slipBpsMap.set(uid, Math.max(-1, Math.min(5000, Math.round(bps))));
+}
 
+// pretty-printer for manual values (bps → "%")
 function fmtSlip(bps: number): string {
   return (bps % 100 === 0) ? String(bps / 100) : (bps / 100).toFixed(1);
+}
+// label that shows "Auto" when in auto mode
+function fmtSlipLabel(uid: number): string {
+  const b = getSlipBps(uid);
+  return b === SLIP_AUTO ? 'Auto' : `${fmtSlip(b)}%`;
 }
 
 bot.action('slip_open', async (ctx) => {
   await ctx.answerCbQuery();
   const cur = getSlipBps(ctx.from.id);
+
+  // Include "Auto" plus common presets
   const opts = [
-    { t: '0.5%', v: 50 }, { t: '1%', v: 100 }, { t: '2%', v: 200 },
-    { t: '3%', v: 300 }, { t: '5%', v: 500 }
+    { t: 'Auto', v: SLIP_AUTO },
+    { t: '0.5%', v: 50 },
+    { t: '1%',   v: 100 },
+    { t: '2%',   v: 200 },
+    { t: '3%',   v: 300 },
+    { t: '5%',   v: 500 },
   ];
+
   const rows = chunk(
-    opts.map(o => Markup.button.callback(`${o.t}${o.v === cur ? ' ✅' : ''}`, `slip_set:${o.v}`)),
+    opts.map(o => Markup.button.callback(`${cur === o.v ? '✅ ' : ''}${o.t}`, `slip_set:${o.v}`)),
     3
   );
   rows.push([Markup.button.callback('⬅️ Back', 'menu_sell')]);
-  return showMenu(ctx, 'Choose *Slippage*:', { parse_mode: 'Markdown', ...Markup.inlineKeyboard(rows) });
+
+  return showMenu(
+    ctx,
+    'Choose *Slippage*:',
+    { parse_mode: 'Markdown', ...Markup.inlineKeyboard(rows) }
+  );
 });
 
-bot.action(/^slip_set:(\d+)$/, async (ctx: any) => {
+// accept negative for Auto (-1) or 0..5000 for manual bps
+bot.action(/^slip_set:(-?\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const bps = Number(ctx.match[1]);
   setSlipBps(ctx.from.id, bps);
@@ -2196,8 +2223,8 @@ const pctRows = chunk(
 const kb: any[][] = [
   // Top gas adjuster (alone)
   [Markup.button.callback(`⛽️ Gas % (${NF.format(u?.gas_pct ?? 0)}%)`, 'gas_pct_open')],
-  // Slippage row
-  [Markup.button.callback(`🎯 Slippage (${fmtSlip(slipBps)}%)`, 'slip_open')],
+  // Slippage row — show Auto/Manual label
+  [Markup.button.callback(`🎯 Slippage (${fmtSlipLabel(ctx.from.id)})`, 'slip_open')],
   // Back / Refresh
   [
     Markup.button.callback('⬅️ Back', 'main_back'),
@@ -2264,7 +2291,6 @@ bot.action('sell_set_token', async (ctx) => {
   return showMenu(ctx, 'Paste the *token contract address* (0x...).', { parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_sell')]]) });
 });
-
 /* ---------- SELL EXEC (single wallet) ---------- */
 bot.action('sell_exec', async (ctx) => {
   await ctx.answerCbQuery();
