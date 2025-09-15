@@ -2258,7 +2258,8 @@ bot.action('auto_slip_open', async (ctx) => {
   );
 
   rows.push([Markup.button.callback('✏️ Custom…', 'auto_slip_custom')]);
-rows.push([Markup.button.callback('⬅️ Back', 'settings')]);
+  rows.push([Markup.button.callback('⬅️ Back', 'settings')]);
+
   return showMenu(
     ctx,
     'Choose *Auto-Buy Slippage* (applies only to automatic buys):',
