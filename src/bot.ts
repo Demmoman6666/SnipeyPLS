@@ -2790,6 +2790,38 @@ bot.action(/^sell_pct_set:(\d{1,3})$/, async (ctx: any) => {
   return renderSellMenu(ctx);
 });
 
+/* === SELL: Gas % picker that returns to SELL menu === */
+bot.action('sell_gas_pct_open', async (ctx) => {
+  await ctx.answerCbQuery();
+  const u = getUserSettings(ctx.from.id);
+  const cur = Math.round(u?.gas_pct ?? (u?.default_gas_pct ?? 0));
+
+  const choices = [-25, 0, 5, 10, 15, 25, 50, 100];
+  const rows = chunk(
+    choices.map(v =>
+      Markup.button.callback(
+        `${cur === v ? '✅ ' : ''}${v > 0 ? '+' : ''}${v}%`,
+        `sell_gas_pct_set:${v}`
+      )
+    ),
+    4
+  );
+  rows.push([Markup.button.callback('⬅️ Back', 'menu_sell')]);
+
+  return showMenu(
+    ctx,
+    'Choose <b>Gas %</b> over market:',
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard(rows) }
+  );
+});
+
+bot.action(/^sell_gas_pct_set:(-?\d+)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const v = Number(ctx.match[1]);
+  setGasPercent(ctx.from.id, v);
+  return renderSellMenu(ctx); // stay in SELL
+});
+
 /* ===== Slippage (auto/manual) ===== */
 // -1 means "Auto". Any non-negative number is basis points (0..5000 → 0..50%)
 const SLIP_AUTO = -1;
@@ -3147,7 +3179,7 @@ const pctRows = chunk(
 /* now compose the keyboard */
 const kb: any[][] = [
   // Top gas adjuster (alone)
-  [Markup.button.callback(`⛽️ Gas % (${NF.format(u?.gas_pct ?? 0)}%)`, 'gas_pct_open')],
+  [Markup.button.callback(`⛽️ Gas % (${NF.format(u?.gas_pct ?? 0)}%)`, 'sell_gas_pct_open')],
   // Slippage row — show Auto/Manual label
   [Markup.button.callback(`🎯 Slippage (${fmtSlipLabel(ctx.from.id)})`, 'slip_open')],
   // Back / Refresh
