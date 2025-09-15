@@ -1280,18 +1280,27 @@ function jobsFor(uid: number): SnipeJob[] {
   snipeJobs.set(uid, arr);
   return arr;
 }
-function addSnipe(job: Omit<SnipeJob, 'id' | 'createdAt' | 'armed'> & { armed?: boolean }): SnipeJob {
+function addSnipe(
+  job: Omit<SnipeJob, 'id' | 'createdAt' | 'armed'> & { armed?: boolean }
+): SnipeJob {
+  // pull out the possibly-conflicting keys so they don't appear in ...rest
+  const { onAddLiquidity, method, txMode, armed, ...rest } = job as any;
+
   const full: SnipeJob = {
     id: snipeIdSeq++,
     createdAt: Date.now(),
-    armed: job.armed ?? true,
-    // defaults for new fields
-    onAddLiquidity: job.onAddLiquidity ?? false,
-    method: job.method ?? undefined,
-    txMode: job.txMode ?? 'single',
-    ...job
+    armed: armed ?? true,
+
+    // everything else from the caller
+    ...rest,
+
+    // set the normalized values exactly once
+    onAddLiquidity: !!onAddLiquidity,
+    method: method ?? null,
+    txMode: txMode ?? 'single',
   };
-  jobsFor(job.telegramId).push(full);
+
+  jobsFor(full.telegramId).push(full);
   return full;
 }
 function removeSnipe(uid: number, id: number): boolean {
