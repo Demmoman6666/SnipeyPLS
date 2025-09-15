@@ -514,6 +514,7 @@ type Pending =
   | { type: 'edit_sp'; idx: number }   // editing Sell % preset at index 0..3
   // ✅ NEW: custom slippage input (Step 2)
   | { type: 'slip_custom' };
+  | { type: 'auto_slip_custom' };
 
 const pending = new Map<number, Pending>();
 
@@ -3152,6 +3153,42 @@ bot.on('text', async (ctx, next) => {
       try { return renderSellMenu(ctx); } catch {}
       try { return renderBuyMenu(ctx); } catch {}
       return;
+    }
+
+    // ✅ NEW: Auto-Buy custom slippage handler
+    if (p.type === 'auto_slip_custom') {
+      const t = String(msg || '').trim().toLowerCase();
+
+      // allow "auto" to switch back to auto mode
+      if (t === 'auto') {
+        setAutoBuySlipBps(ctx.from.id, SLIP_AUTO);
+        pending.delete(ctx.from.id);
+        await ctx.reply('Auto-Buy slippage set to Auto.');
+        return renderSettings(ctx);
+      }
+
+      // Accept "0.7", "1", "1.25", "2.5%", "75bp", "150bps"
+      const cleaned = t.replace(/,/g, '').replace(/\s+/g, '');
+      let bps: number | null = null;
+
+      const mBp = cleaned.match(/^([0-9]*\.?[0-9]+)(bp|bps)$/);
+      if (mBp) {
+        const n = Number(mBp[1]);
+        if (Number.isFinite(n)) bps = Math.round(n);
+      } else {
+        const n = Number(cleaned.replace(/%$/, ''));
+        if (Number.isFinite(n)) bps = Math.round(n * 100);
+      }
+
+      if (bps == null || bps < 0 || bps > 5000) {
+        await ctx.reply('Please send a value between 0 and 50 (e.g., 0.7, 1, 1.25) — or type "auto".');
+        return;
+      }
+
+      setAutoBuySlipBps(ctx.from.id, bps);
+      pending.delete(ctx.from.id);
+      await ctx.reply(`Auto-Buy slippage set to ${(bps % 100 === 0 ? String(bps / 100) : (bps / 100).toFixed(1))}%.`);
+      return renderSettings(ctx);
     }
 
     // ✅ INSERTED: referral payout wallet handler
