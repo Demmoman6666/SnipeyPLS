@@ -2926,29 +2926,68 @@ bot.on('text', async (ctx, next) => {
       pending.delete(ctx.from.id); return renderSettings(ctx);
     }
 
-    if (p.type === 'auto_amt') {
-      const v = Number(msg);
-      if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number (PLS).');
-      setAutoBuyAmount(ctx.from.id, v);
-      pending.delete(ctx.from.id); return renderSettings(ctx);
-    }
+  if (p.type === 'auto_amt') {
+  const v = Number(msg);
+  if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number (PLS).');
+  setAutoBuyAmount(ctx.from.id, v);
+  pending.delete(ctx.from.id); return renderSettings(ctx);
+}
 
-    // ✅ INSERTED: referral payout wallet handler
-    if (p.type === 'ref_payout') {
-      const addr = msg.trim();
-      if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) {
-        return ctx.reply('Please send a valid wallet address (0x…40 hex).');
-      }
-      try {
-        await setReferralPayout(ctx.from.id, addr);
-        pending.delete(ctx.from.id);
-        await ctx.reply('Referral rewards payout wallet set ✅');
-        return renderReferrals(ctx);
-      } catch (e: any) {
-        pending.delete(ctx.from.id);
-        return ctx.reply('Failed to save payout wallet: ' + (e?.message ?? 'unknown error'));
-      }
-    }
+// ✅ INSERTED: custom slippage (text input) handler
+if (p.type === 'slip_custom') {
+  const t = String(msg || '').trim().toLowerCase();
+
+  // allow "auto" to switch back to auto mode
+  if (t === 'auto') {
+    setSlipBps(ctx.from.id, SLIP_AUTO);
+    pending.delete(ctx.from.id);
+    await ctx.reply('Slippage set to Auto.');
+    return renderSellMenu(ctx);
+  }
+
+  // Accept inputs like "0.7", "1", "1.25", "2.5%", "75bp", "150bps"
+  const cleaned = t.replace(/,/g, '').replace(/\s+/g, '');
+  let bps: number | null = null;
+
+  // If user typed basis points explicitly
+  const mBp = cleaned.match(/^([0-9]*\.?[0-9]+)(bp|bps)$/);
+  if (mBp) {
+    const n = Number(mBp[1]);
+    if (Number.isFinite(n)) bps = Math.round(n); // already in bps
+  } else {
+    // Interpret as percent (optionally with trailing %)
+    const n = Number(cleaned.replace(/%$/, ''));
+    if (Number.isFinite(n)) bps = Math.round(n * 100);
+  }
+
+  // Clamp 0..5000 bps (0–50%)
+  if (bps == null || bps < 0 || bps > 5000) {
+    await ctx.reply('Please send a value between 0 and 50 (e.g., 0.7, 1, 1.25) — or type "auto".');
+    return;
+  }
+
+  setSlipBps(ctx.from.id, bps);
+  pending.delete(ctx.from.id);
+  await ctx.reply(`Slippage set to ${fmtSlip(bps)}%.`);
+  return renderSellMenu(ctx);
+}
+
+// ✅ INSERTED: referral payout wallet handler
+if (p.type === 'ref_payout') {
+  const addr = msg.trim();
+  if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) {
+    return ctx.reply('Please send a valid wallet address (0x…40 hex).');
+  }
+  try {
+    await setReferralPayout(ctx.from.id, addr);
+    pending.delete(ctx.from.id);
+    await ctx.reply('Referral rewards payout wallet set ✅');
+    return renderReferrals(ctx);
+  } catch (e: any) {
+    pending.delete(ctx.from.id);
+    return ctx.reply('Failed to save payout wallet: ' + (e?.message ?? 'unknown error'));
+  }
+}
 
 // ✅ INSERTED: Quick-Buy label editor
 if (p.type === 'edit_qb') {
@@ -2989,8 +3028,8 @@ if (p.type === 'edit_sp') {
   return renderSettings(ctx);
 }
 
-   // Limit order building
-   if (p.type === 'lb_amt') {
+// Limit order building
+if (p.type === 'lb_amt') {
   const v = Number(msg);
   if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number of PLS (e.g., 0.5).');
   const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Buy.'); }
@@ -3145,7 +3184,6 @@ if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
 }
 return next();
 });
-
 /* ---------- shortcuts ---------- */
 bot.action('main_back', async (ctx) => {
   await ctx.answerCbQuery();
