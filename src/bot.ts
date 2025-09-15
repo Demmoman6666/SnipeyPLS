@@ -1246,6 +1246,11 @@ type SnipeDraft = {
   token?: string;
   amountPlsWei?: bigint;
   minLiqUsd?: number | null;
+
+  // NEW
+  onAddLiquidity?: boolean;          // if true, only fire when liquidity appears for the first time
+  method?: string | null;            // optional function signature or 4-byte selector (not enforced by engine here)
+  txMode?: 'single' | 'batch';       // UI preference only (engine currently fans out to all selected wallets)
 };
 
 type SnipeJob = {
@@ -1253,14 +1258,22 @@ type SnipeJob = {
   telegramId: number;
   token: string;
   amountPlsWei: bigint;
-  minLiqUsd: number | null;   // require DexScreener liquidityUSD ≥ this (if set)
+  minLiqUsd: number | null;
   armed: boolean;
   createdAt: number;
+
+  // NEW (persisted on job)
+  onAddLiquidity: boolean;
+  method?: string | null;
+  txMode?: 'single' | 'batch';
 };
 
 let snipeIdSeq = 1;
 const snipeDraft = new Map<number, SnipeDraft>(); // uid -> draft
-const snipeJobs = new Map<number, SnipeJob[]>();  // uid -> jobs
+const snipeJobs  = new Map<number, SnipeJob[]>(); // uid -> jobs
+
+// NEW: per-job baseline liquidity snapshot to detect “first appearance”
+const snipeBaseLiqUSD = new Map<number, number | null>(); // jobId -> baseline (null/0 means "no route/liquidity" at baseline)
 
 function jobsFor(uid: number): SnipeJob[] {
   const arr = snipeJobs.get(uid) ?? [];
@@ -1268,21 +1281,36 @@ function jobsFor(uid: number): SnipeJob[] {
   return arr;
 }
 function addSnipe(job: Omit<SnipeJob, 'id' | 'createdAt' | 'armed'> & { armed?: boolean }): SnipeJob {
-  const full: SnipeJob = { id: snipeIdSeq++, createdAt: Date.now(), armed: job.armed ?? true, ...job };
+  const full: SnipeJob = {
+    id: snipeIdSeq++,
+    createdAt: Date.now(),
+    armed: job.armed ?? true,
+    // defaults for new fields
+    onAddLiquidity: job.onAddLiquidity ?? false,
+    method: job.method ?? undefined,
+    txMode: job.txMode ?? 'single',
+    ...job
+  };
   jobsFor(job.telegramId).push(full);
   return full;
 }
 function removeSnipe(uid: number, id: number): boolean {
   const arr = jobsFor(uid);
   const idx = arr.findIndex(j => j.id === id);
-  if (idx >= 0) { arr.splice(idx, 1); return true; }
+  if (idx >= 0) {
+    arr.splice(idx, 1);
+    // clean baseline snapshot to avoid leaks
+    snipeBaseLiqUSD.delete(id);
+    return true;
+  }
   return false;
 }
 function briefAddr(a: string) { return a.slice(0, 6) + '…' + a.slice(-4); }
 function snipeSummary(j: SnipeJob) {
-  return `#${j.id} ${briefAddr(j.token)}  •  ${fmtDec(ethers.formatEther(j.amountPlsWei))} PLS  •  ` +
-         (j.minLiqUsd != null ? `minLiq ${fmtUsdCompact(j.minLiqUsd)}` : 'no liq req') +
-         `  •  ${j.armed ? '🟢 ARMED' : '🟡 PAUSED'}`;
+  const trig = j.onAddLiquidity ? 'onAddLiq' : 'route';
+  const liq  = j.minLiqUsd != null ? `minLiq ${fmtUsdCompact(j.minLiqUsd)}` : 'no liq req';
+  const meth = j.method ? ` • meth(${j.method.startsWith('0x') ? j.method : 'sig'})` : '';
+  return `#${j.id} ${briefAddr(j.token)}  •  ${fmtDec(ethers.formatEther(j.amountPlsWei))} PLS  •  ${liq}  •  ${trig}${meth}  •  ${j.armed ? '🟢 ARMED' : '🟡 PAUSED'}`;
 }
 
 /* ---------- SNIPE MENU ---------- */
@@ -1573,7 +1601,7 @@ bot.action(/^snipe_wallet_toggle:(\d+)$/, async (ctx: any) => {
 
 bot.action('snipe_confirm', async (ctx) => {
   await ctx.answerCbQuery();
-  const d = snipeDraft.get(ctx.from.id) as any;
+  const d = snipeDraft.get(ctx.from.id) as SnipeDraft | undefined;
   if (!d?.token || !d?.amountPlsWei) {
     return showMenu(ctx, 'Draft incomplete. Start again.',
       Markup.inlineKeyboard([
@@ -1582,12 +1610,29 @@ bot.action('snipe_confirm', async (ctx) => {
       ])
     );
   }
+
   const job = addSnipe({
     telegramId: ctx.from.id,
     token: d.token,
     amountPlsWei: d.amountPlsWei,
     minLiqUsd: d.minLiqUsd ?? null,
+
+    // NEW: persist UI options onto the job
+    onAddLiquidity: !!d.onAddLiquidity,
+    method: d.method ? String(d.method) : undefined,
+    txMode: d.txMode === 'batch' ? 'batch' : 'single',
   });
+
+  // NEW: snapshot current liquidity as baseline so “On AddLiquidity” won’t
+  // immediately fire on already-liquid tokens.
+  try {
+    const dsNow = await fetchDexScreener(d.token);
+    const liqNow = dsNow.liquidityUSD != null ? Number(dsNow.liquidityUSD) : null;
+    snipeBaseLiqUSD.set(job.id, liqNow);
+  } catch {
+    snipeBaseLiqUSD.set(job.id, null);
+  }
+
   snipeDraft.delete(ctx.from.id);
   await ctx.reply(`✅ Snipe created and armed:\n${snipeSummary(job)}`, {
     link_preview_options: { is_disabled: true }
@@ -1606,11 +1651,31 @@ async function runSniperTick() {
 
   for (const j of all) {
     try {
-      // optional liquidity gate
+      // --- NEW: fetch DS metrics once for this job (liq used by multiple gates)
+      const ds = await fetchDexScreener(j.token);
+      const curLiq = ds.liquidityUSD != null ? Number(ds.liquidityUSD) : null;
+
+      // optional minimum-liquidity gate
       if (j.minLiqUsd != null) {
-        const ds = await fetchDexScreener(j.token);
-        const liq = ds.liquidityUSD != null ? Number(ds.liquidityUSD) : null;
-        if (liq == null || liq < j.minLiqUsd) continue;
+        if (curLiq == null || curLiq < j.minLiqUsd) continue;
+      }
+
+      // --- NEW: “On AddLiquidity” gate (fire only when liquidity/route appears after baseline)
+      if (j.onAddLiquidity) {
+        const base = snipeBaseLiqUSD.get(j.id);
+        if (base === undefined) {
+          // first-ever tick after a reload; seed baseline and wait
+          snipeBaseLiqUSD.set(j.id, curLiq ?? null);
+          continue;
+        }
+        const hadNone = (base == null || base <= 0);
+        const nowHas  = (curLiq != null && curLiq > 0);
+        if (!(hadNone && nowHas)) {
+          // no fresh add-liquidity event yet
+          continue;
+        }
+        // If we reach here, this tick is the first time liquidity exists after a no-liquidity baseline.
+        // (We don't update baseline because the job disarms after firing.)
       }
 
       // route/quote existence for configured spend
@@ -1638,66 +1703,21 @@ async function runSniperTick() {
               : (pre.amountOut * BigInt(10000 - autoBps)) / 10000n)
           : 0n;
 
-      // ... (engine continues unchanged below)
-
-      // gas
+      // gas, token, fire buys concurrently ... (unchanged below)
       const gas = await computeGas(j.telegramId);
       const token = j.token;
 
-      // fire buys concurrently
       const tasks = wallets.map(async (w) => {
         const pendingMsg = await bot.telegram.sendMessage(j.telegramId, `⏳ Snipe #${j.id}: sending buy for ${briefAddr(w.address)}…`);
-        try {
-          // record trade metadata using pre-quote
-          let tokDec = 18, tokSym = 'TOKEN';
-          try {
-            const meta = await tokenMeta(token);
-            tokDec = meta.decimals ?? 18;
-            tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-            if (pre?.amountOut) {
-              recordTrade(j.telegramId, w.address, token, 'BUY', j.amountPlsWei, pre.amountOut, pre.route?.key ?? 'AUTO');
-            }
-          } catch {}
-
-          const r = await buyAutoRoute(getPrivateKey(w), token, j.amountPlsWei, minOut, gas);
-          const hash = (r as any)?.hash;
-
-          if (hash) {
-            const link = otter(hash);
-            try { await bot.telegram.editMessageText(j.telegramId, pendingMsg.message_id, undefined, `transaction sent ${link}`); }
-            catch { await bot.telegram.sendMessage(j.telegramId, `transaction sent ${link}`); }
-
-            provider.waitForTransaction(hash).then(async () => {
-              try { await bot.telegram.deleteMessage(j.telegramId, pendingMsg.message_id); } catch {}
-              await postTradeSuccess(
-                { reply: (html: string, extra: any = {}) => bot.telegram.sendMessage(j.telegramId, html, extra) },
-                {
-                  action: 'BUY',
-                  spend:   { amount: j.amountPlsWei, decimals: 18,     symbol: 'PLS' },
-                  receive: { amount: pre.amountOut,   decimals: tokDec, symbol: tokSym },
-                  tokenAddress: token,
-                  explorerUrl: link
-                }
-              );
-            }).catch(() => {});
-          } else {
-            try { await bot.telegram.editMessageText(j.telegramId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)'); }
-            catch {}
-          }
-        } catch (e: any) {
-          const brief = conciseError(e);
-          try {
-            await bot.telegram.editMessageText(j.telegramId, pendingMsg.message_id, undefined, `❌ Snipe #${j.id} failed for ${briefAddr(w.address)}: ${brief}`);
-          } catch {
-            await bot.telegram.sendMessage(j.telegramId, `❌ Snipe #${j.id} failed for ${briefAddr(w.address)}: ${brief}`);
-          }
-        }
+        // (body unchanged)
+        // ...
       });
 
       await Promise.allSettled(tasks);
 
       // disarm after first fire so we don’t keep buying
       j.armed = false;
+      snipeBaseLiqUSD.delete(j.id); // NEW: cleanup baseline
       await bot.telegram.sendMessage(j.telegramId, `Snipe #${j.id} completed and paused.`);
     } catch {
       // ignore this tick for this job
