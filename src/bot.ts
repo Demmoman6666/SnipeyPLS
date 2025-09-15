@@ -74,8 +74,16 @@ function _overlaySet(uid: number, token: string, rec: AvgOverlayRec) {
   _overlayMap(uid).set(token.toLowerCase(), rec);
 }
 
+/* --- Avg entry cache helper (wraps getAvgEntry) ---
+   (Adds a tiny Map cache behind the overlay to avoid repeated DB work.) */
+const _avgEntryCache = new Map<string, { avgPlsPerToken: number }>();
+function _avgKey(uid: number, token: string, dec?: number) {
+  return `${uid}:${token.toLowerCase()}:${dec ?? 'd'}`;
+}
+
 /**
  * Bump the overlay immediately after a BUY.
+ * Also invalidates the small cache for this (uid, token, dec).
  * @param uid        Telegram user id
  * @param token      token address
  * @param plsInWei   PLS spent (wei)
@@ -94,6 +102,9 @@ function bumpAvgAfterBuy(uid: number, token: string, plsInWei: bigint, outTokWei
   const avgPlsPerToken = tokens > 0 ? (plsSpent / tokens) : 0;
 
   _overlaySet(uid, token, { tokens, plsSpent, avgPlsPerToken });
+
+  // Invalidate cached DB aggregate for this key so future reads stay fresh
+  _avgEntryCache.delete(_avgKey(uid, token, dec));
 }
 
 /**
@@ -120,16 +131,22 @@ async function recordBuyAndCache(
 }
 
 /**
- * Optional helper if you want Sell menu to prefer the overlay when present.
- * Usage: const avg = getAvgEntryCached(uid, token, decimals);
+ * Preferred getter for Avg Entry.
+ * 1) Return the live overlay if present (instant after-buy view)
+ * 2) Else return a cached DB aggregate if present
+ * 3) Else compute via getAvgEntry(...) and cache it
  */
 function getAvgEntryCached(uid: number, token: string, decimals?: number) {
-  const fromOverlay = _overlayGet(uid, token);
-  if (fromOverlay) {
-    return { avgPlsPerToken: fromOverlay.avgPlsPerToken };
-  }
-  // Fall back to DB aggregator (existing helper)
-  return getAvgEntry(uid, token, decimals ?? 18);
+  const overlay = _overlayGet(uid, token);
+  if (overlay) return { avgPlsPerToken: overlay.avgPlsPerToken };
+
+  const key = _avgKey(uid, token, decimals);
+  const hit = _avgEntryCache.get(key);
+  if (hit) return hit;
+
+  const v = getAvgEntry(uid, token, decimals ?? 18);
+  if (v) _avgEntryCache.set(key, v);
+  return v;
 }
 
 // 🔗 Address helpers
@@ -156,7 +173,6 @@ bot.action(/^copy:(0x[a-fA-F0-9]{40})$/, async (ctx: any) => {
     link_preview_options: { is_disabled: true }
   } as any);
 });
-
 /* ---------- Referral: config + helpers ---------- */
 const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@/, '');
 const REF_PREFIX = 'ref_';
@@ -3039,9 +3055,9 @@ async function renderSellMenu(ctx: any) {
         plsPerToken = amtTok > 0 ? (outPls / amtTok) : null;
       }
 
-      // Get user-average entry across all buys tracked by the bot
-      const avgDb = getAvgEntry(ctx.from.id, tokenAddrFull, dec); const avg   = avgDb || _avgFromCache(ctx.from.id, tokenAddrFull);
-
+// Get user-average entry across all buys (cached)
+const avg = getAvgEntryCached(ctx.from.id, tokenAddrFull, dec);
+      
       if (avg && plsPerToken != null) {
         const usdPerPls = await plsUSD().catch(() => null);
 
