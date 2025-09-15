@@ -2066,6 +2066,15 @@ function fmtSlipLabel(uid: number): string {
   return b === SLIP_AUTO ? 'Auto' : `${fmtSlip(b)}%`;
 }
 
+// ✅ NEW: helper to compute minOut from a quote (works for BUY/SELL)
+function minOutFromQuote(uid: number, quotedOut: bigint): bigint {
+  if (!quotedOut || quotedOut <= 0n) return 0n;
+  const slip = getSlipBps(uid);
+  return slip === SLIP_AUTO
+    ? (quotedOut * 99n) / 100n                     // 1% safety if Auto
+    : (quotedOut * BigInt(10000 - slip)) / 10000n; // manual bps
+}
+
 bot.action('slip_open', async (ctx) => {
   await ctx.answerCbQuery();
   const cur = getSlipBps(ctx.from.id);
@@ -2085,9 +2094,38 @@ bot.action('slip_open', async (ctx) => {
     3
   );
 
-  // ➕ NEW: Custom slippage entry button
+  // ➕ Custom slippage entry button
   rows.push([Markup.button.callback('✏️ Custom…', 'slip_custom')]);
   rows.push([Markup.button.callback('⬅️ Back', 'menu_sell')]);
+
+  return showMenu(
+    ctx,
+    'Choose *Slippage*:',
+    { parse_mode: 'Markdown', ...Markup.inlineKeyboard(rows) }
+  );
+});
+
+// ✅ NEW: BUY-side slippage picker (same options, back to BUY)
+bot.action('slip_open_buy', async (ctx) => {
+  await ctx.answerCbQuery();
+  const cur = getSlipBps(ctx.from.id);
+
+  const opts = [
+    { t: 'Auto', v: SLIP_AUTO },
+    { t: '0.5%', v: 50 },
+    { t: '1%',   v: 100 },
+    { t: '2%',   v: 200 },
+    { t: '3%',   v: 300 },
+    { t: '5%',   v: 500 },
+  ];
+
+  const rows = chunk(
+    opts.map(o => Markup.button.callback(`${cur === o.v ? '✅ ' : ''}${o.t}`, `slip_set:${o.v}`)),
+    3
+  );
+
+  rows.push([Markup.button.callback('✏️ Custom…', 'slip_custom_buy')]);
+  rows.push([Markup.button.callback('⬅️ Back', 'menu_buy')]);
 
   return showMenu(
     ctx,
@@ -2101,10 +2139,13 @@ bot.action(/^slip_set:(-?\d+)$/, async (ctx: any) => {
   await ctx.answerCbQuery();
   const bps = Number(ctx.match[1]);
   setSlipBps(ctx.from.id, bps);
-  return renderSellMenu(ctx);
+  // ✅ changed: try to return to the current screen (SELL first, then BUY)
+  try { return renderSellMenu(ctx); } catch {}
+  try { return renderBuyMenu(ctx); } catch {}
+  return;
 });
 
-// ➕ NEW: start custom slippage prompt (handled in bot.on("text") with type: 'slip_custom')
+// start custom slippage prompt (handled in bot.on("text") with type: 'slip_custom')
 bot.action('slip_custom', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'slip_custom' });
@@ -2112,6 +2153,17 @@ bot.action('slip_custom', async (ctx) => {
     ctx,
     'Send custom slippage % (e.g., `0.7`, `1`, `1.25`). Range 0–50.',
     { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'slip_open')]]) }
+  );
+});
+
+// ✅ NEW: custom slippage prompt (BUY back button)
+bot.action('slip_custom_buy', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.set(ctx.from.id, { type: 'slip_custom' });
+  return showMenu(
+    ctx,
+    'Send custom slippage % (e.g., `0.7`, `1`, `1.25`). Range 0–50.',
+    { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'slip_open_buy')]]) }
   );
 });
 
@@ -2762,7 +2814,9 @@ async function checkLimitsOnce() {
           }
         } catch {}
 
-        const rec = await buyAutoRoute(getPrivateKey(w), r.token_address, amtIn, 0n, gas);
+        // ✅ NEW: apply slippage to Limit BUY
+        const minOutLE = minOutFromQuote(r.telegram_id, preOut);
+        const rec = await buyAutoRoute(getPrivateKey(w), r.token_address, amtIn, minOutLE, gas);
         const hash = (rec as any)?.hash;
 
         // mark filled in DB immediately to avoid refiring
@@ -2796,53 +2850,53 @@ async function checkLimitsOnce() {
         const amount = (bal * BigInt(Math.round(pct))) / 100n;
         if (amount <= 0n) { unmarkProcessing(r.id); markLimitError(r.id, 'balance zero'); continue; }
 
-// Pre-quote for record + success card fields
-let outPls: bigint = 0n;
-let tokDec = 18;
-let tokSym = 'TOKEN';
-try {
-  const meta = await tokenMeta(r.token_address);
-  tokDec = meta.decimals ?? 18;
-  tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-  const q = await bestQuoteSell(amount, r.token_address);
-  if (q?.amountOut) {
-    outPls = q.amountOut;
-    recordTrade(r.telegram_id, w.address, r.token_address, 'SELL', q.amountOut, amount, q.route.key);
-  }
-} catch {}
+        // Pre-quote for record + success card fields
+        let outPls: bigint = 0n;
+        let tokDec = 18;
+        let tokSym = 'TOKEN';
+        try {
+          const meta = await tokenMeta(r.token_address);
+          tokDec = meta.decimals ?? 18;
+          tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+          const q = await bestQuoteSell(amount, r.token_address);
+          if (q?.amountOut) {
+            outPls = q.amountOut;
+            recordTrade(r.telegram_id, w.address, r.token_address, 'SELL', q.amountOut, amount, q.route.key);
+          }
+        } catch {}
 
-// ✅ Apply user slippage (incl. Auto) to limit SELL execution
-const slipBpsLE = getSlipBps(r.telegram_id);
-const minOutLE =
-  outPls > 0n
-    ? (slipBpsLE === SLIP_AUTO
-        ? (outPls * 99n) / 100n
-        : (outPls * BigInt(10000 - slipBpsLE)) / 10000n)
-    : 0n;
+        // Apply user slippage (incl. Auto) to limit SELL execution
+        const slipBpsLE = getSlipBps(r.telegram_id);
+        const minOutLE =
+          outPls > 0n
+            ? (slipBpsLE === SLIP_AUTO
+                ? (outPls * 99n) / 100n
+                : (outPls * BigInt(10000 - slipBpsLE)) / 10000n)
+            : 0n;
 
-const rec = await sellAutoRoute(getPrivateKey(w), r.token_address, amount, minOutLE, gas);
-const hash = (rec as any)?.hash;
+        const rec = await sellAutoRoute(getPrivateKey(w), r.token_address, amount, minOutLE, gas);
+        const hash = (rec as any)?.hash;
 
-markLimitFilled(r.id, hash);
+        markLimitFilled(r.id, hash);
 
-if (hash) {
-  const link = otter(hash);
-  const sentMsg = await bot.telegram.sendMessage(r.telegram_id, `transaction sent ${link}`);
-  provider.waitForTransaction(hash).then(async () => {
-    try { await bot.telegram.deleteMessage(r.telegram_id, sentMsg.message_id); } catch {}
-    await postTradeSuccess(ctxShim, {
-      action: 'SELL',
-      spend:   { amount,  decimals: tokDec, symbol: tokSym },
-      receive: { amount: outPls, decimals: 18,     symbol: 'PLS' },
-      tokenAddress: r.token_address,
-      explorerUrl: link
-    });
-    unmarkProcessing(r.id);
-  }).catch(() => { unmarkProcessing(r.id); });
-} else {
-  await bot.telegram.sendMessage(r.telegram_id, `transaction sent (no hash yet)`);
-  unmarkProcessing(r.id);
-}
+        if (hash) {
+          const link = otter(hash);
+          const sentMsg = await bot.telegram.sendMessage(r.telegram_id, `transaction sent ${link}`);
+          provider.waitForTransaction(hash).then(async () => {
+            try { await bot.telegram.deleteMessage(r.telegram_id, sentMsg.message_id); } catch {}
+            await postTradeSuccess(ctxShim, {
+              action: 'SELL',
+              spend:   { amount,  decimals: tokDec, symbol: tokSym },
+              receive: { amount: outPls, decimals: 18,     symbol: 'PLS' },
+              tokenAddress: r.token_address,
+              explorerUrl: link
+            });
+            unmarkProcessing(r.id);
+          }).catch(() => { unmarkProcessing(r.id); });
+        } else {
+          await bot.telegram.sendMessage(r.telegram_id, `transaction sent (no hash yet)`);
+          unmarkProcessing(r.id);
+        }
       }
     } catch (e: any) {
       unmarkProcessing(r.id);
@@ -2935,263 +2989,269 @@ bot.on('text', async (ctx, next) => {
       pending.delete(ctx.from.id); return renderSettings(ctx);
     }
 
-  if (p.type === 'auto_amt') {
-  const v = Number(msg);
-  if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number (PLS).');
-  setAutoBuyAmount(ctx.from.id, v);
-  pending.delete(ctx.from.id); return renderSettings(ctx);
-}
-
-// ✅ INSERTED: custom slippage (text input) handler
-if (p.type === 'slip_custom') {
-  const t = String(msg || '').trim().toLowerCase();
-
-  // allow "auto" to switch back to auto mode
-  if (t === 'auto') {
-    setSlipBps(ctx.from.id, SLIP_AUTO);
-    pending.delete(ctx.from.id);
-    await ctx.reply('Slippage set to Auto.');
-    return renderSellMenu(ctx);
-  }
-
-  // Accept inputs like "0.7", "1", "1.25", "2.5%", "75bp", "150bps"
-  const cleaned = t.replace(/,/g, '').replace(/\s+/g, '');
-  let bps: number | null = null;
-
-  // If user typed basis points explicitly
-  const mBp = cleaned.match(/^([0-9]*\.?[0-9]+)(bp|bps)$/);
-  if (mBp) {
-    const n = Number(mBp[1]);
-    if (Number.isFinite(n)) bps = Math.round(n); // already in bps
-  } else {
-    // Interpret as percent (optionally with trailing %)
-    const n = Number(cleaned.replace(/%$/, ''));
-    if (Number.isFinite(n)) bps = Math.round(n * 100);
-  }
-
-  // Clamp 0..5000 bps (0–50%)
-  if (bps == null || bps < 0 || bps > 5000) {
-    await ctx.reply('Please send a value between 0 and 50 (e.g., 0.7, 1, 1.25) — or type "auto".');
-    return;
-  }
-
-  setSlipBps(ctx.from.id, bps);
-  pending.delete(ctx.from.id);
-  await ctx.reply(`Slippage set to ${fmtSlip(bps)}%.`);
-  return renderSellMenu(ctx);
-}
-
-// ✅ INSERTED: referral payout wallet handler
-if (p.type === 'ref_payout') {
-  const addr = msg.trim();
-  if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) {
-    return ctx.reply('Please send a valid wallet address (0x…40 hex).');
-  }
-  try {
-    await setReferralPayout(ctx.from.id, addr);
-    pending.delete(ctx.from.id);
-    await ctx.reply('Referral rewards payout wallet set ✅');
-    return renderReferrals(ctx);
-  } catch (e: any) {
-    pending.delete(ctx.from.id);
-    return ctx.reply('Failed to save payout wallet: ' + (e?.message ?? 'unknown error'));
-  }
-}
-
-// ✅ INSERTED: Quick-Buy label editor
-if (p.type === 'edit_qb') {
-  // index comes from the button the user clicked earlier
-  const idx = Math.max(0, Math.min(5, Number((p as any).idx)));
-  const raw = String(msg).trim();
-
-  // must be N, Nk, Nm, or Nb (e.g., 250k, 1m, 500000)
-  if (!/^\d+(k|m|b)?$/i.test(raw)) {
-    await ctx.reply('Please send a number (optionally with K/M/B), e.g., 250k, 1m, 500000.');
-    return;
-  }
-
-  setQuickLabel(ctx.from.id, idx, raw.toUpperCase());
-  pending.delete(ctx.from.id);
-
-  await ctx.reply(`Updated Quick Buy #${idx + 1} → ${raw.toUpperCase()} PLS`);
-  // Return the user to Settings (or your editor screen if you have one)
-  return renderSettings(ctx);
-}
-
-// ✅ INSERTED: Sell % preset editor
-if (p.type === 'edit_sp') {
-  // index comes from the button the user clicked earlier
-  const idx = Math.max(0, Math.min(3, Number((p as any).idx)));
-  const v = Number(String(msg).trim());
-
-  if (!Number.isFinite(v) || v < 1 || v > 100) {
-    await ctx.reply('Please send a whole number between 1 and 100.');
-    return;
-  }
-
-  setSellPreset(ctx.from.id, idx, Math.round(v));
-  pending.delete(ctx.from.id);
-
-  await ctx.reply(`Updated Sell % preset #${idx + 1} → ${Math.round(v)}%`);
-  // Return the user to Settings (or your editor screen if you have one)
-  return renderSettings(ctx);
-}
-
-// Limit order building
-if (p.type === 'lb_amt') {
-  const v = Number(msg);
-  if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number of PLS (e.g., 0.5).');
-  const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Buy.'); }
-  d.amountPlsWei = ethers.parseEther(String(v));
-  draft.set(ctx.from.id, d);
-  pending.delete(ctx.from.id);
-  return showMenu(ctx, 'Choose a trigger:', limitTriggerMenu('BUY'));
-}
-
-if (p.type === 'ls_pct') {
-  const v = Number(msg);
-  if (!Number.isFinite(v) || v <= 0 || v > 100) return ctx.reply('Send a percent between 1 and 100.');
-  const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Sell.'); }
-  d.sellPct = v; draft.set(ctx.from.id, d);
-  pending.delete(ctx.from.id);
-  return showMenu(ctx, 'Choose a trigger:', limitTriggerMenu('SELL'));
-}
-
-if (p.type === 'limit_value') {
-  const d = draft.get(ctx.from.id);
-  if (!d || !d.trigger) { pending.delete(ctx.from.id); return ctx.reply('Start a Limit order first.'); }
-  const val = parseNumHuman(msg);
-  if (val == null || !(val > 0)) return ctx.reply('Send a positive number (supports `k`/`m`).');
-
-  const id = addLimitOrder({
-    telegramId: ctx.from.id,
-    walletId: d.walletId,
-    token: d.token,
-    side: d.side,
-    amountPlsWei: d.side === 'BUY' ? (d.amountPlsWei ?? ethers.parseEther('0')) : undefined,
-    sellPct: d.side === 'SELL' ? (d.sellPct ?? 100) : undefined,
-    trigger: d.trigger!,
-    value: val
-  });
-
-  draft.delete(ctx.from.id);
-  pending.delete(ctx.from.id);
-  await ctx.reply(`Limit ${d.side} #${id} created: ${d.trigger} @ ${NF.format(val)} ${d.side === 'BUY' ? `for ${fmtDec(ethers.formatEther((d.amountPlsWei ?? 0n)))} PLS` : `${d.sellPct}%`}`);
-  if (d.side === 'BUY') return renderBuyMenu(ctx);
-  return renderSellMenu(ctx);
-}
-
-return;
-}
-
-// Auto-detect token address when no prompt is active (powers auto-buy)
-const text = String(ctx.message.text).trim();
-if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
-  setToken(ctx.from.id, text);
-  warmTokenAsync(ctx.from.id, text);
-
-  const u = getUserSettings(ctx.from.id);
-  if (u?.auto_buy_enabled) {
-    // ✅ FIX: use getAutoSelSet (returns Set<number>)
-    const selSet = getAutoSelSet(ctx.from.id);
-    const selectedIds: number[] = selSet ? Array.from(selSet) : [];
-
-    // Build wallet list: all selected (if any) else the active wallet
-    const active = getActiveWallet(ctx.from.id);
-    let wallets = selectedIds.length
-      ? listWallets(ctx.from.id).filter(w => selectedIds.includes(w.id))
-      : (active ? [active] : []);
-
-    if (!wallets.length) {
-      await ctx.reply('Select or create a wallet first.');
-      return renderBuyMenu(ctx);
+    if (p.type === 'auto_amt') {
+      const v = Number(msg);
+      if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number (PLS).');
+      setAutoBuyAmount(ctx.from.id, v);
+      pending.delete(ctx.from.id); return renderSettings(ctx);
     }
 
-    const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
-    const amountIn = ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01));
-    const token = text;
+    // ✅ UPDATED: custom slippage (text input) handler returns to SELL or BUY
+    if (p.type === 'slip_custom') {
+      const t = String(msg || '').trim().toLowerCase();
 
-    // Brief error helper
-    const briefErr = (e: any): string => {
-      const s = String(e?.reason || e?.message || e || '');
-      if (/insufficient funds/i.test(s)) return 'insufficient funds';
-      if (/intrinsic transaction cost/i.test(s)) return 'insufficient funds (gas)';
-      if (/replacement fee too low|nonce/i.test(s)) return 'nonce / replacement fee too low';
-      if (/transfer amount exceeds balance|ERC20|insufficient/i.test(s)) return 'insufficient token balance';
-      if (/execution reverted/i.test(s)) return 'execution reverted';
-      return s.split('\n')[0].slice(0, 200);
-    };
-
-    // 🔁 Fire all auto-buys simultaneously
-    const tasks = wallets.map(async (w) => {
-      const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
-      try {
-        const gas = await computeGas(ctx.from.id);
-        const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, 0n, gas);
-        const hash = (r as any)?.hash;
-
-        let preOut: bigint = 0n;
-        let tokDec = 18;
-        let tokSym = 'TOKEN';
-        try {
-          const meta = await tokenMeta(token);
-          tokDec = meta.decimals ?? 18;
-          tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-          const preQuote = await bestQuoteBuy(amountIn, token);
-          if (preQuote?.amountOut) {
-            preOut = preQuote.amountOut;
-            recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-          }
-        } catch {}
-
-        if (hash) {
-          const link = otter(hash);
-          try {
-            await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
-          } catch {
-            await ctx.reply(`transaction sent ${link}`);
-          }
-
-          if (token.toLowerCase() !== WPLS) {
-            approveAllRouters(getPrivateKey(w), token, gas).catch(() => {});
-          }
-
-          provider.waitForTransaction(hash).then(async () => {
-            try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
-            await postTradeSuccess(ctx, {
-              action: 'BUY',
-              spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-              receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-              tokenAddress: token,
-              explorerUrl: link
-            });
-            // no referral nudge in auto-buy
-          }).catch(() => {/* ignore */});
-        } else {
-          try {
-            await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
-          } catch {}
-        }
-      } catch (e: any) {
-        const msg = `❌ Auto-buy failed for ${short(w.address)}: ${briefErr(e)}`;
-        try {
-          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, msg);
-        } catch {
-          await ctx.reply(msg);
-        }
+      // allow "auto" to switch back to auto mode
+      if (t === 'auto') {
+        setSlipBps(ctx.from.id, SLIP_AUTO);
+        pending.delete(ctx.from.id);
+        await ctx.reply('Slippage set to Auto.');
+        try { return renderSellMenu(ctx); } catch {}
+        try { return renderBuyMenu(ctx); } catch {}
+        return;
       }
-    });
 
-    await Promise.allSettled(tasks);
+      // Accept inputs like "0.7", "1", "1.25", "2.5%", "75bp", "150bps"
+      const cleaned = t.replace(/,/g, '').replace(/\s+/g, '');
+      let bps: number | null = null;
 
-    await upsertPinnedPosition(ctx);
-    return renderBuyMenu(ctx);
-  } else {
-    // No auto-buy => just open the buy menu with the token warmed
-    return renderBuyMenu(ctx);
+      // If user typed basis points explicitly
+      const mBp = cleaned.match(/^([0-9]*\.?[0-9]+)(bp|bps)$/);
+      if (mBp) {
+        const n = Number(mBp[1]);
+        if (Number.isFinite(n)) bps = Math.round(n); // already in bps
+      } else {
+        // Interpret as percent (optionally with trailing %)
+        const n = Number(cleaned.replace(/%$/, ''));
+        if (Number.isFinite(n)) bps = Math.round(n * 100);
+      }
+
+      // Clamp 0..5000 bps (0–50%)
+      if (bps == null || bps < 0 || bps > 5000) {
+        await ctx.reply('Please send a value between 0 and 50 (e.g., 0.7, 1, 1.25) — or type "auto".');
+        return;
+      }
+
+      setSlipBps(ctx.from.id, bps);
+      pending.delete(ctx.from.id);
+      await ctx.reply(`Slippage set to ${fmtSlip(bps)}%.`);
+      try { return renderSellMenu(ctx); } catch {}
+      try { return renderBuyMenu(ctx); } catch {}
+      return;
+    }
+
+    // ✅ INSERTED: referral payout wallet handler
+    if (p.type === 'ref_payout') {
+      const addr = msg.trim();
+      if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) {
+        return ctx.reply('Please send a valid wallet address (0x…40 hex).');
+      }
+      try {
+        await setReferralPayout(ctx.from.id, addr);
+        pending.delete(ctx.from.id);
+        await ctx.reply('Referral rewards payout wallet set ✅');
+        return renderReferrals(ctx);
+      } catch (e: any) {
+        pending.delete(ctx.from.id);
+        return ctx.reply('Failed to save payout wallet: ' + (e?.message ?? 'unknown error'));
+      }
+    }
+
+    // ✅ INSERTED: Quick-Buy label editor
+    if (p.type === 'edit_qb') {
+      // index comes from the button the user clicked earlier
+      const idx = Math.max(0, Math.min(5, Number((p as any).idx)));
+      const raw = String(msg).trim();
+
+      // must be N, Nk, Nm, or Nb (e.g., 250k, 1m, 500000)
+      if (!/^\d+(k|m|b)?$/i.test(raw)) {
+        await ctx.reply('Please send a number (optionally with K/M/B), e.g., 250k, 1m, 500000.');
+        return;
+      }
+
+      setQuickLabel(ctx.from.id, idx, raw.toUpperCase());
+      pending.delete(ctx.from.id);
+
+      await ctx.reply(`Updated Quick Buy #${idx + 1} → ${raw.toUpperCase()} PLS`);
+      // Return the user to Settings (or your editor screen if you have one)
+      return renderSettings(ctx);
+    }
+
+    // ✅ INSERTED: Sell % preset editor
+    if (p.type === 'edit_sp') {
+      // index comes from the button the user clicked earlier
+      const idx = Math.max(0, Math.min(3, Number((p as any).idx)));
+      const v = Number(String(msg).trim());
+
+      if (!Number.isFinite(v) || v < 1 || v > 100) {
+        await ctx.reply('Please send a whole number between 1 and 100.');
+        return;
+      }
+
+      setSellPreset(ctx.from.id, idx, Math.round(v));
+      pending.delete(ctx.from.id);
+
+      await ctx.reply(`Updated Sell % preset #${idx + 1} → ${Math.round(v)}%`);
+      // Return the user to Settings (or your editor screen if you have one)
+      return renderSettings(ctx);
+    }
+
+    // Limit order building
+    if (p.type === 'lb_amt') {
+      const v = Number(msg);
+      if (!Number.isFinite(v) || v <= 0) return ctx.reply('Send a positive number of PLS (e.g., 0.5).');
+      const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Buy.'); }
+      d.amountPlsWei = ethers.parseEther(String(v));
+      draft.set(ctx.from.id, d);
+      pending.delete(ctx.from.id);
+      return showMenu(ctx, 'Choose a trigger:', limitTriggerMenu('BUY'));
+    }
+
+    if (p.type === 'ls_pct') {
+      const v = Number(msg);
+      if (!Number.isFinite(v) || v <= 0 || v > 100) return ctx.reply('Send a percent between 1 and 100.');
+      const d = draft.get(ctx.from.id); if (!d) { pending.delete(ctx.from.id); return ctx.reply('Start again with Limit Sell.'); }
+      d.sellPct = v; draft.set(ctx.from.id, d);
+      pending.delete(ctx.from.id);
+      return showMenu(ctx, 'Choose a trigger:', limitTriggerMenu('SELL'));
+    }
+
+    if (p.type === 'limit_value') {
+      const d = draft.get(ctx.from.id);
+      if (!d || !d.trigger) { pending.delete(ctx.from.id); return ctx.reply('Start a Limit order first.'); }
+      const val = parseNumHuman(msg);
+      if (val == null || !(val > 0)) return ctx.reply('Send a positive number (supports `k`/`m`).');
+
+      const id = addLimitOrder({
+        telegramId: ctx.from.id,
+        walletId: d.walletId,
+        token: d.token,
+        side: d.side,
+        amountPlsWei: d.side === 'BUY' ? (d.amountPlsWei ?? ethers.parseEther('0')) : undefined,
+        sellPct: d.side === 'SELL' ? (d.sellPct ?? 100) : undefined,
+        trigger: d.trigger!,
+        value: val
+      });
+
+      draft.delete(ctx.from.id);
+      pending.delete(ctx.from.id);
+      await ctx.reply(`Limit ${d.side} #${id} created: ${d.trigger} @ ${NF.format(val)} ${d.side === 'BUY' ? `for ${fmtDec(ethers.formatEther((d.amountPlsWei ?? 0n)))} PLS` : `${d.sellPct}%`}`);
+      if (d.side === 'BUY') return renderBuyMenu(ctx);
+      return renderSellMenu(ctx);
+    }
+
+    return;
   }
-}
-return next();
+
+  // Auto-detect token address when no prompt is active (powers auto-buy)
+  const text = String(ctx.message.text).trim();
+  if (/^0x[a-fA-F0-9]{40}$/.test(text)) {
+    setToken(ctx.from.id, text);
+    warmTokenAsync(ctx.from.id, text);
+
+    const u = getUserSettings(ctx.from.id);
+    if (u?.auto_buy_enabled) {
+      // ✅ FIX: use getAutoSelSet (returns Set<number>)
+      const selSet = getAutoSelSet(ctx.from.id);
+      const selectedIds: number[] = selSet ? Array.from(selSet) : [];
+
+      // Build wallet list: all selected (if any) else the active wallet
+      const active = getActiveWallet(ctx.from.id);
+      let wallets = selectedIds.length
+        ? listWallets(ctx.from.id).filter(w => selectedIds.includes(w.id))
+        : (active ? [active] : []);
+
+      if (!wallets.length) {
+        await ctx.reply('Select or create a wallet first.');
+        return renderBuyMenu(ctx);
+      }
+
+      const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
+      const amountIn = ethers.parseEther(String(u.auto_buy_amount_pls ?? 0.01));
+      const token = text;
+
+      // Brief error helper
+      const briefErr = (e: any): string => {
+        const s = String(e?.reason || e?.message || e || '');
+        if (/insufficient funds/i.test(s)) return 'insufficient funds';
+        if (/intrinsic transaction cost/i.test(s)) return 'insufficient funds (gas)';
+        if (/replacement fee too low|nonce/i.test(s)) return 'nonce / replacement fee too low';
+        if (/transfer amount exceeds balance|ERC20|insufficient/i.test(s)) return 'insufficient token balance';
+        if (/execution reverted/i.test(s)) return 'execution reverted';
+        return s.split('\n')[0].slice(0, 200);
+      };
+
+      // 🔁 Fire all auto-buys simultaneously
+      const tasks = wallets.map(async (w) => {
+        const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
+        try {
+          // ✅ NEW: pre-quote FIRST to compute slippage minOut and log trade
+          let preOut: bigint = 0n;
+          let tokDec = 18;
+          let tokSym = 'TOKEN';
+          try {
+            const meta = await tokenMeta(token);
+            tokDec = meta.decimals ?? 18;
+            tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+            const preQuote = await bestQuoteBuy(amountIn, token);
+            if (preQuote?.amountOut) {
+              preOut = preQuote.amountOut;
+              recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+            }
+          } catch {}
+
+          const minOut = minOutFromQuote(ctx.from.id, preOut); // ✅ apply slippage to BUY
+          const gas = await computeGas(ctx.from.id);
+          const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, minOut, gas);
+          const hash = (r as any)?.hash;
+
+          if (hash) {
+            const link = otter(hash);
+            try {
+              await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
+            } catch {
+              await ctx.reply(`transaction sent ${link}`);
+            }
+
+            if (token.toLowerCase() !== WPLS) {
+              approveAllRouters(getPrivateKey(w), token, gas).catch(() => {});
+            }
+
+            provider.waitForTransaction(hash).then(async () => {
+              try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
+              await postTradeSuccess(ctx, {
+                action: 'BUY',
+                spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
+                receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
+                tokenAddress: token,
+                explorerUrl: link
+              });
+              // no referral nudge in auto-buy
+            }).catch(() => {/* ignore */});
+          } else {
+            try {
+              await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
+            } catch {}
+          }
+        } catch (e: any) {
+          const msg = `❌ Auto-buy failed for ${short(w.address)}: ${briefErr(e)}`;
+          try {
+            await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, msg);
+          } catch {
+            await ctx.reply(msg);
+          }
+        }
+      });
+
+      await Promise.allSettled(tasks);
+
+      await upsertPinnedPosition(ctx);
+      return renderBuyMenu(ctx);
+    } else {
+      // No auto-buy => just open the buy menu with the token warmed
+      return renderBuyMenu(ctx);
+    }
+  }
+  return next();
 });
 /* ---------- shortcuts ---------- */
 bot.action('main_back', async (ctx) => {
