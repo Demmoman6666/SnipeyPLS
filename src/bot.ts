@@ -354,7 +354,7 @@ async function renderReferrals(ctx: any) {
     [Markup.button.callback('⬅️ Back', 'main_back')],
   ]);
 
-  await showMenu(ctx, lines, { parse_mode: 'HTML', disable_web_page_preview: true, ...kb } as any);
+  await showMenu(ctx, lines, {   parse_mode: 'HTML',   link_preview_options: { is_disabled: true },   ...kb } as any);
 }
 
 /* ---------- message lifecycle ---------- */
@@ -1367,7 +1367,9 @@ bot.action('snipe_confirm', async (ctx) => {
     minLiqUsd: d.minLiqUsd ?? null,
   });
   snipeDraft.delete(ctx.from.id);
-  await ctx.reply(`✅ Snipe created and armed:\n${snipeSummary(job)}`, { disable_web_page_preview: true });
+await ctx.reply(`✅ Snipe created and armed:\n${snipeSummary(job)}`, {
+  link_preview_options: { is_disabled: true }
+} as any);
   return renderSnipeMenu(ctx);
 });
 
@@ -3236,10 +3238,14 @@ async function checkLimitsOnce() {
       const gas = await computeGas(r.telegram_id);
 
       // minimal ctx shim so we can reuse the same success card
-      const ctxShim: any = {
-        reply: (html: string, extra: any = {}) =>
-          bot.telegram.sendMessage(r.telegram_id, html, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra })
-      };
+const ctxShim: any = {
+  reply: (html: string, extra: any = {}) =>
+    bot.telegram.sendMessage(r.telegram_id, html, {
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+      ...extra
+    } as any)
+};
 
       if (r.side === 'BUY') {
         const amtIn = r.amount_pls_wei ? BigInt(r.amount_pls_wei) : 0n;
