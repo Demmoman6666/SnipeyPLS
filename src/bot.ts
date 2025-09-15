@@ -47,6 +47,91 @@ const otter = (hash?: string) => (hash ? `https://otter.pulsechain.com/tx/${hash
 const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process.env.STABLE_ADDRESS || '').toLowerCase();
 const WPLS = (process.env.WPLS_ADDRESS || '0xA1077a294dDE1B09bB078844df40758a5D0f9a27').toLowerCase(); // Pulse WPLS
 
+/* ---------- Step 1: Avg Entry overlay (instant PnL after buy) ---------- */
+/**
+ * We keep a lightweight, in-memory overlay of average entry for (user, token)
+ * so the Sell menu can show Entry + PnL immediately after a buy — even before
+ * any async DB readers catch up.
+ */
+type AvgOverlayRec = {
+  tokens: number;          // cumulative tokens bought (since process start)
+  plsSpent: number;        // cumulative PLS spent for those tokens
+  avgPlsPerToken: number;  // derived = plsSpent / tokens
+};
+
+// uid -> (tokenLower -> rec)
+const _avgEntryOverlay = new Map<number, Map<string, AvgOverlayRec>>();
+
+function _overlayMap(uid: number) {
+  let m = _avgEntryOverlay.get(uid);
+  if (!m) { m = new Map<string, AvgOverlayRec>(); _avgEntryOverlay.set(uid, m); }
+  return m;
+}
+function _overlayGet(uid: number, token: string) {
+  return _overlayMap(uid).get(token.toLowerCase()) || null;
+}
+function _overlaySet(uid: number, token: string, rec: AvgOverlayRec) {
+  _overlayMap(uid).set(token.toLowerCase(), rec);
+}
+
+/**
+ * Bump the overlay immediately after a BUY.
+ * @param uid        Telegram user id
+ * @param token      token address
+ * @param plsInWei   PLS spent (wei)
+ * @param outTokWei  tokens received (token units, wei with token decimals)
+ * @param dec        token decimals
+ */
+function bumpAvgAfterBuy(uid: number, token: string, plsInWei: bigint, outTokWei: bigint, dec: number) {
+  // convert to JS numbers for quick math (display precision use-case)
+  const addPls = Number(ethers.formatEther(plsInWei));
+  const addTok = Number(ethers.formatUnits(outTokWei, dec));
+  if (!(addPls > 0) || !(addTok > 0)) return;
+
+  const prev = _overlayGet(uid, token);
+  const tokens = (prev?.tokens ?? 0) + addTok;
+  const plsSpent = (prev?.plsSpent ?? 0) + addPls;
+  const avgPlsPerToken = tokens > 0 ? (plsSpent / tokens) : 0;
+
+  _overlaySet(uid, token, { tokens, plsSpent, avgPlsPerToken });
+}
+
+/**
+ * Wrapper you can use instead of raw recordTrade in BUY flows.
+ * - Writes the trade to DB
+ * - Updates the in-memory avg-entry overlay so PnL shows instantly
+ */
+async function recordBuyAndCache(
+  telegramId: number,
+  walletAddress: string,
+  token: string,
+  amountInPlsWei: bigint,
+  amountOutTokenWei: bigint,
+  routeKey: string,
+  tokenDecimals: number
+) {
+  try {
+    // Persist (same shape as before)
+    recordTrade(telegramId, walletAddress, token, 'BUY', amountInPlsWei, amountOutTokenWei, routeKey);
+  } finally {
+    // Always bump overlay so UI reflects the new average immediately
+    bumpAvgAfterBuy(telegramId, token, amountInPlsWei, amountOutTokenWei, tokenDecimals);
+  }
+}
+
+/**
+ * Optional helper if you want Sell menu to prefer the overlay when present.
+ * Usage: const avg = getAvgEntryCached(uid, token, decimals);
+ */
+function getAvgEntryCached(uid: number, token: string, decimals?: number) {
+  const fromOverlay = _overlayGet(uid, token);
+  if (fromOverlay) {
+    return { avgPlsPerToken: fromOverlay.avgPlsPerToken };
+  }
+  // Fall back to DB aggregator (existing helper)
+  return getAvgEntry(uid, token, decimals ?? 18);
+}
+
 // 🔗 Address helpers
 const addrExplorer = (addr: string) => `https://otter.pulsechain.com/address/${addr}`;
 
@@ -71,6 +156,7 @@ bot.action(/^copy:(0x[a-fA-F0-9]{40})$/, async (ctx: any) => {
     link_preview_options: { is_disabled: true }
   } as any);
 });
+
 /* ---------- Referral: config + helpers ---------- */
 const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@/, '');
 const REF_PREFIX = 'ref_';
@@ -97,7 +183,7 @@ async function sendRefNudgeTo(telegramId: number) {
       `🤝 Referral program\nShare your personal invite link:\n${link}`,
       kb as any
     );
-  } catch {/* ignore */}
+  } catch { /* ignore */ }
 }
 
 /* ---- HTML escape + reply helper ---- */
@@ -1851,16 +1937,26 @@ bot.action(/^buy_qb:(\d+)$/, async (ctx: any) => {
       const r = await buyAutoRoute(getPrivateKey(w), token!, amountIn, minOut, gas);
       const hash = (r as any)?.hash;
 
-      // For success card + logging
-      let preOut: bigint = pre?.amountOut ?? 0n, tokDec = 18, tokSym = 'TOKEN';
-      try {
-        const meta = await tokenMeta(token!);
-        tokDec = meta.decimals ?? 18;
-        tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-        if (pre?.amountOut) {
-          try { recordTrade(ctx.from.id, w.address, token!, 'BUY', amountIn, pre.amountOut, pre.route?.key ?? 'AUTO'); } catch {}
-        }
-      } catch {}
+// For success card + logging
+let preOut: bigint = pre?.amountOut ?? 0n, tokDec = 18, tokSym = 'TOKEN';
+try {
+  const meta = await tokenMeta(token!);
+  tokDec = meta.decimals ?? 18;
+  tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+  if (pre?.amountOut) {
+    try {
+      await recordBuyAndCache(
+        ctx.from.id,
+        w.address,
+        token!,
+        amountIn,
+        pre.amountOut,
+        pre.route?.key ?? 'AUTO',
+        tokDec
+      );
+    } catch {}
+  }
+} catch {}
 
       if (hash) {
         const link = otter(hash);
@@ -2944,7 +3040,7 @@ async function renderSellMenu(ctx: any) {
       }
 
       // Get user-average entry across all buys tracked by the bot
-      const avg = getAvgEntry(ctx.from.id, tokenAddrFull, dec);
+      const avgDb = getAvgEntry(ctx.from.id, tokenAddrFull, dec); const avg   = avgDb || _avgFromCache(ctx.from.id, tokenAddrFull);
 
       if (avg && plsPerToken != null) {
         const usdPerPls = await plsUSD().catch(() => null);
