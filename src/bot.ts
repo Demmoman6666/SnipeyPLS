@@ -3800,6 +3800,29 @@ bot.on('text', async (ctx, next) => {
         ])
       });
     }
+        if ((p as any).type === 'snipe_method') {
+      const msgTxt = String(ctx.message?.text ?? '').trim();
+
+      // allow either a function signature or a 4-byte selector
+      const isSelector   = /^0x[0-9a-fA-F]{8}$/.test(msgTxt);
+      const isSignature  = /^[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)$/.test(msgTxt);
+
+      if (!isSelector && !isSignature) {
+        await ctx.reply(
+          'Send a function name like `enableTrading()` or a 4-byte selector like `0xabcdef01`.',
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      const d: any = snipeDraft.get(ctx.from.id) || {};
+      d.method = msgTxt;
+      snipeDraft.set(ctx.from.id, d);
+
+      pending.delete(ctx.from.id);
+      await ctx.reply('✅ Method saved.');
+      return renderSnipeMenu(ctx);
+    }
     /* ---------- END SNIPE FLOW ---------- */
 
     // Referral payout wallet handler
