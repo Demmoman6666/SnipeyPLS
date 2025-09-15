@@ -1102,9 +1102,22 @@ async function renderBuyMenu(ctx: any) {
   const base = buyMenu(Math.round(pct), walletButtons) as any;
   const extra: any = { parse_mode: 'HTML', ...(base || {}) };
 
-  // Inject the Quick-Buy section just above the "Amount" row if present
+  // Ensure inline keyboard present
   extra.reply_markup = extra.reply_markup || {};
   const kb: any[][] = (extra.reply_markup.inline_keyboard || []) as any[][];
+
+  // 🎯 Insert Slippage row (near the Gas % row if found, else at top)
+  const slipRow = [Markup.button.callback(`🎯 Slippage (${fmtSlipLabel(ctx.from.id)})`, 'slip_open_buy')];
+  const gasRowIdx = kb.findIndex(row =>
+    row?.some?.((b: any) => String(b?.text || '').toLowerCase().includes('gas %'))
+  );
+  if (gasRowIdx >= 0) {
+    kb.splice(gasRowIdx + 1, 0, slipRow);
+  } else {
+    kb.unshift(slipRow);
+  }
+
+  // Inject the Quick-Buy section just above the "Amount" row if present
   const amountRowIdx = kb.findIndex(row =>
     row?.some?.((b: any) =>
       String(b?.text || '').toLowerCase().includes('amount') ||
@@ -1160,6 +1173,32 @@ bot.action(/^gas_pct_set:(-?\d+)$/, async (ctx: any) => {
   return renderBuyMenu(ctx);
 });
 
+/* 🎯 BUY Slippage picker (presets only; returns to BUY menu) */
+bot.action('slip_open_buy', async (ctx) => {
+  await ctx.answerCbQuery();
+  const cur = getSlipBps(ctx.from.id);
+  const opts = [
+    { t: 'Auto', v: SLIP_AUTO },
+    { t: '0.5%', v: 50 },
+    { t: '1%',   v: 100 },
+    { t: '2%',   v: 200 },
+    { t: '3%',   v: 300 },
+    { t: '5%',   v: 500 },
+  ];
+  const rows = chunk(
+    opts.map(o => Markup.button.callback(`${cur === o.v ? '✅ ' : ''}${o.t}`, `slip_set_buy:${o.v}`)),
+    3
+  );
+  rows.push([Markup.button.callback('⬅️ Back', 'menu_buy')]);
+  return showMenu(ctx, 'Choose *Slippage*:', { parse_mode: 'Markdown', ...Markup.inlineKeyboard(rows) });
+});
+bot.action(/^slip_set_buy:(-?\d+)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const bps = Number(ctx.match[1]);
+  setSlipBps(ctx.from.id, bps);
+  return renderBuyMenu(ctx);
+});
+
 bot.action('pair_info', async (ctx) => {
   await ctx.answerCbQuery();
   const W = process.env.WPLS_ADDRESS!;
@@ -1210,19 +1249,29 @@ bot.action(/^buy_qb:(\d+)$/, async (ctx: any) => {
     const pendingMsg = await ctx.reply(`⏳ Sending buy (${label} PLS) for ${short(w.address)}…`);
     try {
       const gas = await computeGas(ctx.from.id);
-      const r = await buyAutoRoute(getPrivateKey(w), token!, amountIn, 0n, gas);
+
+      // 🔎 Pre-quote for slippage + success card/logging
+      let pre: any = null;
+      try { pre = await bestQuoteBuy(amountIn, token!); } catch {}
+      const slipBps = getSlipBps(ctx.from.id);
+      const minOut =
+        pre?.amountOut
+          ? (slipBps === SLIP_AUTO
+              ? (pre.amountOut * 99n) / 100n
+              : (pre.amountOut * BigInt(10000 - slipBps)) / 10000n)
+          : 0n;
+
+      const r = await buyAutoRoute(getPrivateKey(w), token!, amountIn, minOut, gas);
       const hash = (r as any)?.hash;
 
-      // Pre-quote for success card + logging
-      let preOut: bigint = 0n, tokDec = 18, tokSym = 'TOKEN';
+      // For success card + logging
+      let preOut: bigint = pre?.amountOut ?? 0n, tokDec = 18, tokSym = 'TOKEN';
       try {
         const meta = await tokenMeta(token!);
         tokDec = meta.decimals ?? 18;
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-        const pre = await bestQuoteBuy(amountIn, token!);
         if (pre?.amountOut) {
-          preOut = pre.amountOut;
-          try { recordTrade(ctx.from.id, w.address, token!, 'BUY', amountIn, pre.amountOut, pre.route.key); } catch {}
+          try { recordTrade(ctx.from.id, w.address, token!, 'BUY', amountIn, pre.amountOut, pre.route?.key ?? 'AUTO'); } catch {}
         }
       } catch {}
 
