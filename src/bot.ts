@@ -3751,11 +3751,17 @@ bot.on('text', async (ctx, next) => {
       return renderSettings(ctx);
     }
 
-    /* ---------- SNIPE FLOW ---------- */
+  /* ---------- SNIPE FLOW ---------- */
     if ((p as any).type === 'snipe_token') {
-      if (!/^0x[a-fA-F0-9]{40}$/.test(msg)) { await ctx.reply('That does not look like a token address.'); return; }
+      if (!/^0x[a-fA-F0-9]{40}$/.test(msg)) {
+        await ctx.reply('That does not look like a token address.');
+        return;
+      }
       const d = snipeDraft.get(ctx.from.id) || {};
-      d.token = msg; snipeDraft.set(ctx.from.id, d);
+      d.token = msg;
+      snipeDraft.set(ctx.from.id, d);
+
+      // continue the wizard
       pending.set(ctx.from.id, { type: 'snipe_amt' } as any);
       await ctx.reply('Got the token. Now send the amount in PLS (e.g., 0.25).');
       return;
@@ -3763,10 +3769,15 @@ bot.on('text', async (ctx, next) => {
 
     if ((p as any).type === 'snipe_amt') {
       const amt = Number(msg);
-      if (!Number.isFinite(amt) || amt <= 0) { await ctx.reply('Send a positive number, e.g., 0.25'); return; }
+      if (!Number.isFinite(amt) || amt <= 0) {
+        await ctx.reply('Send a positive number, e.g., 0.25');
+        return;
+      }
       const d = snipeDraft.get(ctx.from.id) || {};
       d.amountPlsWei = ethers.parseEther(String(amt));
       snipeDraft.set(ctx.from.id, d);
+
+      // next: optional liquidity
       pending.set(ctx.from.id, { type: 'snipe_liq' } as any);
       await ctx.reply('Optional: send minimum USD liquidity (e.g., 50k), or type "skip".');
       return;
@@ -3777,35 +3788,89 @@ bot.on('text', async (ctx, next) => {
       let val: number | null = null;
       if (raw !== 'skip') {
         const m = raw.replace(/[\s,$]/g, '').match(/^([0-9]*\.?[0-9]+)\s*([kmb])?$/i);
-        if (!m) { await ctx.reply('Send a number (supports k/m), or "skip".'); return; }
+        if (!m) {
+          await ctx.reply('Send a number (supports k/m), or "skip".');
+          return;
+        }
         const base = Number(m[1]);
-        const mul = !m[2] ? 1 : m[2].toLowerCase() === 'k' ? 1e3 : m[2].toLowerCase() === 'm' ? 1e6 : 1e9;
+        const mul = !m[2]
+          ? 1
+          : m[2].toLowerCase() === 'k'
+          ? 1e3
+          : m[2].toLowerCase() === 'm'
+          ? 1e6
+          : 1e9;
         val = base * mul;
       }
       const d = snipeDraft.get(ctx.from.id) || {};
-      d.minLiqUsd = val; snipeDraft.set(ctx.from.id, d);
+      d.minLiqUsd = val;
+      snipeDraft.set(ctx.from.id, d);
+
       const lines = [
         'Review your snipe:',
         `• Token: <code>${d.token}</code>`,
         `• Amount: <b>${fmtDec(ethers.formatEther(d.amountPlsWei ?? 0n))} PLS</b>`,
         `• Min Liquidity: ${d.minLiqUsd != null ? fmtUsdCompact(d.minLiqUsd) : '—'}`,
-        '', 'Arm this rule?',
+        '',
+        'Arm this rule?',
       ].join('\n');
+
       pending.delete(ctx.from.id);
       return showMenu(ctx, lines, {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
           [Markup.button.callback('✅ Create & Arm', 'snipe_confirm')],
           [Markup.button.callback('⬅️ Cancel', 'menu_snipe')],
-        ])
+        ]),
       });
     }
-        if ((p as any).type === 'snipe_method') {
+
+    // === NEW: Snipe menu quick-edit — set AMOUNT (PLS) ===
+    // (Triggered when the Snipe menu asks for amount without running the full wizard.)
+    if ((p as any).type === 'snipe_amt_edit') {
+      const raw = String(ctx.message.text).trim();
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) {
+        await ctx.reply('Send a positive number (PLS).');
+        return;
+      }
+      const d = snipeDraft.get(ctx.from.id) || {};
+      d.amountPlsWei = ethers.parseEther(String(n));
+      snipeDraft.set(ctx.from.id, d);
+
+      pending.delete(ctx.from.id);
+      await ctx.reply(`Amount set to ${fmtDec(String(n))} PLS.`);
+      return renderSnipeMenu(ctx);
+    }
+
+    // === NEW: Snipe menu quick-edit — set TOKEN (contract) ===
+    // (Triggered when the Snipe menu asks for a token without running the full wizard.)
+    if ((p as any).type === 'snipe_token_edit') {
+      const addr = String(ctx.message.text).trim();
+      if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) {
+        await ctx.reply('That does not look like a token address.');
+        return;
+      }
+      const d = snipeDraft.get(ctx.from.id) || {};
+      d.token = addr;
+      snipeDraft.set(ctx.from.id, d);
+
+      // keep Buy/Sell menus warm & consistent
+      setToken(ctx.from.id, addr);
+      warmTokenAsync(ctx.from.id, addr);
+
+      pending.delete(ctx.from.id);
+      await ctx.reply('Token set ✅');
+      return renderSnipeMenu(ctx);
+    }
+
+    // Snipe menu: set method (function name or 4-byte selector)
+    if ((p as any).type === 'snipe_method') {
       const msgTxt = String(ctx.message?.text ?? '').trim();
 
       // allow either a function signature or a 4-byte selector
-      const isSelector   = /^0x[0-9a-fA-F]{8}$/.test(msgTxt);
-      const isSignature  = /^[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)$/.test(msgTxt);
+      const isSelector  = /^0x[0-9a-fA-F]{8}$/.test(msgTxt);
+      const isSignature = /^[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)$/.test(msgTxt);
 
       if (!isSelector && !isSignature) {
         await ctx.reply(
@@ -3816,7 +3881,7 @@ bot.on('text', async (ctx, next) => {
       }
 
       const d: any = snipeDraft.get(ctx.from.id) || {};
-      d.method = msgTxt;
+      d.method = isSelector ? msgTxt.toLowerCase() : msgTxt; // normalize selectors
       snipeDraft.set(ctx.from.id, d);
 
       pending.delete(ctx.from.id);
