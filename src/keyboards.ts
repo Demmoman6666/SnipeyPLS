@@ -104,11 +104,20 @@ export function limitTriggerMenu(side: 'BUY' | 'SELL') {
   return Markup.inlineKeyboard(rows);
 }
 
-/** Referrals menu (NEW) */
+/** Referrals menu */
 export function referralMenu(link?: string) {
   return Markup.inlineKeyboard([
     [Markup.button.url('🔗 Your Referral Link', link || 'https://t.me/')],
-    [Markup.button.callback('📊 Refresh', 'referrals_refresh'),
+    [Markup.button.callback('📊 Refresh', 'ref_refresh'),
      Markup.button.callback('⬅️ Back', 'main_back')],
+  ]);
+}
+
+/** Snipe menu (needed by bot.ts) */
+export function snipeMenu() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('📄 Paste Contract (CA)', 'buy_set_token')],
+    [Markup.button.callback('🤖 Toggle Auto-Buy', 'auto_toggle')],
+    [Markup.button.callback('⬅️ Back', 'main_back')],
   ]);
 }
