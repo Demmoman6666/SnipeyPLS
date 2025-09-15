@@ -62,11 +62,14 @@ const explorerAddrBtn = (addr: string, label = '🔍 Explorer') =>
 const copyAddrFallbackBtn = (addr: string, label = '📋 Copy') =>
   Markup.button.callback(label, `copy:${addr.toLowerCase()}`);
 
-// Fallback handler: sends a copyable code block
+// Fallback handler: sends a copyable code block (no link previews)
 bot.action(/^copy:(0x[a-fA-F0-9]{40})$/, async (ctx: any) => {
   await ctx.answerCbQuery('Address sent below');
   const addr = ctx.match[1];
-  return ctx.reply(`Address:\n\`${addr}\``, { parse_mode: 'Markdown', disable_web_page_preview: true });
+  return ctx.reply(`Address:\n\`${addr}\``, {
+    parse_mode: 'Markdown',
+    link_preview_options: { is_disabled: true }
+  } as any);
 });
 /* ---------- Referral: config + helpers ---------- */
 const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@/, '');
@@ -99,8 +102,13 @@ async function sendRefNudgeTo(telegramId: number) {
 
 /* ---- HTML escape + reply helper ---- */
 const esc = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
 function replyHTML(ctx: any, html: string, extra: any = {}) {
-  return ctx.reply(html, { parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
+  return ctx.reply(html, {
+    parse_mode: 'HTML',
+    link_preview_options: { is_disabled: true },
+    ...extra
+  } as any);
 }
 
 /* ===== currency formatters ===== */
@@ -316,7 +324,11 @@ function homeScreenText() {
 }
 
 async function renderHome(ctx: any) {
-  await showMenu(ctx, homeScreenText(), { parse_mode: 'HTML', disable_web_page_preview: true, ...mainMenu() });
+  await showMenu(ctx, homeScreenText(), {
+    parse_mode: 'HTML',
+    link_preview_options: { is_disabled: true },
+    ...mainMenu()
+  } as any);
 }
 
 /* ---------- REFERRALS MENU ---------- */
