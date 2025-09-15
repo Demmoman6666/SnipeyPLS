@@ -2124,6 +2124,21 @@ function minOutFromQuote(uid: number, quotedOut: bigint): bigint {
     : (quotedOut * BigInt(10000 - slip)) / 10000n; // manual bps
 }
 
+/* ===== Auto-Buy Slippage (own setting used only for auto-buys) ===== */
+const autoSlipBpsMap = new Map<number, number>(); // uid -> bps or -1 (Auto)
+
+function getAutoBuySlipBps(uid: number): number {
+  return autoSlipBpsMap.has(uid) ? (autoSlipBpsMap.get(uid) as number) : SLIP_AUTO;
+}
+function setAutoBuySlipBps(uid: number, bps: number) {
+  autoSlipBpsMap.set(uid, Math.max(-1, Math.min(5000, Math.round(bps))));
+}
+function fmtAutoSlipLabel(uid: number): string {
+  const b = getAutoBuySlipBps(uid);
+  return b === SLIP_AUTO ? 'Auto' : `${fmtSlip(b)}%`;
+}
+
+// ====== SELL/BUY slippage pickers ======
 bot.action('slip_open', async (ctx) => {
   await ctx.answerCbQuery();
   const cur = getSlipBps(ctx.from.id);
@@ -2213,6 +2228,52 @@ bot.action('slip_custom_buy', async (ctx) => {
     ctx,
     'Send custom slippage % (e.g., `0.7`, `1`, `1.25`). Range 0–50.',
     { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'slip_open_buy')]]) }
+  );
+});
+
+/* ===== Settings ▸ Auto-Buy Slippage picker (separate from menu slippage) ===== */
+bot.action('auto_slip_open', async (ctx) => {
+  await ctx.answerCbQuery();
+  const cur = getAutoBuySlipBps(ctx.from.id);
+
+  const opts = [
+    { t: 'Auto', v: SLIP_AUTO },
+    { t: '0.5%', v: 50 },
+    { t: '1%',   v: 100 },
+    { t: '2%',   v: 200 },
+    { t: '3%',   v: 300 },
+    { t: '5%',   v: 500 },
+  ];
+
+  const rows = chunk(
+    opts.map(o => Markup.button.callback(`${cur === o.v ? '✅ ' : ''}${o.t}`, `auto_slip_set:${o.v}`)),
+    3
+  );
+
+  rows.push([Markup.button.callback('✏️ Custom…', 'auto_slip_custom')]);
+  rows.push([Markup.button.callback('⬅️ Back', 'menu_settings')]);
+
+  return showMenu(
+    ctx,
+    'Choose *Auto-Buy Slippage* (applies only to automatic buys):',
+    { parse_mode: 'Markdown', ...Markup.inlineKeyboard(rows) }
+  );
+});
+
+bot.action(/^auto_slip_set:(-?\d+)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const bps = Number(ctx.match[1]);
+  setAutoBuySlipBps(ctx.from.id, bps);
+  return renderSettings(ctx);
+});
+
+bot.action('auto_slip_custom', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.set(ctx.from.id, { type: 'auto_slip_custom' });
+  return showMenu(
+    ctx,
+    'Send custom slippage % for *Auto-Buy* (e.g., `0.7`, `1`, `1.25`). Range 0–50. Type `auto` to switch to Auto.',
+    { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'auto_slip_open')]]) }
   );
 });
 
