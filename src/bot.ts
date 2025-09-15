@@ -585,6 +585,9 @@ async function renderSettings(ctx: any) {
   const autoAmt = u?.auto_buy_amount_pls ?? 0.01;
   const autoEmoji = autoOn ? '🟢' : '🔴';
 
+  // NEW: show current Auto-Buy slippage label (uses helpers from your slippage row)
+  const autoSlipLabel = fmtAutoSlipLabel(ctx.from.id);
+
   const lines = [
     '⚙️ <b>SETTINGS</b>',
     '',
@@ -596,6 +599,7 @@ async function renderSettings(ctx: any) {
     '<b>Auto Buy</b>',
     `• Status: <b>${autoEmoji} ${autoOn ? 'ON' : 'OFF'}</b>`,
     `• Amount: <code>${fmtDec(String(autoAmt))}</code> PLS`,
+    `• Auto-Buy Slippage: <b>${autoSlipLabel}</b>`,
     '',
     '<b>Auto-Buy Wallets</b>',
     'Select wallets that should participate when Auto-Buy triggers.',
@@ -611,24 +615,26 @@ async function renderSettings(ctx: any) {
     6
   );
 
-const kb = Markup.inlineKeyboard([
-  [Markup.button.callback('⬅️ Back', 'main_back')],
+  const kb = Markup.inlineKeyboard([
+    [Markup.button.callback('⬅️ Back', 'main_back')],
 
-  [Markup.button.callback('— Gas Settings —', 'noop')],
-  [Markup.button.callback('Default Gas %', 'set_defpct')],
-  [Markup.button.callback('Gas Limit', 'set_gl'), Markup.button.callback('Gwei Booster', 'set_gb')],
+    [Markup.button.callback('— Gas Settings —', 'noop')],
+    [Markup.button.callback('Default Gas %', 'set_defpct')],
+    [Markup.button.callback('Gas Limit', 'set_gl'), Markup.button.callback('Gwei Booster', 'set_gb')],
 
-  [Markup.button.callback('— Auto Buy —', 'noop')],
-  [Markup.button.callback(`${autoEmoji} Auto-Buy: ${autoOn ? 'ON' : 'OFF'}`, 'auto_toggle')],
-  [Markup.button.callback('Auto Buy Amount', 'auto_amt')],
+    [Markup.button.callback('— Auto Buy —', 'noop')],
+    [Markup.button.callback(`${autoEmoji} Auto-Buy: ${autoOn ? 'ON' : 'OFF'}`, 'auto_toggle')],
+    [Markup.button.callback('Auto Buy Amount', 'auto_amt')],
+    // NEW: Auto-Buy Slippage picker (opens the same-style slippage menu just for auto-buys)
+    [Markup.button.callback(`Auto-Buy Slippage (${fmtAutoSlipLabel(ctx.from.id)})`, 'auto_slip_open')],
 
-  // 👇 NEW: Quick Buy / Sell editor section
-  [Markup.button.callback('— Edit Quick Buy / Sell —', 'noop')],
-  [Markup.button.callback('🟢 Edit Buy Buttons', 'edit_qb_open'), Markup.button.callback('🔴 Edit Sell %', 'edit_sellpct_open')],
+    // 👇 Quick Buy / Sell editor section
+    [Markup.button.callback('— Edit Quick Buy / Sell —', 'noop')],
+    [Markup.button.callback('🟢 Edit Buy Buttons', 'edit_qb_open'), Markup.button.callback('🔴 Edit Sell %', 'edit_sellpct_open')],
 
-  [Markup.button.callback('— Wallets —', 'noop')],
-  ...walletButtons,
-]);
+    [Markup.button.callback('— Wallets —', 'noop')],
+    ...walletButtons,
+  ]);
 
   await showMenu(ctx, lines, { parse_mode: 'HTML', ...kb });
 }
