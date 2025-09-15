@@ -2,7 +2,16 @@
 import './boot.js';
 import { Telegraf, Markup } from 'telegraf';
 import { getConfig } from './config.js';
-import { mainMenu, buyMenu, buyGasPctMenu, sellMenu, settingsMenu, limitTriggerMenu } from './keyboards.js';
+import {
+  mainMenu,
+  buyMenu,
+  buyGasPctMenu,
+  sellMenu,
+  settingsMenu,
+  limitTriggerMenu,
+  // ✅ added this:
+  snipeMenu,
+} from './keyboards.js';
 import {
   listWallets, createWallet, importWallet, getActiveWallet, setToken, setGasBase, setGasPercent,
   setDefaultGasPercent, getUserSettings, getPrivateKey, setBuyAmount, getWalletById, removeWallet, setSellPct,
