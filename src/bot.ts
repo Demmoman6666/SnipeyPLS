@@ -499,7 +499,7 @@ async function upsertPinnedPosition(ctx: any) {
     const bal = await c.balanceOf(w.address);
     const q = bal > 0n ? await bestQuoteSell(bal, u.token_address) : null;
 
-    const avg = getAvgEntry(uid, u.token_address, decimals);
+    const avg = getAvgEntryCached(uid, u.token_address, decimals);
     let pnlLine = '—';
     if (avg && q?.amountOut) {
       const curPls = Number(ethers.formatEther(q.amountOut));
