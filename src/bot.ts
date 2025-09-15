@@ -2921,33 +2921,66 @@ async function renderSellMenu(ctx: any) {
       metaSymbol = (meta.symbol || meta.name || '').toString();
 
       const c = erc20(tokenAddrFull);
-      const [bal, best] = await Promise.all([
-        c.balanceOf(w.address),
-        (async () => {
-          const amt = await c.balanceOf(w.address);
-          const sellAmt = (amt * BigInt(Math.round(pct))) / 100n;
-          return (sellAmt > 0n) ? bestQuoteSell(sellAmt, tokenAddrFull) : null;
-        })()
-      ]);
+      const bal = await c.balanceOf(w.address);
+      const sellAmt = (bal * BigInt(Math.round(pct))) / 100n;
 
+      // show balance
       balLine = `• <b>Balance:</b> ${esc(fmtDec(ethers.formatUnits(bal, dec)))} ${esc(metaSymbol || 'TOKEN')}`;
 
-      if (best) {
-        // Clarify the estimate reflects the current sell %
-        outLine = `• <b>Est. Out (${esc(NF.format(pct))}%):</b> ${esc(fmtPls(best.amountOut))} PLS  (Route: ${esc(best.route.key)})`;
+      // Try to fill “Est. Out (Sell %)” from a quote (nice to have but not required for PnL)
+      let q: any = null;
+      try { q = sellAmt > 0n ? await bestQuoteSell(sellAmt, tokenAddrFull) : null; } catch {}
+      if (q?.amountOut) {
+        outLine = `• <b>Est. Out (${esc(NF.format(pct))}%):</b> ${esc(fmtPls(q.amountOut))} PLS  (Route: ${esc(q.route.key)})`;
       }
 
-      const avg = getAvgEntry(ctx.from.id, tokenAddrFull, dec);
-      if (avg && best) {
-        const amountIn = (bal * BigInt(Math.round(pct))) / 100n;
-        const amtTok = Number(ethers.formatUnits(amountIn, dec));
-        const curPls = Number(ethers.formatEther(best.amountOut));
-        const curAvg = amtTok > 0 ? curPls / amtTok : 0;
-        const pnlPls = curPls - (avg.avgPlsPerToken * amtTok);
-        const pnlPct = avg.avgPlsPerToken > 0 ? (curAvg / avg.avgPlsPerToken - 1) * 100 : 0;
+      // === PnL calculation (no dependency on quote) ===
+      // Current per-token price in PLS (fallback to quote-derived per-token if needed)
+      let plsPerToken: number | null = await pricePLSPerToken(tokenAddrFull);
+      if (plsPerToken == null && q?.amountOut) {
+        const amtTok = Number(ethers.formatUnits(sellAmt, dec));
+        const outPls = Number(ethers.formatEther(q.amountOut));
+        plsPerToken = amtTok > 0 ? (outPls / amtTok) : null;
+      }
 
-        entryLine = `• <b>Entry:</b> ${esc(NF.format(avg.avgPlsPerToken))} PLS / ${esc(metaSymbol || 'TOKEN')}`;
-        pnlLine   = `• <b>Net PnL:</b> ${pnlPls >= 0 ? '🟢' : '🔴'} ${esc(NF.format(pnlPls))} PLS  (${esc(NF.format(pnlPct))}%)`;
+      // Get user-average entry across all buys tracked by the bot
+      const avg = getAvgEntry(ctx.from.id, tokenAddrFull, dec);
+
+      if (avg && plsPerToken != null) {
+        const usdPerPls = await plsUSD().catch(() => null);
+
+        // Evaluate PnL for the current Sell % of balance
+        const amtTok = Number(ethers.formatUnits(sellAmt, dec));
+        const curPlsVal = amtTok * plsPerToken;                       // current PLS value
+        const entryPlsVal = amtTok * (avg.avgPlsPerToken || 0);       // entry PLS value for those tokens
+        const pnlPls = curPlsVal - entryPlsVal;                        // PnL in PLS
+        const pnlPct = (avg.avgPlsPerToken > 0)
+          ? ((plsPerToken / avg.avgPlsPerToken) - 1) * 100
+          : 0;
+
+        const signEmoji = pnlPls >= 0 ? '🟢' : '🔴';
+
+        // Avg entry line (PLS + USD if available)
+        const entryUsdPerTok = (usdPerPls != null)
+          ? avg.avgPlsPerToken * usdPerPls
+          : null;
+        entryLine =
+          `• <b>Avg Entry:</b> ${esc(NF.format(avg.avgPlsPerToken))} PLS` +
+          (entryUsdPerTok != null
+            ? ` ($${(entryUsdPerTok).toLocaleString('en-GB', { maximumFractionDigits: 8 })})`
+            : '') +
+          ` / ${esc(metaSymbol || 'TOKEN')}`;
+
+        // PnL in PLS with %
+        pnlLine =
+          `• <b>Net PnL:</b> ${signEmoji} ${esc(NF.format(pnlPls))} PLS  (${esc(NF.format(pnlPct))}%)`;
+
+        // PnL in USD (if conversion available)
+        if (usdPerPls != null) {
+          const pnlUsd = pnlPls * usdPerPls;
+          const signEmojiUsd = pnlUsd >= 0 ? '🟢' : '🔴';
+          pnlLine += `\n• <b>PnL $:</b> ${signEmojiUsd} $${Math.abs(pnlUsd).toLocaleString('en-GB', { maximumFractionDigits: 2 })}`;
+        }
       }
     } catch { /* keep defaults */ }
   }
