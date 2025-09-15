@@ -9,9 +9,10 @@ export function mainMenu() {
      Markup.button.callback('🔴 Sell', 'menu_sell')],
     // Row 2
     [Markup.button.callback('👛 Wallets', 'wallets'),
+     Markup.button.callback('🎯 Snipey', 'menu_snipe')],
+    // Row 3
+    [Markup.button.callback('🤝 Referrals', 'referrals'),
      Markup.button.callback('⚙️ Settings', 'settings')],
-    // Row 3 (NEW)
-    [Markup.button.callback('🤝 Referrals', 'referrals')],
   ]);
 }
 
