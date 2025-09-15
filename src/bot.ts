@@ -3156,7 +3156,7 @@ bot.on('text', async (ctx, next) => {
       return;
     }
 
-    // ✅ NEW: Auto-Buy custom slippage handler
+    // ✅ NEW: Auto-Buy custom slippage (text input) handler, returns to Settings
     if (p.type === 'auto_slip_custom') {
       const t = String(msg || '').trim().toLowerCase();
 
