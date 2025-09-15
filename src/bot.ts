@@ -523,6 +523,9 @@ type Pending =
   | { type: 'edit_sp'; idx: number }   // editing Sell % preset at index 0..3
   // ✅ NEW: custom slippage input (Step 2)
   | { type: 'slip_custom' }
+  | { type: 'snipe_token' }
+  | { type: 'snipe_amt' }
+  | { type: 'snipe_liq' }
   | { type: 'auto_slip_custom' };
 
 const pending = new Map<number, Pending>();
@@ -1165,10 +1168,62 @@ async function renderBuyMenu(ctx: any) {
   await showMenu(ctx, lines, extra);
 }
 
+/* ---------- SNIPE: models, state, helpers ---------- */
+type SnipeDraft = {
+  token?: string;
+  amountPlsWei?: bigint;
+  minLiqUsd?: number | null;
+};
+
+type SnipeJob = {
+  id: number;
+  telegramId: number;
+  token: string;
+  amountPlsWei: bigint;
+  minLiqUsd: number | null;   // require DexScreener liquidityUSD ≥ this (if set)
+  armed: boolean;
+  createdAt: number;
+};
+
+let snipeIdSeq = 1;
+const snipeDraft = new Map<number, SnipeDraft>(); // uid -> draft
+const snipeJobs = new Map<number, SnipeJob[]>();  // uid -> jobs
+
+function jobsFor(uid: number): SnipeJob[] {
+  const arr = snipeJobs.get(uid) ?? [];
+  snipeJobs.set(uid, arr);
+  return arr;
+}
+function addSnipe(job: Omit<SnipeJob, 'id' | 'createdAt' | 'armed'> & { armed?: boolean }): SnipeJob {
+  const full: SnipeJob = { id: snipeIdSeq++, createdAt: Date.now(), armed: job.armed ?? true, ...job };
+  jobsFor(job.telegramId).push(full);
+  return full;
+}
+function removeSnipe(uid: number, id: number): boolean {
+  const arr = jobsFor(uid);
+  const idx = arr.findIndex(j => j.id === id);
+  if (idx >= 0) { arr.splice(idx, 1); return true; }
+  return false;
+}
+function briefAddr(a: string) { return a.slice(0, 6) + '…' + a.slice(-4); }
+function snipeSummary(j: SnipeJob) {
+  return `#${j.id} ${briefAddr(j.token)}  •  ${fmtDec(ethers.formatEther(j.amountPlsWei))} PLS  •  ` +
+         (j.minLiqUsd != null ? `minLiq ${fmtUsdCompact(j.minLiqUsd)}` : 'no liq req') +
+         `  •  ${j.armed ? '🟢 ARMED' : '🟡 PAUSED'}`;
+}
+
 /* ---------- SNIPE MENU ---------- */
-function renderSnipeMenu(ctx: any) {
-  const text = '🎯 <b>SNIPE MENU</b>\n\nChoose an action below:';
-  return showMenu(ctx, text, { parse_mode: 'HTML', ...snipeMenu() });
+async function renderSnipeMenu(ctx: any) {
+  const count = jobsFor(ctx.from.id).length;
+  const text = [
+    '🎯 <b>SNIPE</b>',
+    '',
+    'Create a rule that automatically buys when a token becomes tradable and/or hits a minimum liquidity.',
+    '',
+    `Active rules: <b>${count}</b>`,
+  ].join('\n');
+
+  return showMenu(ctx, text, { parse_mode: 'HTML', ...snipeMenu() } as any);
 }
 
 bot.action('menu_snipe', async (ctx) => {
@@ -1176,6 +1231,229 @@ bot.action('menu_snipe', async (ctx) => {
   pending.delete(ctx.from.id);
   return renderSnipeMenu(ctx);
 });
+
+bot.action('snipe_help', async (ctx) => {
+  await ctx.answerCbQuery();
+  const lines = [
+    '<b>How it works</b>',
+    '• You choose a token + spend amount in PLS.',
+    '• (Optional) Require a minimum USD liquidity before buying.',
+    '• Bot polls for a valid route/liquidity and fires the buy automatically.',
+    '',
+    'Wallets used: your <i>Auto-Buy Wallets</i> from Settings (or the active wallet if none selected).',
+    'Slippage: uses your <i>Auto-Buy Slippage</i> setting.',
+  ].join('\n');
+  return showMenu(ctx, lines, { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_snipe')]]) });
+});
+
+bot.action('snipe_new', async (ctx) => {
+  await ctx.answerCbQuery();
+  snipeDraft.set(ctx.from.id, {});
+  pending.set(ctx.from.id, { type: 'snipe_token' } as any);
+  return showMenu(
+    ctx,
+    'Paste the <b>token contract address</b> (0x…40 hex).',
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Cancel', 'menu_snipe')]]) }
+  );
+});
+
+bot.action('snipe_list', async (ctx) => {
+  await ctx.answerCbQuery();
+  const arr = jobsFor(ctx.from.id);
+  if (!arr.length) {
+    return showMenu(
+      ctx,
+      'No snipe rules yet.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('➕ New Snipe', 'snipe_new')],
+        [Markup.button.callback('⬅️ Back', 'menu_snipe')],
+      ])
+    );
+  }
+
+  const text = ['<b>Your Snipe Rules</b>', '', ...arr.map(snipeSummary)].join('\n');
+  const kb: any[][] = [];
+  for (const j of arr) {
+    kb.push([
+      Markup.button.callback(j.armed ? `⏸ Pause #${j.id}` : `▶️ Arm #${j.id}`, `snipe_toggle:${j.id}`),
+      Markup.button.callback(`❌ Remove #${j.id}`, `snipe_cancel:${j.id}`)
+    ]);
+  }
+  kb.push([Markup.button.callback('⬅️ Back', 'menu_snipe')]);
+  return showMenu(ctx, text, { parse_mode: 'HTML', ...Markup.inlineKeyboard(kb) });
+});
+
+bot.action(/^snipe_toggle:(\d+)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const id = Number(ctx.match[1]);
+  const arr = jobsFor(ctx.from.id);
+  const j = arr.find(x => x.id === id);
+  if (!j) return showMenu(ctx, `Snipe #${id} not found.`, Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'snipe_list')]]));
+  j.armed = !j.armed;
+  return bot.telegram.sendMessage(ctx.from.id, `${j.armed ? '🟢 Armed' : '🟡 Paused'} ${snipeSummary(j)}`);
+});
+
+bot.action(/^snipe_cancel:(\d+)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const id = Number(ctx.match[1]);
+  const ok = removeSnipe(ctx.from.id, id);
+  await ctx.reply(ok ? `Removed snipe #${id}.` : `Couldn’t remove #${id}.`);
+  // refresh list
+  const arr = jobsFor(ctx.from.id);
+  if (!arr.length) return renderSnipeMenu(ctx);
+  return bot.action('snipe_list', () => Promise.resolve())(ctx as any);
+});
+
+/* Optional wizard convenience buttons (you can link to these from the UI later) */
+bot.action('snipe_w_amt', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.set(ctx.from.id, { type: 'snipe_amt' } as any);
+  return showMenu(
+    ctx,
+    'How much <b>PLS</b> to spend when it triggers? (e.g., <code>0.25</code>)',
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_snipe')]]) }
+  );
+});
+bot.action('snipe_w_liq', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.set(ctx.from.id, { type: 'snipe_liq' } as any);
+  return showMenu(
+    ctx,
+    'Optional: minimum <b>USD liquidity</b> required (supports k/m). Send <code>50k</code> or <code>skip</code>.',
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_snipe')]]) }
+  );
+});
+
+bot.action('snipe_confirm', async (ctx) => {
+  await ctx.answerCbQuery();
+  const d = snipeDraft.get(ctx.from.id);
+  if (!d?.token || !d?.amountPlsWei) {
+    return showMenu(ctx, 'Draft incomplete. Start again.',
+      Markup.inlineKeyboard([[Markup.button.callback('➕ New Snipe', 'snipe_new')],[Markup.button.callback('⬅️ Back', 'menu_snipe')]])
+    );
+  }
+  const job = addSnipe({
+    telegramId: ctx.from.id,
+    token: d.token,
+    amountPlsWei: d.amountPlsWei,
+    minLiqUsd: d.minLiqUsd ?? null,
+  });
+  snipeDraft.delete(ctx.from.id);
+  await ctx.reply(`✅ Snipe created and armed:\n${snipeSummary(job)}`, { disable_web_page_preview: true });
+  return renderSnipeMenu(ctx);
+});
+
+/* ---------- SNIPE engine ---------- */
+const SNIPER_TICK_MS = Number(process.env.SNIPER_TICK_MS ?? 8000);
+
+async function runSniperTick() {
+  // flatten all armed jobs
+  const all: SnipeJob[] = [];
+  for (const [, arr] of snipeJobs) for (const j of arr) if (j.armed) all.push(j);
+  if (!all.length) return;
+
+  for (const j of all) {
+    try {
+      // optional liquidity gate
+      if (j.minLiqUsd != null) {
+        const ds = await fetchDexScreener(j.token);
+        const liq = ds.liquidityUSD != null ? Number(ds.liquidityUSD) : null;
+        if (liq == null || liq < j.minLiqUsd) continue;
+      }
+
+      // route/quote existence for configured spend
+      let pre: any = null;
+      try { pre = await bestQuoteBuy(j.amountPlsWei, j.token); } catch {}
+      if (!pre?.amountOut) continue;
+
+      // choose wallets: Auto-Buy selection (if any) else active
+      const selectedIds = Array.from(getAutoSelSet(j.telegramId) ?? []);
+      const wallets = selectedIds.length
+        ? listWallets(j.telegramId).filter(w => selectedIds.includes(w.id))
+        : (getActiveWallet(j.telegramId) ? [getActiveWallet(j.telegramId)!] : []);
+
+      if (!wallets.length) {
+        await bot.telegram.sendMessage(j.telegramId, `Snipe #${j.id}: no wallet selected. Go to Settings ▸ Auto-Buy Wallets.`);
+        continue;
+      }
+
+      // slippage (Auto-Buy slippage)
+      const autoBps = getAutoBuySlipBps(j.telegramId);
+      const minOut =
+        pre.amountOut > 0n
+          ? (autoBps === SLIP_AUTO
+              ? (pre.amountOut * 99n) / 100n
+              : (pre.amountOut * BigInt(10000 - autoBps)) / 10000n)
+          : 0n;
+
+      // gas
+      const gas = await computeGas(j.telegramId);
+      const token = j.token;
+
+      // fire buys concurrently
+      const tasks = wallets.map(async (w) => {
+        const pendingMsg = await bot.telegram.sendMessage(j.telegramId, `⏳ Snipe #${j.id}: sending buy for ${briefAddr(w.address)}…`);
+        try {
+          // record trade metadata using pre-quote
+          let tokDec = 18, tokSym = 'TOKEN';
+          try {
+            const meta = await tokenMeta(token);
+            tokDec = meta.decimals ?? 18;
+            tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+            if (pre?.amountOut) {
+              recordTrade(j.telegramId, w.address, token, 'BUY', j.amountPlsWei, pre.amountOut, pre.route?.key ?? 'AUTO');
+            }
+          } catch {}
+
+          const r = await buyAutoRoute(getPrivateKey(w), token, j.amountPlsWei, minOut, gas);
+          const hash = (r as any)?.hash;
+
+          if (hash) {
+            const link = otter(hash);
+            try { await bot.telegram.editMessageText(j.telegramId, pendingMsg.message_id, undefined, `transaction sent ${link}`); }
+            catch { await bot.telegram.sendMessage(j.telegramId, `transaction sent ${link}`); }
+
+            provider.waitForTransaction(hash).then(async () => {
+              try { await bot.telegram.deleteMessage(j.telegramId, pendingMsg.message_id); } catch {}
+              await postTradeSuccess(
+                { reply: (html: string, extra: any = {}) => bot.telegram.sendMessage(j.telegramId, html, extra) },
+                {
+                  action: 'BUY',
+                  spend:   { amount: j.amountPlsWei, decimals: 18,     symbol: 'PLS' },
+                  receive: { amount: pre.amountOut,   decimals: tokDec, symbol: tokSym },
+                  tokenAddress: token,
+                  explorerUrl: link
+                }
+              );
+            }).catch(() => {});
+          } else {
+            try { await bot.telegram.editMessageText(j.telegramId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)'); }
+            catch {}
+          }
+        } catch (e: any) {
+          const brief = conciseError(e);
+          try {
+            await bot.telegram.editMessageText(j.telegramId, pendingMsg.message_id, undefined, `❌ Snipe #${j.id} failed for ${briefAddr(w.address)}: ${brief}`);
+          } catch {
+            await bot.telegram.sendMessage(j.telegramId, `❌ Snipe #${j.id} failed for ${briefAddr(w.address)}: ${brief}`);
+          }
+        }
+      });
+
+      await Promise.allSettled(tasks);
+
+      // disarm after first fire so we don’t keep buying
+      j.armed = false;
+      await bot.telegram.sendMessage(j.telegramId, `Snipe #${j.id} completed and paused.`);
+    } catch {
+      // ignore this tick for this job
+    }
+  }
+}
+
+setInterval(() => { runSniperTick().catch(() => {}); }, SNIPER_TICK_MS);
+
+/* ---------- (unchanged) BUY actions below — keep these) ---------- */
 bot.action('menu_buy', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderBuyMenu(ctx); });
 bot.action('buy_refresh', async (ctx) => { await ctx.answerCbQuery(); return renderBuyMenu(ctx); });
 
@@ -1199,7 +1477,6 @@ bot.action(/^gas_pct_set:(-?\d+)$/, async (ctx: any) => {
   setGasPercent(ctx.from.id, v);
   return renderBuyMenu(ctx);
 });
-
 /* 🎯 BUY Slippage picker (presets only; returns to BUY menu) */
 bot.action('slip_open_buy', async (ctx) => {
   await ctx.answerCbQuery();
@@ -3216,6 +3493,57 @@ bot.on('text', async (ctx, next) => {
       return renderSettings(ctx);
     }
 
+    // ✅ INSERTED: SNIPE FLOW — token → amount → min liquidity
+    if ((p as any).type === 'snipe_token') {
+      if (!/^0x[a-fA-F0-9]{40}$/.test(msg)) { await ctx.reply('That does not look like a token address.'); return; }
+      const d = snipeDraft.get(ctx.from.id) || {};
+      d.token = msg; snipeDraft.set(ctx.from.id, d);
+      pending.set(ctx.from.id, { type: 'snipe_amt' } as any);
+      await ctx.reply('Got the token. Now send the amount in PLS (e.g., 0.25).');
+      return;
+    }
+
+    if ((p as any).type === 'snipe_amt') {
+      const amt = Number(msg);
+      if (!Number.isFinite(amt) || amt <= 0) { await ctx.reply('Send a positive number, e.g., 0.25'); return; }
+      const d = snipeDraft.get(ctx.from.id) || {};
+      d.amountPlsWei = ethers.parseEther(String(amt));
+      snipeDraft.set(ctx.from.id, d);
+      pending.set(ctx.from.id, { type: 'snipe_liq' } as any);
+      await ctx.reply('Optional: send minimum USD liquidity (e.g., 50k), or type "skip".');
+      return;
+    }
+
+    if ((p as any).type === 'snipe_liq') {
+      const raw = msg.toLowerCase();
+      let val: number | null = null;
+      if (raw !== 'skip') {
+        const m = raw.replace(/[\s,$]/g, '').match(/^([0-9]*\.?[0-9]+)\s*([kmb])?$/i);
+        if (!m) { await ctx.reply('Send a number (supports k/m), or "skip".'); return; }
+        const base = Number(m[1]);
+        const mul = !m[2] ? 1 : m[2].toLowerCase() === 'k' ? 1e3 : m[2].toLowerCase() === 'm' ? 1e6 : 1e9;
+        val = base * mul;
+      }
+      const d = snipeDraft.get(ctx.from.id) || {};
+      d.minLiqUsd = val; snipeDraft.set(ctx.from.id, d);
+      const lines = [
+        'Review your snipe:',
+        `• Token: <code>${d.token}</code>`,
+        `• Amount: <b>${fmtDec(ethers.formatEther(d.amountPlsWei ?? 0n))} PLS</b>`,
+        `• Min Liquidity: ${d.minLiqUsd != null ? fmtUsdCompact(d.minLiqUsd) : '—'}`,
+        '', 'Arm this rule?',
+      ].join('\n');
+      pending.delete(ctx.from.id);
+      return showMenu(ctx, lines, {
+        parse_mode: 'HTML',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback('✅ Create & Arm', 'snipe_confirm')],
+          [Markup.button.callback('⬅️ Cancel', 'menu_snipe')],
+        ])
+      });
+    }
+    // ── END SNIPE FLOW ──
+
     // ✅ INSERTED: referral payout wallet handler
     if (p.type === 'ref_payout') {
       const addr = msg.trim();
@@ -3361,33 +3689,33 @@ bot.on('text', async (ctx, next) => {
       const tasks = wallets.map(async (w) => {
         const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
         try {
-// ✅ NEW: pre-quote FIRST to compute slippage minOut and log trade
-let preOut: bigint = 0n;
-let tokDec = 18;
-let tokSym = 'TOKEN';
-try {
-  const meta = await tokenMeta(token);
-  tokDec = meta.decimals ?? 18;
-  tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-  const preQuote = await bestQuoteBuy(amountIn, token);
-  if (preQuote?.amountOut) {
-    preOut = preQuote.amountOut;
-    recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-  }
-} catch {}
+          // ✅ NEW: pre-quote FIRST to compute slippage minOut and log trade
+          let preOut: bigint = 0n;
+          let tokDec = 18;
+          let tokSym = 'TOKEN';
+          try {
+            const meta = await tokenMeta(token);
+            tokDec = meta.decimals ?? 18;
+            tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+            const preQuote = await bestQuoteBuy(amountIn, token);
+            if (preQuote?.amountOut) {
+              preOut = preQuote.amountOut;
+              recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+            }
+          } catch {}
 
-// ✅ Use Auto-Buy slippage setting (not the global trade slippage)
-const autoBps = getAutoBuySlipBps(ctx.from.id);
-const minOut =
-  preOut > 0n
-    ? (autoBps === SLIP_AUTO
-        ? (preOut * 99n) / 100n
-        : (preOut * BigInt(10000 - autoBps)) / 10000n)
-    : 0n;
+          // ✅ Use Auto-Buy slippage setting (not the global trade slippage)
+          const autoBps = getAutoBuySlipBps(ctx.from.id);
+          const minOut =
+            preOut > 0n
+              ? (autoBps === SLIP_AUTO
+                  ? (preOut * 99n) / 100n
+                  : (preOut * BigInt(10000 - autoBps)) / 10000n)
+              : 0n;
 
-const gas = await computeGas(ctx.from.id);
-const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, minOut, gas);
-const hash = (r as any)?.hash;
+          const gas = await computeGas(ctx.from.id);
+          const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, minOut, gas);
+          const hash = (r as any)?.hash;
 
           if (hash) {
             const link = otter(hash);
