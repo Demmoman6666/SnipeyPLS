@@ -2257,8 +2257,7 @@ bot.action('auto_slip_open', async (ctx) => {
   );
 
   rows.push([Markup.button.callback('✏️ Custom…', 'auto_slip_custom')]);
-  rows.push([Markup.button.callback('⬅️ Back', 'menu_settings')]);
-
+rows.push([Markup.button.callback('⬅️ Back', 'settings')]);
   return showMenu(
     ctx,
     'Choose *Auto-Buy Slippage* (applies only to automatic buys):',
@@ -3300,25 +3299,33 @@ bot.on('text', async (ctx, next) => {
       const tasks = wallets.map(async (w) => {
         const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
         try {
-          // ✅ NEW: pre-quote FIRST to compute slippage minOut and log trade
-          let preOut: bigint = 0n;
-          let tokDec = 18;
-          let tokSym = 'TOKEN';
-          try {
-            const meta = await tokenMeta(token);
-            tokDec = meta.decimals ?? 18;
-            tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-            const preQuote = await bestQuoteBuy(amountIn, token);
-            if (preQuote?.amountOut) {
-              preOut = preQuote.amountOut;
-              recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-            }
-          } catch {}
+// ✅ NEW: pre-quote FIRST to compute slippage minOut and log trade
+let preOut: bigint = 0n;
+let tokDec = 18;
+let tokSym = 'TOKEN';
+try {
+  const meta = await tokenMeta(token);
+  tokDec = meta.decimals ?? 18;
+  tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+  const preQuote = await bestQuoteBuy(amountIn, token);
+  if (preQuote?.amountOut) {
+    preOut = preQuote.amountOut;
+    recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+  }
+} catch {}
 
-          const minOut = minOutFromQuote(ctx.from.id, preOut); // ✅ apply slippage to BUY
-          const gas = await computeGas(ctx.from.id);
-          const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, minOut, gas);
-          const hash = (r as any)?.hash;
+// ✅ Use Auto-Buy slippage setting (not the global trade slippage)
+const autoBps = getAutoBuySlipBps(ctx.from.id);
+const minOut =
+  preOut > 0n
+    ? (autoBps === SLIP_AUTO
+        ? (preOut * 99n) / 100n
+        : (preOut * BigInt(10000 - autoBps)) / 10000n)
+    : 0n;
+
+const gas = await computeGas(ctx.from.id);
+const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, minOut, gas);
+const hash = (r as any)?.hash;
 
           if (hash) {
             const link = otter(hash);
