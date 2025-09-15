@@ -1156,6 +1156,17 @@ async function renderBuyMenu(ctx: any) {
   await showMenu(ctx, lines, extra);
 }
 
+/* ---------- SNIPE MENU ---------- */
+function renderSnipeMenu(ctx: any) {
+  const text = '🎯 <b>SNIPE MENU</b>\n\nChoose an action below:';
+  return showMenu(ctx, text, { parse_mode: 'HTML', ...snipeMenu() });
+}
+
+bot.action('menu_snipe', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.delete(ctx.from.id);
+  return renderSnipeMenu(ctx);
+});
 bot.action('menu_buy', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderBuyMenu(ctx); });
 bot.action('buy_refresh', async (ctx) => { await ctx.answerCbQuery(); return renderBuyMenu(ctx); });
 
