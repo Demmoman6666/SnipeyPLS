@@ -496,6 +496,64 @@ function getSelSet(uid: number) {
   if (!s) { s = new Set<number>(); selectedWallets.set(uid, s); }
   return s;
 }
+
+/* ---------- SNIPE UI state (menu-only; not persisted) ---------- */
+type SnipeUIState = {
+  /** Trigger type chosen in the Snipe menu */
+  trigger: 'ADD_LIQUIDITY' | 'METHOD' | null;
+  /** Optional function selector to watch when trigger === 'METHOD' (e.g., "0xf305d719") */
+  methodSelector?: string;
+  /** Single tx per selected wallet vs batch strategy */
+  mode: 'single' | 'batch';
+  /** Selected wallet IDs for this user in the Snipe menu */
+  wallets: Set<number>;
+};
+
+const snipeUIState = new Map<number, SnipeUIState>();
+
+function getSnipeState(uid: number): SnipeUIState {
+  let st = snipeUIState.get(uid);
+  if (!st) {
+    st = { trigger: null, mode: 'single', wallets: new Set<number>() };
+    snipeUIState.set(uid, st);
+  }
+  return st;
+}
+
+function getSnipeSelSet(uid: number): Set<number> {
+  return getSnipeState(uid).wallets;
+}
+
+function toggleSnipeWallet(uid: number, walletId: number) {
+  const set = getSnipeState(uid).wallets;
+  if (set.has(walletId)) set.delete(walletId); else set.add(walletId);
+}
+
+function clearSnipeWallets(uid: number) {
+  getSnipeState(uid).wallets.clear();
+}
+
+function setSnipeMode(uid: number, mode: 'single' | 'batch') {
+  getSnipeState(uid).mode = mode;
+}
+
+function setSnipeTrigger(uid: number, trig: 'ADD_LIQUIDITY' | 'METHOD' | null) {
+  getSnipeState(uid).trigger = trig;
+  if (trig !== 'METHOD') getSnipeState(uid).methodSelector = undefined;
+}
+
+function setSnipeMethodSelector(uid: number, selector?: string) {
+  // Accept 4-byte selector like "0xdeadbeef"
+  if (selector && /^0x[0-9a-fA-F]{8}$/.test(selector)) {
+    getSnipeState(uid).methodSelector = selector.toLowerCase();
+  } else if (!selector) {
+    getSnipeState(uid).methodSelector = undefined;
+  } else {
+    // leave invalid input untouched; caller can validate before calling
+  }
+}
+
+/* small array chunker for laying out inline keyboards */
 function chunk<T>(arr: T[], size = 6): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -535,9 +593,12 @@ type Pending =
   | { type: 'edit_sp'; idx: number }   // editing Sell % preset at index 0..3
   // ✅ NEW: custom slippage input (Step 2)
   | { type: 'slip_custom' }
+  // ✅ Snipe wizard steps
   | { type: 'snipe_token' }
   | { type: 'snipe_amt' }
   | { type: 'snipe_liq' }
+  // ✅ NEW: Snipe "Method" selector input (expects 4-byte selector like 0xf305d719)
+  | { type: 'snipe_method' }
   | { type: 'auto_slip_custom' };
 
 const pending = new Map<number, Pending>();
@@ -1226,16 +1287,89 @@ function snipeSummary(j: SnipeJob) {
 
 /* ---------- SNIPE MENU ---------- */
 async function renderSnipeMenu(ctx: any) {
-  const count = jobsFor(ctx.from.id).length;
+  const uid = ctx.from.id;
+  const count = jobsFor(uid).length;
+
+  // show current draft (if any) to surface the UI state
+  const dAny: any = snipeDraft.get(uid) || {};
+  const token = dAny.token as (string | undefined);
+  const amountStr = dAny.amountPlsWei ? fmtDec(ethers.formatEther(dAny.amountPlsWei as bigint)) + ' PLS' : '—';
+  const minLiqStr = dAny.minLiqUsd != null ? fmtUsdCompact(Number(dAny.minLiqUsd)) : '—';
+  const addLiqOn = !!dAny.onAddLiquidity;
+  const methodTxt = (dAny.method && String(dAny.method).trim()) || '—';
+  const txMode = (dAny.txMode === 'batch') ? 'Batch' : 'Single';
+
+  const u = getUserSettings(uid);
+  const gasPct = Math.round(u?.gas_pct ?? (u?.default_gas_pct ?? 0));
+
   const text = [
     '🎯 <b>SNIPE</b>',
     '',
     'Create a rule that automatically buys when a token becomes tradable and/or hits a minimum liquidity.',
     '',
     `Active rules: <b>${count}</b>`,
+    '',
+    '<b>Current Draft (for quick edits)</b>',
+    `• Token: ${token ? `<code>${esc(token)}</code>` : '—'}`,
+    `• Amount: ${esc(amountStr)}`,
+    `• Min Liquidity: ${esc(minLiqStr)}`,
+    `• On AddLiquidity: ${addLiqOn ? '🟢 ON' : '🟡 OFF'}`,
+    `• Method: ${esc(methodTxt)}`,
+    `• Tx Mode: ${esc(txMode)}`,
   ].join('\n');
 
-  return showMenu(ctx, text, { parse_mode: 'HTML', ...snipeMenu() } as any);
+  // Wallet multi-select (reuse Auto-Buy selection set, but keep snipe-local handler)
+  const rows = listWallets(uid);
+  const sel = getAutoSelSet(uid);
+  const walletButtons = chunk(
+    rows.map((w, i) =>
+      Markup.button.callback(`${sel.has(w.id) ? '✅ ' : ''}W${i + 1}`, `snipe_wallet_toggle:${w.id}`)
+    ),
+    6
+  );
+
+  const kb = Markup.inlineKeyboard([
+    // Back / Refresh
+    [Markup.button.callback('⬅️ Back', 'main_back'), Markup.button.callback('🔄 Refresh', 'snipe_refresh')],
+
+    // Unclickable section header
+    [Markup.button.callback('EDIT SNIPEY DATA', 'noop')],
+
+    // Amount / Contract / Pair
+    [
+      Markup.button.callback('Amount', 'snipe_w_amt'),
+      Markup.button.callback('Contract', 'snipe_w_token'),
+      Markup.button.callback('Pair', 'pair_info'),
+    ],
+
+    // Gas %
+    [Markup.button.callback(`⛽️ Gas % (+${NF.format(gasPct)}%)`, 'snipe_gas_pct_open')],
+
+    // On AddLiquidity + Method
+    [
+      Markup.button.callback(`${addLiqOn ? '🟢' : '🟡'} On AddLiquidity`, 'snipe_toggle_addliq'),
+      Markup.button.callback(`Method (${methodTxt === '—' ? 'set…' : 'edit'})`, 'snipe_method'),
+    ],
+
+    // Tx mode
+    [
+      Markup.button.callback(`${txMode === 'Single' ? '✅ ' : ''}Single Transaction`, 'snipe_txmode:single'),
+      Markup.button.callback(`${txMode === 'Batch'  ? '✅ ' : ''}Batch Transaction`,  'snipe_txmode:batch'),
+    ],
+
+    // Wallet selector (multi-select)
+    [Markup.button.callback('Wallet Selector', 'noop')],
+    ...walletButtons,
+
+    // Actions
+    [Markup.button.callback('➕ New Snipe', 'snipe_new')],
+    [
+      Markup.button.callback('📜 Rules', 'snipe_list'),
+      Markup.button.callback('❓ Help', 'snipe_help'),
+    ],
+  ]);
+
+  return showMenu(ctx, text, { parse_mode: 'HTML', ...kb } as any);
 }
 
 /** List all snipe rules for the current user */
@@ -1268,6 +1402,11 @@ bot.action('menu_snipe', async (ctx) => {
   return renderSnipeMenu(ctx);
 });
 
+bot.action('snipe_refresh', async (ctx) => {
+  await ctx.answerCbQuery();
+  return renderSnipeMenu(ctx);
+});
+
 bot.action('snipe_help', async (ctx) => {
   await ctx.answerCbQuery();
   const lines = [
@@ -1297,9 +1436,20 @@ bot.action('snipe_new', async (ctx) => {
   );
 });
 
+// Quick-jump to token input from the menu
+bot.action('snipe_w_token', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.set(ctx.from.id, { type: 'snipe_token' } as any);
+  return showMenu(
+    ctx,
+    'Paste the <b>token contract address</b> (0x…40 hex).',
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_snipe')]]) }
+  );
+});
+
 bot.action('snipe_list', async (ctx) => {
   await ctx.answerCbQuery();
-  return renderSnipeList(ctx); // ✅ use the helper
+  return renderSnipeList(ctx);
 });
 
 bot.action(/^snipe_toggle:(\d+)$/, async (ctx: any) => {
@@ -1315,10 +1465,7 @@ bot.action(/^snipe_toggle:(\d+)$/, async (ctx: any) => {
     );
   }
   j.armed = !j.armed;
-  return bot.telegram.sendMessage(
-    ctx.from.id,
-    `${j.armed ? '🟢 Armed' : '🟡 Paused'} ${snipeSummary(j)}`
-  );
+  return bot.telegram.sendMessage(ctx.from.id, `${j.armed ? '🟢 Armed' : '🟡 Paused'} ${snipeSummary(j)}`);
 });
 
 bot.action(/^snipe_cancel:(\d+)$/, async (ctx: any) => {
@@ -1327,11 +1474,11 @@ bot.action(/^snipe_cancel:(\d+)$/, async (ctx: any) => {
   const ok = removeSnipe(ctx.from.id, id);
   await ctx.reply(ok ? `Removed snipe #${id}.` : `Couldn’t remove #${id}.`);
 
-  // refresh list
   const arr = jobsFor(ctx.from.id);
   if (!arr.length) return renderSnipeMenu(ctx);
-  return renderSnipeList(ctx); // ✅ no more bot.action(...) invocation
+  return renderSnipeList(ctx);
 });
+
 /* Optional wizard convenience buttons (you can link to these from the UI later) */
 bot.action('snipe_w_amt', async (ctx) => {
   await ctx.answerCbQuery();
@@ -1342,6 +1489,7 @@ bot.action('snipe_w_amt', async (ctx) => {
     { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_snipe')]]) }
   );
 });
+
 bot.action('snipe_w_liq', async (ctx) => {
   await ctx.answerCbQuery();
   pending.set(ctx.from.id, { type: 'snipe_liq' } as any);
@@ -1352,12 +1500,86 @@ bot.action('snipe_w_liq', async (ctx) => {
   );
 });
 
+/* === NEW: gas % picker that returns to Snipe menu === */
+bot.action('snipe_gas_pct_open', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const u = getUserSettings(uid);
+  const cur = Math.round(u?.gas_pct ?? (u?.default_gas_pct ?? 0));
+
+  const choices = [-25, 0, 5, 10, 15, 25, 50, 100];
+  const rows = chunk(
+    choices.map(v =>
+      Markup.button.callback(`${cur === v ? '✅ ' : ''}${v > 0 ? '+' : ''}${v}%`, `snipe_gas_set:${v}`)
+    ),
+    4
+  );
+  rows.push([Markup.button.callback('⬅️ Back', 'menu_snipe')]);
+
+  return showMenu(
+    ctx,
+    'Choose <b>Gas %</b> over market:',
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard(rows) }
+  );
+});
+
+bot.action(/^snipe_gas_set:(-?\d+)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const v = Number(ctx.match[1]);
+  setGasPercent(ctx.from.id, v);
+  return renderSnipeMenu(ctx);
+});
+
+/* === NEW: On AddLiquidity toggle === */
+bot.action('snipe_toggle_addliq', async (ctx) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const dAny: any = snipeDraft.get(uid) || {};
+  dAny.onAddLiquidity = !dAny.onAddLiquidity;
+  snipeDraft.set(uid, dAny);
+  return renderSnipeMenu(ctx);
+});
+
+/* === NEW: Method capture (pending text input) === */
+bot.action('snipe_method', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.set(ctx.from.id, { type: 'snipe_method' } as any); // make sure you added this union member in step 2
+  return showMenu(
+    ctx,
+    'Send the <b>function name</b> or 4-byte selector to watch for (e.g., <code>enableTrading()</code> or <code>0xabcdef01</code>).',
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_snipe')]]) }
+  );
+});
+
+/* === NEW: Tx mode (Single / Batch) === */
+bot.action(/^snipe_txmode:(single|batch)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const uid = ctx.from.id;
+  const mode = ctx.match[1] as 'single' | 'batch';
+  const dAny: any = snipeDraft.get(uid) || {};
+  dAny.txMode = mode; // currently informational; engine treats both as fan-out
+  snipeDraft.set(uid, dAny);
+  return renderSnipeMenu(ctx);
+});
+
+/* === NEW: Wallet multi-select just for Snipe screen (reuses Auto-Buy selection set) === */
+bot.action(/^snipe_wallet_toggle:(\d+)$/, async (ctx: any) => {
+  await ctx.answerCbQuery();
+  const id = Number(ctx.match[1]);
+  const s = getAutoSelSet(ctx.from.id);
+  if (s.has(id)) s.delete(id); else s.add(id);
+  return renderSnipeMenu(ctx);
+});
+
 bot.action('snipe_confirm', async (ctx) => {
   await ctx.answerCbQuery();
-  const d = snipeDraft.get(ctx.from.id);
+  const d = snipeDraft.get(ctx.from.id) as any;
   if (!d?.token || !d?.amountPlsWei) {
     return showMenu(ctx, 'Draft incomplete. Start again.',
-      Markup.inlineKeyboard([[Markup.button.callback('➕ New Snipe', 'snipe_new')],[Markup.button.callback('⬅️ Back', 'menu_snipe')]])
+      Markup.inlineKeyboard([
+        [Markup.button.callback('➕ New Snipe', 'snipe_new')],
+        [Markup.button.callback('⬅️ Back', 'menu_snipe')]
+      ])
     );
   }
   const job = addSnipe({
@@ -1367,9 +1589,9 @@ bot.action('snipe_confirm', async (ctx) => {
     minLiqUsd: d.minLiqUsd ?? null,
   });
   snipeDraft.delete(ctx.from.id);
-await ctx.reply(`✅ Snipe created and armed:\n${snipeSummary(job)}`, {
-  link_preview_options: { is_disabled: true }
-} as any);
+  await ctx.reply(`✅ Snipe created and armed:\n${snipeSummary(job)}`, {
+    link_preview_options: { is_disabled: true }
+  } as any);
   return renderSnipeMenu(ctx);
 });
 
@@ -1415,6 +1637,8 @@ async function runSniperTick() {
               ? (pre.amountOut * 99n) / 100n
               : (pre.amountOut * BigInt(10000 - autoBps)) / 10000n)
           : 0n;
+
+      // ... (engine continues unchanged below)
 
       // gas
       const gas = await computeGas(j.telegramId);
