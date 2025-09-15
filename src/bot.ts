@@ -2084,6 +2084,9 @@ bot.action('slip_open', async (ctx) => {
     opts.map(o => Markup.button.callback(`${cur === o.v ? '✅ ' : ''}${o.t}`, `slip_set:${o.v}`)),
     3
   );
+
+  // ➕ NEW: Custom slippage entry button
+  rows.push([Markup.button.callback('✏️ Custom…', 'slip_custom')]);
   rows.push([Markup.button.callback('⬅️ Back', 'menu_sell')]);
 
   return showMenu(
@@ -2099,6 +2102,17 @@ bot.action(/^slip_set:(-?\d+)$/, async (ctx: any) => {
   const bps = Number(ctx.match[1]);
   setSlipBps(ctx.from.id, bps);
   return renderSellMenu(ctx);
+});
+
+// ➕ NEW: start custom slippage prompt (handled in bot.on("text") with type: 'slip_custom')
+bot.action('slip_custom', async (ctx) => {
+  await ctx.answerCbQuery();
+  pending.set(ctx.from.id, { type: 'slip_custom' });
+  return showMenu(
+    ctx,
+    'Send custom slippage % (e.g., `0.7`, `1`, `1.25`). Range 0–50.',
+    { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'slip_open')]]) }
+  );
 });
 
 /* ---------- SELL MENU (HTML + metrics) ---------- */
@@ -2304,6 +2318,7 @@ bot.action('sell_set_token', async (ctx) => {
   return showMenu(ctx, 'Paste the *token contract address* (0x...).', { parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_sell')]]) });
 });
+
 /* ---------- SELL EXEC (single wallet) ---------- */
 bot.action('sell_exec', async (ctx) => {
   await ctx.answerCbQuery();
@@ -2335,7 +2350,11 @@ bot.action('sell_exec', async (ctx) => {
     let q: any = null;
     try { q = await bestQuoteSell(amount, token); } catch {}
     const slipBps = getSlipBps(ctx.from.id);
-    const minOut = q?.amountOut ? (q.amountOut * BigInt(10000 - slipBps)) / 10000n : 0n;
+    const minOut = q?.amountOut
+      ? (slipBps === SLIP_AUTO
+          ? (q.amountOut * 99n) / 100n            // simple 1% safety if Auto
+          : (q.amountOut * BigInt(10000 - slipBps)) / 10000n)
+      : 0n;
 
     const gas = await computeGas(ctx.from.id);
     const r = await sellAutoRoute(getPrivateKey(w), token, amount, minOut, gas);
@@ -2417,7 +2436,11 @@ bot.action('sell_exec_all', async (ctx) => {
       // Pre-quote for slippage & logging
       let q: any = null;
       try { q = await bestQuoteSell(amount, token); } catch {}
-      const minOut = q?.amountOut ? (q.amountOut * BigInt(10000 - slipBps)) / 10000n : 0n;
+      const minOut = q?.amountOut
+        ? (slipBps === SLIP_AUTO
+            ? (q.amountOut * 99n) / 100n
+            : (q.amountOut * BigInt(10000 - slipBps)) / 10000n)
+        : 0n;
 
       const gas = await computeGas(ctx.from.id);
       const r = await sellAutoRoute(getPrivateKey(w), token, amount, minOut, gas);
