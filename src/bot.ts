@@ -2252,18 +2252,23 @@ bot.action('auto_slip_open', async (ctx) => {
     { t: '5%',   v: 500 },
   ];
 
-  const rows = chunk(
-    opts.map(o => Markup.button.callback(`${cur === o.v ? '✅ ' : ''}${o.t}`, `auto_slip_set:${o.v}`)),
+  const kb = chunk(
+    opts.map(o =>
+      Markup.button.callback(
+        `${cur === o.v ? '✅ ' : ''}${o.t}`,
+        `auto_slip_set:${o.v}`
+      )
+    ),
     3
   );
 
-  rows.push([Markup.button.callback('✏️ Custom…', 'auto_slip_custom')]);
-  rows.push([Markup.button.callback('⬅️ Back', 'settings')]);
+  kb.push([Markup.button.callback('✏️ Custom…', 'auto_slip_custom')]);
+  kb.push([Markup.button.callback('⬅️ Back', 'settings')]);
 
   return showMenu(
     ctx,
     'Choose *Auto-Buy Slippage* (applies only to automatic buys):',
-    { parse_mode: 'Markdown', ...Markup.inlineKeyboard(rows) }
+    { parse_mode: 'Markdown', ...Markup.inlineKeyboard(kb) }
   );
 });
 
@@ -2283,7 +2288,6 @@ bot.action('auto_slip_custom', async (ctx) => {
     { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'auto_slip_open')]]) }
   );
 });
-
 /* ---------- SELL MENU (HTML + metrics) ---------- */
 async function renderSellMenu(ctx: any) {
   const u = getUserSettings(ctx.from.id);
