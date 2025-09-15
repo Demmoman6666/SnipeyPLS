@@ -1226,6 +1226,30 @@ async function renderSnipeMenu(ctx: any) {
   return showMenu(ctx, text, { parse_mode: 'HTML', ...snipeMenu() } as any);
 }
 
+/** List all snipe rules for the current user */
+async function renderSnipeList(ctx: any) {
+  const arr = jobsFor(ctx.from.id);
+  if (!arr.length) {
+    return showMenu(
+      ctx,
+      'No snipe rules yet.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('➕ New Snipe', 'snipe_new')],
+        [Markup.button.callback('⬅️ Back', 'menu_snipe')],
+      ])
+    );
+  }
+
+  const text = ['<b>Your Snipe Rules</b>', '', ...arr.map(snipeSummary)].join('\n');
+  const kb: any[][] = arr.map(j => ([
+    Markup.button.callback(j.armed ? `⏸ Pause #${j.id}` : `▶️ Arm #${j.id}`, `snipe_toggle:${j.id}`),
+    Markup.button.callback(`❌ Remove #${j.id}`, `snipe_cancel:${j.id}`)
+  ]));
+  kb.push([Markup.button.callback('⬅️ Back', 'menu_snipe')]);
+
+  return showMenu(ctx, text, { parse_mode: 'HTML', ...Markup.inlineKeyboard(kb) });
+}
+
 bot.action('menu_snipe', async (ctx) => {
   await ctx.answerCbQuery();
   pending.delete(ctx.from.id);
@@ -1243,7 +1267,11 @@ bot.action('snipe_help', async (ctx) => {
     'Wallets used: your <i>Auto-Buy Wallets</i> from Settings (or the active wallet if none selected).',
     'Slippage: uses your <i>Auto-Buy Slippage</i> setting.',
   ].join('\n');
-  return showMenu(ctx, lines, { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_snipe')]]) });
+  return showMenu(
+    ctx,
+    lines,
+    { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_snipe')]]) }
+  );
 });
 
 bot.action('snipe_new', async (ctx) => {
@@ -1259,28 +1287,7 @@ bot.action('snipe_new', async (ctx) => {
 
 bot.action('snipe_list', async (ctx) => {
   await ctx.answerCbQuery();
-  const arr = jobsFor(ctx.from.id);
-  if (!arr.length) {
-    return showMenu(
-      ctx,
-      'No snipe rules yet.',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('➕ New Snipe', 'snipe_new')],
-        [Markup.button.callback('⬅️ Back', 'menu_snipe')],
-      ])
-    );
-  }
-
-  const text = ['<b>Your Snipe Rules</b>', '', ...arr.map(snipeSummary)].join('\n');
-  const kb: any[][] = [];
-  for (const j of arr) {
-    kb.push([
-      Markup.button.callback(j.armed ? `⏸ Pause #${j.id}` : `▶️ Arm #${j.id}`, `snipe_toggle:${j.id}`),
-      Markup.button.callback(`❌ Remove #${j.id}`, `snipe_cancel:${j.id}`)
-    ]);
-  }
-  kb.push([Markup.button.callback('⬅️ Back', 'menu_snipe')]);
-  return showMenu(ctx, text, { parse_mode: 'HTML', ...Markup.inlineKeyboard(kb) });
+  return renderSnipeList(ctx); // ✅ use the helper
 });
 
 bot.action(/^snipe_toggle:(\d+)$/, async (ctx: any) => {
@@ -1288,9 +1295,18 @@ bot.action(/^snipe_toggle:(\d+)$/, async (ctx: any) => {
   const id = Number(ctx.match[1]);
   const arr = jobsFor(ctx.from.id);
   const j = arr.find(x => x.id === id);
-  if (!j) return showMenu(ctx, `Snipe #${id} not found.`, Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'snipe_list')]]));
+  if (!j) {
+    return showMenu(
+      ctx,
+      `Snipe #${id} not found.`,
+      Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'snipe_list')]])
+    );
+  }
   j.armed = !j.armed;
-  return bot.telegram.sendMessage(ctx.from.id, `${j.armed ? '🟢 Armed' : '🟡 Paused'} ${snipeSummary(j)}`);
+  return bot.telegram.sendMessage(
+    ctx.from.id,
+    `${j.armed ? '🟢 Armed' : '🟡 Paused'} ${snipeSummary(j)}`
+  );
 });
 
 bot.action(/^snipe_cancel:(\d+)$/, async (ctx: any) => {
@@ -1298,12 +1314,12 @@ bot.action(/^snipe_cancel:(\d+)$/, async (ctx: any) => {
   const id = Number(ctx.match[1]);
   const ok = removeSnipe(ctx.from.id, id);
   await ctx.reply(ok ? `Removed snipe #${id}.` : `Couldn’t remove #${id}.`);
+
   // refresh list
   const arr = jobsFor(ctx.from.id);
   if (!arr.length) return renderSnipeMenu(ctx);
-  return bot.action('snipe_list', () => Promise.resolve())(ctx as any);
+  return renderSnipeList(ctx); // ✅ no more bot.action(...) invocation
 });
-
 /* Optional wizard convenience buttons (you can link to these from the UI later) */
 bot.action('snipe_w_amt', async (ctx) => {
   await ctx.answerCbQuery();
@@ -3326,6 +3342,13 @@ async function checkLimitsOnce() {
 setInterval(() => { checkLimitsOnce().catch(() => {}); }, LIMIT_CHECK_MS);
 
 /* ---------- TEXT: prompts + auto-detect address ---------- */
+
+/** Helper: Telegraf requires the 4-arg overload when using (chatId, messageId, ...). */
+function editMsgTextSafe(ctx: any, chatId: number | string, messageId: number, text: string) {
+  // Cast the extra as any to dodge strict older type defs
+  return ctx.telegram.editMessageText(chatId, messageId, text, {} as any);
+}
+
 bot.on('text', async (ctx, next) => {
   const p = pending.get(ctx.from.id);
   if (p) {
@@ -3418,7 +3441,6 @@ bot.on('text', async (ctx, next) => {
     if (p.type === 'slip_custom') {
       const t = String(msg || '').trim().toLowerCase();
 
-      // allow "auto" to switch back to auto mode
       if (t === 'auto') {
         setSlipBps(ctx.from.id, SLIP_AUTO);
         pending.delete(ctx.from.id);
@@ -3428,22 +3450,18 @@ bot.on('text', async (ctx, next) => {
         return;
       }
 
-      // Accept inputs like "0.7", "1", "1.25", "2.5%", "75bp", "150bps"
       const cleaned = t.replace(/,/g, '').replace(/\s+/g, '');
       let bps: number | null = null;
 
-      // If user typed basis points explicitly
       const mBp = cleaned.match(/^([0-9]*\.?[0-9]+)(bp|bps)$/);
       if (mBp) {
         const n = Number(mBp[1]);
-        if (Number.isFinite(n)) bps = Math.round(n); // already in bps
+        if (Number.isFinite(n)) bps = Math.round(n);
       } else {
-        // Interpret as percent (optionally with trailing %)
         const n = Number(cleaned.replace(/%$/, ''));
         if (Number.isFinite(n)) bps = Math.round(n * 100);
       }
 
-      // Clamp 0..5000 bps (0–50%)
       if (bps == null || bps < 0 || bps > 5000) {
         await ctx.reply('Please send a value between 0 and 50 (e.g., 0.7, 1, 1.25) — or type "auto".');
         return;
@@ -3461,7 +3479,6 @@ bot.on('text', async (ctx, next) => {
     if (p.type === 'auto_slip_custom') {
       const t = String(msg || '').trim().toLowerCase();
 
-      // allow "auto" to switch back to auto mode
       if (t === 'auto') {
         setAutoBuySlipBps(ctx.from.id, SLIP_AUTO);
         pending.delete(ctx.from.id);
@@ -3469,7 +3486,6 @@ bot.on('text', async (ctx, next) => {
         return renderSettings(ctx);
       }
 
-      // Accept "0.7", "1", "1.25", "2.5%", "75bp", "150bps"
       const cleaned = t.replace(/,/g, '').replace(/\s+/g, '');
       let bps: number | null = null;
 
@@ -3493,7 +3509,7 @@ bot.on('text', async (ctx, next) => {
       return renderSettings(ctx);
     }
 
-    // ✅ INSERTED: SNIPE FLOW — token → amount → min liquidity
+    /* ---------- SNIPE FLOW ---------- */
     if ((p as any).type === 'snipe_token') {
       if (!/^0x[a-fA-F0-9]{40}$/.test(msg)) { await ctx.reply('That does not look like a token address.'); return; }
       const d = snipeDraft.get(ctx.from.id) || {};
@@ -3542,9 +3558,9 @@ bot.on('text', async (ctx, next) => {
         ])
       });
     }
-    // ── END SNIPE FLOW ──
+    /* ---------- END SNIPE FLOW ---------- */
 
-    // ✅ INSERTED: referral payout wallet handler
+    // Referral payout wallet handler
     if (p.type === 'ref_payout') {
       const addr = msg.trim();
       if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) {
@@ -3561,7 +3577,7 @@ bot.on('text', async (ctx, next) => {
       }
     }
 
-    // ✅ INSERTED: Quick-Buy label editor
+    // Quick-Buy label editor
     if (p.type === 'edit_qb') {
       const idx = Math.max(0, Math.min(5, Number((p as any).idx)));
       const raw = String(msg).trim();
@@ -3575,7 +3591,7 @@ bot.on('text', async (ctx, next) => {
       return renderSettings(ctx);
     }
 
-    // ✅ INSERTED: Sell % preset editor
+    // Sell % preset editor
     if (p.type === 'edit_sp') {
       const idx = Math.max(0, Math.min(3, Number((p as any).idx)));
       const v = Number(String(msg).trim());
@@ -3704,7 +3720,7 @@ bot.on('text', async (ctx, next) => {
           if (hash) {
             const link = otter(hash);
             try {
-              await bot.telegram.editMessageText(chatId, pendingMsg.message_id, `transaction sent ${link}`);
+              await editMsgTextSafe(ctx, chatId, pendingMsg.message_id, `transaction sent ${link}`);
             } catch {
               await ctx.reply(`transaction sent ${link}`);
             }
@@ -3714,7 +3730,7 @@ bot.on('text', async (ctx, next) => {
             }
 
             provider.waitForTransaction(hash).then(async () => {
-              try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
+              try { await ctx.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
               await postTradeSuccess(ctx, {
                 action: 'BUY',
                 spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
@@ -3725,13 +3741,13 @@ bot.on('text', async (ctx, next) => {
             }).catch(() => {/* ignore */});
           } else {
             try {
-              await bot.telegram.editMessageText(chatId, pendingMsg.message_id, 'transaction sent (no hash yet)');
+              await editMsgTextSafe(ctx, chatId, pendingMsg.message_id, 'transaction sent (no hash yet)');
             } catch {}
           }
         } catch (e: any) {
           const errText = `❌ Auto-buy failed for ${short(w.address)}: ${briefErr(e)}`;
           try {
-            await bot.telegram.editMessageText(chatId, pendingMsg.message_id, errText);
+            await editMsgTextSafe(ctx, chatId, pendingMsg.message_id, errText);
           } catch {
             await ctx.reply(errText);
           }
