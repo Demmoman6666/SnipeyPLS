@@ -494,14 +494,27 @@ function parseNumHuman(s: string): number | null {
 
 /* ---------- pending prompts ---------- */
 type Pending =
-  | { type: 'set_amount' } | { type: 'set_token' } | { type: 'set_token_sell' } | { type: 'gen_name' } | { type: 'import_wallet' }
-  | { type: 'withdraw'; walletId: number } | { type: 'set_gl' } | { type: 'set_gb' } | { type: 'set_defpct' }
-  | { type: 'auto_amt' } | { type: 'lb_amt' } | { type: 'ls_pct' } | { type: 'limit_value' }
+  | { type: 'set_amount' }
+  | { type: 'set_token' }
+  | { type: 'set_token_sell' }
+  | { type: 'gen_name' }
+  | { type: 'import_wallet' }
+  | { type: 'withdraw'; walletId: number }
+  | { type: 'set_gl' }
+  | { type: 'set_gb' }
+  | { type: 'set_defpct' }
+  | { type: 'auto_amt' }
+  | { type: 'lb_amt' }
+  | { type: 'ls_pct' }
+  | { type: 'limit_value' }
   // ✅ NEW pending type for referral payout wallet input
   | { type: 'ref_payout' }
   // ✅ NEW: edit menus
   | { type: 'edit_qb'; idx: number }   // editing Quick-Buy button at index 0..5
-  | { type: 'edit_sp'; idx: number };  // editing Sell % preset at index 0..3
+  | { type: 'edit_sp'; idx: number }   // editing Sell % preset at index 0..3
+  // ✅ NEW: custom slippage input (Step 2)
+  | { type: 'slip_custom' };
+
 const pending = new Map<number, Pending>();
 
 /* ---------- /start (capture referrer) ---------- */
