@@ -513,7 +513,7 @@ type Pending =
   | { type: 'edit_qb'; idx: number }   // editing Quick-Buy button at index 0..5
   | { type: 'edit_sp'; idx: number }   // editing Sell % preset at index 0..3
   // ✅ NEW: custom slippage input (Step 2)
-  | { type: 'slip_custom' };
+  | { type: 'slip_custom' }
   | { type: 'auto_slip_custom' };
 
 const pending = new Map<number, Pending>();
