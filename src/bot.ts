@@ -1953,56 +1953,57 @@ bot.action(/^buy_qb:(\d+)$/, async (ctx: any) => {
       const r = await buyAutoRoute(getPrivateKey(w), token!, amountIn, minOut, gas);
       const hash = (r as any)?.hash;
 
-      // For success card + logging
-      let preOut: bigint = pre?.amountOut ?? 0n, tokDec = 18, tokSym = 'TOKEN';
-      try {
-        const meta = await tokenMeta(token!);
-        tokDec = meta.decimals ?? 18;
-        tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-        if (pre?.amountOut) {
-          try {
-            await recordBuyAndCache(
-              ctx.from.id,
-              w.address,
-              token!,
-              amountIn,
-              pre.amountOut,
-              pre.route?.key ?? 'AUTO',
-              tokDec
-            );
-          } catch {}
-        }
-      } catch {}
+// For success card + logging
+let quotedOut: bigint = pre?.amountOut ?? 0n;
+let tokDec = 18, tokSym = 'TOKEN';
+try {
+  const meta = await tokenMeta(token!);
+  tokDec = meta.decimals ?? 18;
+  tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+  if (pre?.amountOut) {
+    try {
+      await recordBuyAndCache(
+        ctx.from.id,
+        w.address,
+        token!,
+        amountIn,
+        pre.amountOut,
+        pre.route?.key ?? 'AUTO',
+        tokDec
+      );
+    } catch {}
+  }
+} catch {}
 
-      if (hash) {
-        const link = otter(hash);
-        try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`); }
-        catch { await ctx.reply(`transaction sent ${link}`); }
+if (hash) {
+  const link = otter(hash);
+  try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`); }
+  catch { await ctx.reply(`transaction sent ${link}`); }
 
-        provider.waitForTransaction(hash).then(async () => {
-          try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
-          await postTradeSuccess(ctx, {
-            action: 'BUY',
-            spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-            receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-            tokenAddress: token!,
-            explorerUrl: link
-          });
-        }).catch(() => {});
-      } else {
-        try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)'); }
-        catch {}
-      }
-    } catch (e: any) {
-      const brief = conciseError(e);
-      try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Buy failed for ${short(w.address)}: ${brief}`); }
-      catch { await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${brief}`); }
-    }
-  });
+  provider.waitForTransaction(hash).then(async () => {
+    try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
+    await postTradeSuccess(ctx, {
+      action: 'BUY',
+      spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
+      receive: { amount: quotedOut,   decimals: tokDec, symbol: tokSym },
+      tokenAddress: token!,
+      explorerUrl: link
+    });
+  }).catch(() => {});
+} else {
+  try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)'); }
+  catch {}
+}
+} catch (e: any) {
+const brief = conciseError(e);
+try { await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Buy failed for ${short(w.address)}: ${brief}`); }
+catch { await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${brief}`); }
+}
+});
 
-  await Promise.allSettled(tasks);
-  await upsertPinnedPosition(ctx);
-  return renderBuyMenu(ctx);
+await Promise.allSettled(tasks);
+await upsertPinnedPosition(ctx);
+return renderBuyMenu(ctx);
 });
 
 /* ----- Tx notifications (kept for other flows) ----- */
@@ -2043,7 +2044,7 @@ bot.action('buy_exec', async (ctx) => {
       const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
-      let preOut: bigint = 0n;
+      let quotedOut: bigint = 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
       try {
@@ -2052,7 +2053,7 @@ bot.action('buy_exec', async (ctx) => {
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
-          preOut = preQuote.amountOut;
+          quotedOut = preQuote.amountOut;
           try {
             await recordBuyAndCache(
               ctx.from.id,
@@ -2084,7 +2085,7 @@ bot.action('buy_exec', async (ctx) => {
           await postTradeSuccess(ctx, {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-            receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
+            receive: { amount: quotedOut,   decimals: tokDec, symbol: tokSym },
             tokenAddress: token,
             explorerUrl: link
           });
@@ -2129,7 +2130,7 @@ bot.action('buy_exec_all', async (ctx) => {
       const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
-      let preOut: bigint = 0n;
+      let quotedOut: bigint = 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
       try {
@@ -2138,7 +2139,7 @@ bot.action('buy_exec_all', async (ctx) => {
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
-          preOut = preQuote.amountOut;
+          quotedOut = preQuote.amountOut;
           try {
             await recordBuyAndCache(
               ctx.from.id,
@@ -2170,7 +2171,7 @@ bot.action('buy_exec_all', async (ctx) => {
           await postTradeSuccess(ctx, {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-            receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
+            receive: { amount: quotedOut,   decimals: tokDec, symbol: tokSym },
             tokenAddress: token,
             explorerUrl: link
           });
@@ -2222,7 +2223,7 @@ bot.action('buy_exec', async (ctx) => {
       const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
-      let preOut: bigint = 0n;
+      let quotedOut: bigint = 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
       try {
@@ -2231,7 +2232,7 @@ bot.action('buy_exec', async (ctx) => {
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
-          preOut = preQuote.amountOut;
+          quotedOut = preQuote.amountOut;
           await recordBuyAndCache(
             ctx.from.id,
             w.address,
@@ -2261,7 +2262,7 @@ bot.action('buy_exec', async (ctx) => {
           await postTradeSuccess(ctx, {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-            receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
+            receive: { amount: quotedOut,   decimals: tokDec, symbol: tokSym },
             tokenAddress: token,
             explorerUrl: link
           });
@@ -2306,7 +2307,7 @@ bot.action('buy_exec_all', async (ctx) => {
       const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
-      let preOut: bigint = 0n;
+      let quotedOut: bigint = 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
       try {
@@ -2315,7 +2316,7 @@ bot.action('buy_exec_all', async (ctx) => {
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
-          preOut = preQuote.amountOut;
+          quotedOut = preQuote.amountOut;
           await recordBuyAndCache(
             ctx.from.id,
             w.address,
@@ -2345,7 +2346,7 @@ bot.action('buy_exec_all', async (ctx) => {
           await postTradeSuccess(ctx, {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-            receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
+            receive: { amount: quotedOut,   decimals: tokDec, symbol: tokSym },
             tokenAddress: token,
             explorerUrl: link
           });
@@ -2390,7 +2391,7 @@ bot.action('buy_exec_all', async (ctx) => {
       const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
-      let preOut: bigint = 0n;
+      let quotedOut: bigint = 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
       try {
@@ -2399,7 +2400,7 @@ bot.action('buy_exec_all', async (ctx) => {
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
-          preOut = preQuote.amountOut;
+          quotedOut = preQuote.amountOut;
           await recordBuyAndCache(
             ctx.from.id,
             w.address,
@@ -2429,7 +2430,7 @@ bot.action('buy_exec_all', async (ctx) => {
           await postTradeSuccess(ctx, {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-            receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
+            receive: { amount: quotedOut,   decimals: tokDec, symbol: tokSym },
             tokenAddress: token,
             explorerUrl: link
           });
@@ -2481,7 +2482,7 @@ bot.action('buy_exec', async (ctx) => {
       const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
-      let preOut: bigint = 0n;
+      let quotedOut: bigint = 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
       try {
@@ -2490,7 +2491,7 @@ bot.action('buy_exec', async (ctx) => {
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
-          preOut = preQuote.amountOut;
+          quotedOut = preQuote.amountOut;
           await recordBuyAndCache(
             ctx.from.id,
             w.address,
@@ -2520,7 +2521,7 @@ bot.action('buy_exec', async (ctx) => {
           await postTradeSuccess(ctx, {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-            receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
+            receive: { amount: quotedOut,   decimals: tokDec, symbol: tokSym },
             tokenAddress: token,
             explorerUrl: link
           });
@@ -2565,7 +2566,7 @@ bot.action('buy_exec_all', async (ctx) => {
       const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, 0n, gas);
       const hash = (r as any)?.hash;
 
-      let preOut: bigint = 0n;
+      let quotedOut: bigint = 0n;
       let tokDec = 18;
       let tokSym = 'TOKEN';
       try {
@@ -2574,7 +2575,7 @@ bot.action('buy_exec_all', async (ctx) => {
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
-          preOut = preQuote.amountOut;
+          quotedOut = preQuote.amountOut;
           await recordBuyAndCache(
             ctx.from.id,
             w.address,
@@ -2604,7 +2605,7 @@ bot.action('buy_exec_all', async (ctx) => {
           await postTradeSuccess(ctx, {
             action: 'BUY',
             spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-            receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
+            receive: { amount: quotedOut,   decimals: tokDec, symbol: tokSym },
             tokenAddress: token,
             explorerUrl: link
           });
@@ -2625,10 +2626,10 @@ bot.action('buy_exec_all', async (ctx) => {
     }
   });
 
-  await Promise.allSettled(tasks);
+ await Promise.allSettled(tasks);
 
-  await upsertPinnedPosition(ctx);
-  return renderBuyMenu(ctx);
+await upsertPinnedPosition(ctx);
+return renderBuyMenu(ctx);
 });
 
 /* ---------- LIMITS (create/list/cancel) ---------- */
@@ -3649,21 +3650,21 @@ async function checkLimitsOnce() {
       const gas = await computeGas(r.telegram_id);
 
       // minimal ctx shim so we can reuse the same success card
-const ctxShim: any = {
-  reply: (html: string, extra: any = {}) =>
-    bot.telegram.sendMessage(r.telegram_id, html, {
-      parse_mode: 'HTML',
-      link_preview_options: { is_disabled: true },
-      ...extra
-    } as any)
-};
+      const ctxShim: any = {
+        reply: (html: string, extra: any = {}) =>
+          bot.telegram.sendMessage(r.telegram_id, html, {
+            parse_mode: 'HTML',
+            link_preview_options: { is_disabled: true },
+            ...extra
+          } as any)
+      };
 
       if (r.side === 'BUY') {
         const amtIn = r.amount_pls_wei ? BigInt(r.amount_pls_wei) : 0n;
         if (amtIn <= 0n) { unmarkProcessing(r.id); markLimitError(r.id, 'amount zero'); continue; }
 
         // Pre-resolve some metadata for the success card & record
-        
+        let quotedOut: bigint = 0n;
         let tokDec = 18;
         let tokSym = 'TOKEN';
         try {
@@ -3672,7 +3673,7 @@ const ctxShim: any = {
           tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
           const pre = await bestQuoteBuy(amtIn, r.token_address);
           if (pre?.amountOut) {
-            preOut = pre.amountOut;
+            quotedOut = pre.amountOut;
             // ✅ PnL cache update on Limit BUY
             try {
               await recordBuyAndCache(
@@ -3689,7 +3690,7 @@ const ctxShim: any = {
         } catch {}
 
         // ✅ NEW: apply slippage to Limit BUY
-        const minOutLE = minOutFromQuote(r.telegram_id, preOut);
+        const minOutLE = minOutFromQuote(r.telegram_id, quotedOut);
         const rec = await buyAutoRoute(getPrivateKey(w), r.token_address, amtIn, minOutLE, gas);
         const hash = (rec as any)?.hash;
 
@@ -3704,7 +3705,7 @@ const ctxShim: any = {
             await postTradeSuccess(ctxShim, {
               action: 'BUY',
               spend:   { amount: amtIn, decimals: 18, symbol: 'PLS' },
-              receive: { amount: preOut, decimals: tokDec, symbol: tokSym },
+              receive: { amount: quotedOut, decimals: tokDec, symbol: tokSym },
               tokenAddress: r.token_address,
               explorerUrl: link
             });
