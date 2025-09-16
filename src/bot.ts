@@ -3078,53 +3078,51 @@ async function renderSellMenu(ctx: any) {
         outLine = `• <b>Est. Out (${esc(NF.format(pct))}%):</b> ${esc(fmtPls(q.amountOut))} PLS  (Route: ${esc(q.route.key)})`;
       }
 
-      // === PnL calculation (no dependency on quote) ===
-      // Current per-token price in PLS (fallback to quote-derived per-token if needed)
+      // === PnL calculation (uses current Sell % of balance) ======================
       let plsPerToken: number | null = await pricePLSPerToken(tokenAddrFull);
-      if (plsPerToken == null && q?.amountOut) {
+
+      // Fallback: derive PLS/token from the live quote for the sell amount
+      if (plsPerToken == null && q?.amountOut && sellAmt > 0n) {
         const amtTok = Number(ethers.formatUnits(sellAmt, dec));
         const outPls = Number(ethers.formatEther(q.amountOut));
         plsPerToken = amtTok > 0 ? (outPls / amtTok) : null;
       }
 
-// Get user-average entry across all buys (cached)
-const avg = getAvgEntryCached(ctx.from.id, tokenAddrFull, dec);
-      
-      if (avg && plsPerToken != null) {
+      // Pull cached/overlay average entry (PLS per token)
+      const avg = getAvgEntryCached(ctx.from.id, tokenAddrFull, dec);
+
+      if (avg && Number.isFinite(avg.avgPlsPerToken) && avg.avgPlsPerToken > 0 && plsPerToken != null) {
         const usdPerPls = await plsUSD().catch(() => null);
 
-        // Evaluate PnL for the current Sell % of balance
+        // Amount of tokens we are about to sell (based on Sell %)
         const amtTok = Number(ethers.formatUnits(sellAmt, dec));
-        const curPlsVal = amtTok * plsPerToken;                       // current PLS value
-        const entryPlsVal = amtTok * (avg.avgPlsPerToken || 0);       // entry PLS value for those tokens
-        const pnlPls = curPlsVal - entryPlsVal;                        // PnL in PLS
-        const pnlPct = (avg.avgPlsPerToken > 0)
-          ? ((plsPerToken / avg.avgPlsPerToken) - 1) * 100
-          : 0;
 
-        const signEmoji = pnlPls >= 0 ? '🟢' : '🔴';
+        // Current value of that amount in PLS and the entry-cost in PLS
+        const curPlsVal   = amtTok * plsPerToken;
+        const entryPlsVal = amtTok * avg.avgPlsPerToken;
 
-        // Avg entry line (PLS + USD if available)
-        const entryUsdPerTok = (usdPerPls != null)
-          ? avg.avgPlsPerToken * usdPerPls
-          : null;
-        entryLine =
-          `• <b>Avg Entry:</b> ${esc(NF.format(avg.avgPlsPerToken))} PLS` +
-          (entryUsdPerTok != null
-            ? ` ($${(entryUsdPerTok).toLocaleString('en-GB', { maximumFractionDigits: 8 })})`
-            : '') +
-          ` / ${esc(metaSymbol || 'TOKEN')}`;
+        // Net PnL in PLS and in %
+        const pnlPls = curPlsVal - entryPlsVal;
+        const pnlPct = ((plsPerToken / avg.avgPlsPerToken) - 1) * 100;
 
-        // PnL in PLS with %
-        pnlLine =
-          `• <b>Net PnL:</b> ${signEmoji} ${esc(NF.format(pnlPls))} PLS  (${esc(NF.format(pnlPct))}%)`;
+        // --- Lines (exact labels you asked for) ---
+        // Average entry (PLS/token) plus USD/token in brackets when possible
+        const entryUsdPerTok = (usdPerPls != null) ? (avg.avgPlsPerToken * usdPerPls) : null;
+        entryLine = `• <b>Average Entry:</b> ${esc(NF.format(avg.avgPlsPerToken))} PLS/${esc(metaSymbol || 'TOKEN')}`
+                  + (entryUsdPerTok != null
+                    ? `  ($${entryUsdPerTok.toLocaleString('en-GB', { maximumFractionDigits: 8 })})`
+                    : '');
 
-        // PnL in USD (if conversion available)
+        // Net PnL ($) — value for the selected Sell % of your balance
         if (usdPerPls != null) {
           const pnlUsd = pnlPls * usdPerPls;
           const signEmojiUsd = pnlUsd >= 0 ? '🟢' : '🔴';
-          pnlLine += `\n• <b>PnL $:</b> ${signEmojiUsd} $${Math.abs(pnlUsd).toLocaleString('en-GB', { maximumFractionDigits: 2 })}`;
+          pnlLine = `• <b>Net PnL ($):</b> ${signEmojiUsd} $${Math.abs(pnlUsd).toLocaleString('en-GB', { maximumFractionDigits: 2 })}`;
         }
+
+        // Net PnL (%) — independent of amount
+        const signEmojiPct = pnlPct >= 0 ? '🟢' : '🔴';
+        pnlLine += (pnlLine ? '\n' : '') + `• <b>Net PnL (%):</b> ${signEmojiPct} ${esc(NF.format(pnlPct))}%`;
       }
     } catch { /* keep defaults */ }
   }
@@ -3153,63 +3151,63 @@ const avg = getAvgEntryCached(ctx.from.id, tokenAddrFull, dec);
     pnlLine,
   ].join('\n');
 
-/* ===== Keyboard to mirror the BUY layout (plus Slippage row) ===== */
-const all = listWallets(ctx.from.id);
-const activeId = getActiveWallet(ctx.from.id)?.id;
-const currentId = selectedId ?? activeId;
+  /* ===== Keyboard to mirror the BUY layout (plus Slippage row) ===== */
+  const all = listWallets(ctx.from.id);
+  const activeId = getActiveWallet(ctx.from.id)?.id;
+  const currentId = selectedId ?? activeId;
 
-const walletButtons = chunk(
-  all.map((row, i) =>
-    Markup.button.callback(`${currentId === row.id ? '✅ ' : ''}W${i + 1}`, `sell_wallet_select:${row.id}`)
-  ),
-  6
-);
+  const walletButtons = chunk(
+    all.map((row, i) =>
+      Markup.button.callback(`${currentId === row.id ? '✅ ' : ''}W${i + 1}`, `sell_wallet_select:${row.id}`)
+    ),
+    6
+  );
 
-/* --- DYNAMIC Sell % row (Step 4) --- */
-const curPct = u?.sell_pct ?? 100;
-// assumes you added getSellPresets(uid) earlier (defaults: [25,50,75,100])
-const sellPresets = getSellPresets(ctx.from.id);
-const pctRows = chunk(
-  sellPresets.map((n) =>
-    Markup.button.callback(`${curPct === n ? '✅ ' : ''}${n}%`, `sell_pct_set:${n}`)
-  ),
-  4 // show up to 4 per row
-);
+  /* --- DYNAMIC Sell % row (Step 4) --- */
+  const curPct = u?.sell_pct ?? 100;
+  // assumes you added getSellPresets(uid) earlier (defaults: [25,50,75,100])
+  const sellPresets = getSellPresets(ctx.from.id);
+  const pctRows = chunk(
+    sellPresets.map((n) =>
+      Markup.button.callback(`${curPct === n ? '✅ ' : ''}${n}%`, `sell_pct_set:${n}`)
+    ),
+    4 // show up to 4 per row
+  );
 
-/* now compose the keyboard */
-const kb: any[][] = [
-  // Top gas adjuster (alone)
-  [Markup.button.callback(`⛽️ Gas % (${NF.format(u?.gas_pct ?? 0)}%)`, 'sell_gas_pct_open')],
-  // Slippage row — show Auto/Manual label
-  [Markup.button.callback(`🎯 Slippage (${fmtSlipLabel(ctx.from.id)})`, 'slip_open')],
-  // Back / Refresh
-  [
-    Markup.button.callback('⬅️ Back', 'main_back'),
-    Markup.button.callback('🔄 Refresh', 'sell_refresh'),
-  ],
-  // Edit sell data (disabled label)
-  [Markup.button.callback('EDIT SELL DATA', 'noop')],
-  // Contract / Pair
-  [
-    Markup.button.callback('Contract', 'sell_set_token'),
-    Markup.button.callback('Pair', 'pair_info'),
-  ],
-  // Wallets label + wallet rows
-  [Markup.button.callback('Wallets', 'noop')],
-  ...walletButtons,
+  /* now compose the keyboard */
+  const kb: any[][] = [
+    // Top gas adjuster (alone)
+    [Markup.button.callback(`⛽️ Gas % (${NF.format(u?.gas_pct ?? 0)}%)`, 'sell_gas_pct_open')],
+    // Slippage row — show Auto/Manual label
+    [Markup.button.callback(`🎯 Slippage (${fmtSlipLabel(ctx.from.id)})`, 'slip_open')],
+    // Back / Refresh
+    [
+      Markup.button.callback('⬅️ Back', 'main_back'),
+      Markup.button.callback('🔄 Refresh', 'sell_refresh'),
+    ],
+    // Edit sell data (disabled label)
+    [Markup.button.callback('EDIT SELL DATA', 'noop')],
+    // Contract / Pair
+    [
+      Markup.button.callback('Contract', 'sell_set_token'),
+      Markup.button.callback('Pair', 'pair_info'),
+    ],
+    // Wallets label + wallet rows
+    [Markup.button.callback('Wallets', 'noop')],
+    ...walletButtons,
 
-  // 🔻 Dynamic "Sell Amount / Method" label + dynamic preset rows
-  [Markup.button.callback('Sell Amount / Method', 'noop')],
-  ...pctRows,
+    // 🔻 Dynamic "Sell Amount / Method" label + dynamic preset rows
+    [Markup.button.callback('Sell Amount / Method', 'noop')],
+    ...pctRows,
 
-  // Sell all wallets, limits, primary action
-  [Markup.button.callback('Sell All Wallets', 'sell_exec_all')],
-  [
-    Markup.button.callback('Limit Sell', 'limit_sell'),
-    Markup.button.callback('Orders', 'limit_list'),
-  ],
-  [Markup.button.callback('🟥 Sell Now', 'sell_exec')],
-];
+    // Sell all wallets, limits, primary action
+    [Markup.button.callback('Sell All Wallets', 'sell_exec_all')],
+    [
+      Markup.button.callback('Limit Sell', 'limit_sell'),
+      Markup.button.callback('Orders', 'limit_list'),
+    ],
+    [Markup.button.callback('🟥 Sell Now', 'sell_exec')],
+  ];
 
   await showMenu(ctx, text, { parse_mode: 'HTML', ...Markup.inlineKeyboard(kb) });
 }
