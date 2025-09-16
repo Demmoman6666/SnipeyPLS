@@ -1953,26 +1953,26 @@ bot.action(/^buy_qb:(\d+)$/, async (ctx: any) => {
       const r = await buyAutoRoute(getPrivateKey(w), token!, amountIn, minOut, gas);
       const hash = (r as any)?.hash;
 
-// For success card + logging
-let preOut: bigint = pre?.amountOut ?? 0n, tokDec = 18, tokSym = 'TOKEN';
-try {
-  const meta = await tokenMeta(token!);
-  tokDec = meta.decimals ?? 18;
-  tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-  if (pre?.amountOut) {
-    try {
-      await recordBuyAndCache(
-        ctx.from.id,
-        w.address,
-        token!,
-        amountIn,
-        pre.amountOut,
-        pre.route?.key ?? 'AUTO',
-        tokDec
-      );
-    } catch {}
-  }
-} catch {}
+      // For success card + logging
+      let preOut: bigint = pre?.amountOut ?? 0n, tokDec = 18, tokSym = 'TOKEN';
+      try {
+        const meta = await tokenMeta(token!);
+        tokDec = meta.decimals ?? 18;
+        tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+        if (pre?.amountOut) {
+          try {
+            await recordBuyAndCache(
+              ctx.from.id,
+              w.address,
+              token!,
+              amountIn,
+              pre.amountOut,
+              pre.route?.key ?? 'AUTO',
+              tokDec
+            );
+          } catch {}
+        }
+      } catch {}
 
       if (hash) {
         const link = otter(hash);
@@ -2053,7 +2053,17 @@ bot.action('buy_exec', async (ctx) => {
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
           preOut = preQuote.amountOut;
-          try { recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key); } catch {}
+          try {
+            await recordBuyAndCache(
+              ctx.from.id,
+              w.address,
+              token,
+              amountIn,
+              preQuote.amountOut,
+              preQuote.route.key,
+              tokDec
+            );
+          } catch {}
         }
       } catch {}
 
@@ -2129,7 +2139,17 @@ bot.action('buy_exec_all', async (ctx) => {
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
           preOut = preQuote.amountOut;
-          try { recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key); } catch {}
+          try {
+            await recordBuyAndCache(
+              ctx.from.id,
+              w.address,
+              token,
+              amountIn,
+              preQuote.amountOut,
+              preQuote.route.key,
+              tokDec
+            );
+          } catch {}
         }
       } catch {}
 
@@ -2212,7 +2232,15 @@ bot.action('buy_exec', async (ctx) => {
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
           preOut = preQuote.amountOut;
-          recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+          await recordBuyAndCache(
+            ctx.from.id,
+            w.address,
+            token,
+            amountIn,
+            preQuote.amountOut,
+            preQuote.route.key,
+            tokDec
+          );
         }
       } catch {}
 
@@ -2288,7 +2316,15 @@ bot.action('buy_exec_all', async (ctx) => {
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
           preOut = preQuote.amountOut;
-          recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+          await recordBuyAndCache(
+            ctx.from.id,
+            w.address,
+            token,
+            amountIn,
+            preQuote.amountOut,
+            preQuote.route.key,
+            tokDec
+          );
         }
       } catch {}
 
@@ -2364,7 +2400,15 @@ bot.action('buy_exec_all', async (ctx) => {
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
           preOut = preQuote.amountOut;
-          recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+          await recordBuyAndCache(
+            ctx.from.id,
+            w.address,
+            token,
+            amountIn,
+            preQuote.amountOut,
+            preQuote.route.key,
+            tokDec
+          );
         }
       } catch {}
 
@@ -2447,7 +2491,15 @@ bot.action('buy_exec', async (ctx) => {
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
           preOut = preQuote.amountOut;
-          recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+          await recordBuyAndCache(
+            ctx.from.id,
+            w.address,
+            token,
+            amountIn,
+            preQuote.amountOut,
+            preQuote.route.key,
+            tokDec
+          );
         }
       } catch {}
 
@@ -2523,7 +2575,15 @@ bot.action('buy_exec_all', async (ctx) => {
         const preQuote = await bestQuoteBuy(amountIn, token);
         if (preQuote?.amountOut) {
           preOut = preQuote.amountOut;
-          recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+          await recordBuyAndCache(
+            ctx.from.id,
+            w.address,
+            token,
+            amountIn,
+            preQuote.amountOut,
+            preQuote.route.key,
+            tokDec
+          );
         }
       } catch {}
 
@@ -2549,82 +2609,6 @@ bot.action('buy_exec_all', async (ctx) => {
             explorerUrl: link
           });
           // (referral nudge removed)
-        }).catch(() => {/* ignore */});
-      } else {
-        try {
-          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, 'transaction sent (no hash yet)');
-        } catch {}
-      }
-    } catch (e: any) {
-      const brief = conciseError(e);
-      try {
-        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Buy failed for ${short(w.address)}: ${brief}`);
-      } catch {
-        await ctx.reply(`❌ Buy failed for ${short(w.address)}: ${brief}`);
-      }
-    }
-  });
-
-  await Promise.allSettled(tasks);
-
-  await upsertPinnedPosition(ctx);
-  return renderBuyMenu(ctx);
-});
-
-bot.action('buy_exec_all', async (ctx) => {
-  await ctx.answerCbQuery();
-  const rows = listWallets(ctx.from.id); const u = getUserSettings(ctx.from.id);
-  if (!rows.length) return showMenu(ctx, 'No wallets.', buyMenu(u?.gas_pct ?? 0));
-  if (!u?.token_address) return showMenu(ctx, 'Set token first.', buyMenu(u?.gas_pct ?? 0));
-
-  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
-  const amountIn = ethers.parseEther(String(u?.buy_amount_pls ?? 0.01));
-  const token = u.token_address!;
-
-  // 🔁 Fire all transactions simultaneously
-  const tasks = rows.map(async (w) => {
-    const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
-    try {
-      const gas = await computeGas(ctx.from.id);
-      const r = await buyAutoRoute(getPrivateKey(w), token, amountIn, 0n, gas);
-      const hash = (r as any)?.hash;
-
-      let preOut: bigint = 0n;
-      let tokDec = 18;
-      let tokSym = 'TOKEN';
-      try {
-        const meta = await tokenMeta(token);
-        tokDec = meta.decimals ?? 18;
-        tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-        const preQuote = await bestQuoteBuy(amountIn, token);
-        if (preQuote?.amountOut) {
-          preOut = preQuote.amountOut;
-          recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
-        }
-      } catch {}
-
-      if (hash) {
-        const link = otter(hash);
-        try {
-          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
-        } catch {
-          await ctx.reply(`transaction sent ${link}`);
-        }
-
-        if (token.toLowerCase() !== WPLS) {
-          approveAllRouters(getPrivateKey(w), token, gas).catch(() => {});
-        }
-
-        provider.waitForTransaction(hash).then(async () => {
-          try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {}
-          await postTradeSuccess(ctx, {
-            action: 'BUY',
-            spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-            receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
-            tokenAddress: token,
-            explorerUrl: link
-          });
-          await sendRefNudgeTo(ctx.from.id);
         }).catch(() => {/* ignore */});
       } else {
         try {
@@ -2961,7 +2945,6 @@ bot.action('slip_custom_buy', async (ctx) => {
     { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'slip_open_buy')]]) }
   );
 });
-
 /* ===== Settings ▸ Auto-Buy Slippage picker (separate from menu slippage) ===== */
 bot.action('auto_slip_open', async (ctx) => {
   await ctx.answerCbQuery();
@@ -3680,7 +3663,7 @@ const ctxShim: any = {
         if (amtIn <= 0n) { unmarkProcessing(r.id); markLimitError(r.id, 'amount zero'); continue; }
 
         // Pre-resolve some metadata for the success card & record
-        let preOut: bigint = 0n;
+        
         let tokDec = 18;
         let tokSym = 'TOKEN';
         try {
@@ -3690,7 +3673,18 @@ const ctxShim: any = {
           const pre = await bestQuoteBuy(amtIn, r.token_address);
           if (pre?.amountOut) {
             preOut = pre.amountOut;
-            recordTrade(r.telegram_id, w.address, r.token_address, 'BUY', amtIn, pre.amountOut, pre.route.key);
+            // ✅ PnL cache update on Limit BUY
+            try {
+              await recordBuyAndCache(
+                r.telegram_id,
+                w.address,
+                r.token_address,
+                amtIn,
+                pre.amountOut,
+                pre.route.key,
+                tokDec
+              );
+            } catch {}
           }
         } catch {}
 
@@ -4232,10 +4226,22 @@ bot.on('text', async (ctx, next) => {
             const meta = await tokenMeta(token);
             tokDec = meta.decimals ?? 18;
             tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
+
             const preQuote = await bestQuoteBuy(amountIn, token);
             if (preQuote?.amountOut) {
               preOut = preQuote.amountOut;
-              recordTrade(ctx.from.id, w.address, token, 'BUY', amountIn, preQuote.amountOut, preQuote.route.key);
+              // ✅ cache avg entry instantly for PnL overlays
+              try {
+                await recordBuyAndCache(
+                  ctx.from.id,
+                  w.address,
+                  token,
+                  amountIn,
+                  preQuote.amountOut,
+                  preQuote.route.key,
+                  tokDec
+                );
+              } catch {}
             }
           } catch {}
 
