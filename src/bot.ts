@@ -4024,7 +4024,6 @@ bot.on('text', async (ctx, next) => {
     }
 
     // === NEW: Snipe menu quick-edit — set AMOUNT (PLS) ===
-    // (Triggered when the Snipe menu asks for amount without running the full wizard.)
     if ((p as any).type === 'snipe_amt_edit') {
       const raw = String(ctx.message.text).trim();
       const n = Number(raw);
@@ -4042,7 +4041,6 @@ bot.on('text', async (ctx, next) => {
     }
 
     // === NEW: Snipe menu quick-edit — set TOKEN (contract) ===
-    // (Triggered when the Snipe menu asks for a token without running the full wizard.)
     if ((p as any).type === 'snipe_token_edit') {
       const addr = String(ctx.message.text).trim();
       if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) {
@@ -4066,7 +4064,6 @@ bot.on('text', async (ctx, next) => {
     if ((p as any).type === 'snipe_method') {
       const msgTxt = String(ctx.message?.text ?? '').trim();
 
-      // allow either a function signature or a 4-byte selector
       const isSelector  = /^0x[0-9a-fA-F]{8}$/.test(msgTxt);
       const isSignature = /^[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)$/.test(msgTxt);
 
@@ -4219,17 +4216,16 @@ bot.on('text', async (ctx, next) => {
       const tasks = wallets.map(async (w) => {
         const pendingMsg = await ctx.reply(`⏳ Sending buy for ${short(w.address)}…`);
         try {
-          let preOut: bigint = 0n;
+          let quotedOut: bigint = 0n;
           let tokDec = 18;
           let tokSym = 'TOKEN';
           try {
             const meta = await tokenMeta(token);
             tokDec = meta.decimals ?? 18;
             tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
-
             const preQuote = await bestQuoteBuy(amountIn, token);
             if (preQuote?.amountOut) {
-              preOut = preQuote.amountOut;
+              quotedOut = preQuote.amountOut;
               // ✅ cache avg entry instantly for PnL overlays
               try {
                 await recordBuyAndCache(
@@ -4247,10 +4243,10 @@ bot.on('text', async (ctx, next) => {
 
           const autoBps = getAutoBuySlipBps(ctx.from.id);
           const minOut =
-            preOut > 0n
+            quotedOut > 0n
               ? (autoBps === SLIP_AUTO
-                  ? (preOut * 99n) / 100n
-                  : (preOut * BigInt(10000 - autoBps)) / 10000n)
+                  ? (quotedOut * 99n) / 100n
+                  : (quotedOut * BigInt(10000 - autoBps)) / 10000n)
               : 0n;
 
           const gas = await computeGas(ctx.from.id);
@@ -4274,7 +4270,7 @@ bot.on('text', async (ctx, next) => {
               await postTradeSuccess(ctx, {
                 action: 'BUY',
                 spend:   { amount: amountIn, decimals: 18, symbol: 'PLS' },
-                receive: { amount: preOut,   decimals: tokDec, symbol: tokSym },
+                receive: { amount: quotedOut, decimals: tokDec, symbol: tokSym },
                 tokenAddress: token,
                 explorerUrl: link
               });
