@@ -4,7 +4,7 @@ import { Markup } from 'telegraf';
 /** Main menu */
 export function mainMenu() {
   return Markup.inlineKeyboard([
-    // Row 1
+   
     [Markup.button.callback('🟢 Buy', 'menu_buy'),
      Markup.button.callback('🔴 Sell', 'menu_sell')],
     
