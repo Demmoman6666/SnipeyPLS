@@ -7,7 +7,7 @@ export function mainMenu() {
     // Row 1
     [Markup.button.callback('🟢 Buy', 'menu_buy'),
      Markup.button.callback('🔴 Sell', 'menu_sell')],
-    // Row 2
+    
     [Markup.button.callback('👛 Wallets', 'wallets'),
      Markup.button.callback('🎯 Snipey', 'menu_snipe')],
     // Row 3
