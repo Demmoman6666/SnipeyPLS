@@ -3246,12 +3246,12 @@ bot.action('sell_approve', async (ctx) => {
 
   try {
     const gas = await computeGas(ctx.from.id);
-    // Pass the required approval amount and optional gas (approve max)
+    // correct order: (privKey, token, gas, amount?)
     const res: any = await approveAllRouters(
       getPrivateKey(w),
       u.token_address,
-      ethers.MaxUint256,
-      gas
+      gas,
+      ethers.MaxUint256
     );
 
     const hashes =
