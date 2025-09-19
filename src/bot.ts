@@ -3231,6 +3231,51 @@ bot.action('sell_set_token', async (ctx) => {
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_sell')]]) });
 });
 
+/* ---------- SELL APPROVE (single token across routers) ---------- */
+bot.action('sell_approve', async (ctx) => {
+  await ctx.answerCbQuery();
+
+  const u = getUserSettings(ctx.from.id);
+  if (!u?.token_address) return showMenu(ctx, 'Set token first.', sellMenu());
+
+  const w = getActiveWallet(ctx.from.id);
+  if (!w) return showMenu(ctx, 'No active wallet selected.', sellMenu());
+
+  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
+  const pendingMsg = await ctx.reply(`⏳ Approving routers for ${short(w.address)}…`);
+
+  try {
+    const res: any = await approveAllRouters(getPrivateKey(w), u.token_address);
+
+    const hashes =
+      Array.isArray(res) ? res.map((t: any) => t?.hash).filter(Boolean)
+      : res?.hash ? [res.hash]
+      : [];
+
+    if (hashes.length) {
+      const links = hashes.map(otter).join('\n');
+      try {
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `🛡 Approvals submitted:\n${links}`);
+      } catch {
+        await ctx.reply(`🛡 Approvals submitted:\n${links}`);
+      }
+    } else {
+      try {
+        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, '🛡 Approvals submitted.');
+      } catch { /* ignore */ }
+    }
+  } catch (e: any) {
+    const brief = conciseError(e);
+    try {
+      await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Approve failed: ${brief}`);
+    } catch {
+      await ctx.reply(`❌ Approve failed: ${brief}`);
+    }
+  }
+
+  return renderSellMenu(ctx);
+});
+
 /* ---------- SELL EXEC (single wallet) ---------- */
 bot.action('sell_exec', async (ctx) => {
   await ctx.answerCbQuery();
