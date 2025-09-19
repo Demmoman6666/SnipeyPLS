@@ -4,13 +4,12 @@ import { Markup } from 'telegraf';
 /** Main menu */
 export function mainMenu() {
   return Markup.inlineKeyboard([
-   
     [Markup.button.callback('🟢 Buy', 'menu_buy'),
      Markup.button.callback('🔴 Sell', 'menu_sell')],
-    
+
     [Markup.button.callback('👛 Wallets', 'wallets'),
      Markup.button.callback('🎯 Snipey', 'menu_snipe')],
-    // Row 3
+
     [Markup.button.callback('🤝 Referrals', 'referrals'),
      Markup.button.callback('⚙️ Settings', 'settings')],
   ]);
@@ -80,9 +79,15 @@ export function sellMenu() {
      Markup.button.callback('50%', 'sell_pct_50'),
      Markup.button.callback('75%', 'sell_pct_75'),
      Markup.button.callback('100%', 'sell_pct_100')],
-    [Markup.button.callback('🛡 Approve', 'sell_approve')],
+
+    // Keep other actions first
     [Markup.button.callback('🧭 Limit Sell', 'limit_sell'),
      Markup.button.callback('📋 Orders', 'limit_list')],
+
+    // NEW: Approve on its own row, directly above Sell Now
+    [Markup.button.callback('🛡 Approve', 'sell_approve')],
+
+    // Sell Now row (unchanged)
     [Markup.button.callback('⬅️ Back', 'main_back'),
      Markup.button.callback('🔴 Sell Now', 'sell_exec')],
   ]);
