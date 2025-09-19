@@ -3245,7 +3245,14 @@ bot.action('sell_approve', async (ctx) => {
   const pendingMsg = await ctx.reply(`⏳ Approving routers for ${short(w.address)}…`);
 
   try {
-    const res: any = await approveAllRouters(getPrivateKey(w), u.token_address);
+    const gas = await computeGas(ctx.from.id);
+    // Pass the required approval amount and optional gas (approve max)
+    const res: any = await approveAllRouters(
+      getPrivateKey(w),
+      u.token_address,
+      ethers.MaxUint256,
+      gas
+    );
 
     const hashes =
       Array.isArray(res) ? res.map((t: any) => t?.hash).filter(Boolean)
