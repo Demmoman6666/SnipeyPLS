@@ -3190,6 +3190,10 @@ async function renderSellMenu(ctx: any) {
       Markup.button.callback('Limit Sell', 'limit_sell'),
       Markup.button.callback('Orders', 'limit_list'),
     ],
+
+    // 🔐 Approve row (just above Sell Now)
+    [Markup.button.callback('🛡 Approve', 'sell_approve')],
+
     [Markup.button.callback('🟥 Sell Now', 'sell_exec')],
   ];
 
