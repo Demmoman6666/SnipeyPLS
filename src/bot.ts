@@ -3202,7 +3202,7 @@ async function renderSellMenu(ctx: any) {
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSellMenu(ctx); });
 
-/* Sell ▸ Approve (ALL wallets, with "transaction sent" + success messages) */
+/* Sell ▸ Approve (ALL wallets simultaneously; one “transaction sent” message per wallet, auto-updated on confirm) */
 bot.action('sell_approve', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
@@ -3219,52 +3219,52 @@ bot.action('sell_approve', async (ctx) => {
   try {
     const gas = await computeGas(ctx.from.id);
 
-    // Process wallets sequentially so the user sees per-wallet progress
-    for (const w of wallets) {
-      const pendingMsg = await ctx.reply(`⏳ Approving routers for ${short(w.address)}…`);
+    // Fire all wallet approvals in parallel
+    const tasks = wallets.map(async (w) => {
       try {
-        const res = await approveAllRouters(getPrivateKey(w), token, gas);
+        const res = await approveAllRouters(
+          getPrivateKey(w),
+          token,
+          gas,
+          ethers.MaxUint256 // approve max
+        );
+
+        // Normalize to an array of hashes
         const hashes: string[] = Array.isArray(res)
-          ? res.filter(Boolean) as string[]
-          : (res ? [res as unknown as string] : []);
+          ? res.map((t: any) => t?.hash ?? t).filter(Boolean)
+          : (res?.hash ? [res.hash] : (typeof res === 'string' ? [res] : []));
 
         if (!hashes.length) {
-          try {
-            await bot.telegram.editMessageText(
-              chatId, pendingMsg.message_id, undefined,
-              `Nothing to approve for ${short(w.address)} (already approved).`
-            );
-          } catch {/* ignore */}
-          continue;
+          await ctx.reply(`✅ Already approved — ${short(w.address)}`);
+          return;
         }
 
-        // Announce first tx like Buy/Sell: "transaction sent <link>"
+        // One "transaction sent" message per wallet (use the first hash as the link)
         const first = hashes[0];
         const link = otter(first);
-        try {
-          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
-        } catch {
-          await ctx.reply(`transaction sent ${link}`);
-        }
+        const sentMsg = await ctx.reply(`transaction sent ${link} — ${short(w.address)}`);
 
-        // Wait for all approval txs for this wallet
+        // Wait for all approval txs for this wallet to confirm
         await Promise.all(hashes.map(h => provider.waitForTransaction(h).catch(() => null)));
 
-        // Replace pending line with success note
-        try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {/* ignore */}
-        await ctx.reply(`✅ Approval successful for ${short(w.address)} (${hashes.length} tx)`);
-      } catch (e: any) {
-        const brief = conciseError(e);
+        // Update the same message to success
         try {
           await bot.telegram.editMessageText(
-            chatId, pendingMsg.message_id, undefined,
-            `❌ Approve failed for ${short(w.address)}: ${brief}`
+            chatId,
+            sentMsg.message_id,
+            undefined,
+            `✅ Approval successful — ${short(w.address)}\n${link}`
           );
         } catch {
-          await ctx.reply(`❌ Approve failed for ${short(w.address)}: ${brief}`);
+          await ctx.reply(`✅ Approval successful — ${short(w.address)}\n${link}`);
         }
+      } catch (e: any) {
+        const brief = conciseError(e);
+        await ctx.reply(`❌ Approve failed — ${short(w.address)}: ${brief}`);
       }
-    }
+    });
+
+    await Promise.allSettled(tasks);
   } catch (e: any) {
     await ctx.reply('Approve failed: ' + (e?.message ?? String(e)));
   }
@@ -3278,58 +3278,6 @@ bot.action('sell_set_token', async (ctx) => {
   pending.set(ctx.from.id, { type: 'set_token_sell' });
   return showMenu(ctx, 'Paste the *token contract address* (0x...).', { parse_mode: 'Markdown',
     ...Markup.inlineKeyboard([[Markup.button.callback('⬅️ Back', 'menu_sell')]]) });
-});
-
-/* ---------- SELL APPROVE (single token across routers) ---------- */
-bot.action('sell_approve', async (ctx) => {
-  await ctx.answerCbQuery();
-
-  const u = getUserSettings(ctx.from.id);
-  if (!u?.token_address) return showMenu(ctx, 'Set token first.', sellMenu());
-
-  const w = getActiveWallet(ctx.from.id);
-  if (!w) return showMenu(ctx, 'No active wallet selected.', sellMenu());
-
-  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
-  const pendingMsg = await ctx.reply(`⏳ Approving routers for ${short(w.address)}…`);
-
-  try {
-    const gas = await computeGas(ctx.from.id);
-    // correct order: (privKey, token, gas, amount?)
-    const res: any = await approveAllRouters(
-      getPrivateKey(w),
-      u.token_address,
-      gas,
-      ethers.MaxUint256
-    );
-
-    const hashes =
-      Array.isArray(res) ? res.map((t: any) => t?.hash).filter(Boolean)
-      : res?.hash ? [res.hash]
-      : [];
-
-    if (hashes.length) {
-      const links = hashes.map(otter).join('\n');
-      try {
-        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `🛡 Approvals submitted:\n${links}`);
-      } catch {
-        await ctx.reply(`🛡 Approvals submitted:\n${links}`);
-      }
-    } else {
-      try {
-        await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, '🛡 Approvals submitted.');
-      } catch { /* ignore */ }
-    }
-  } catch (e: any) {
-    const brief = conciseError(e);
-    try {
-      await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `❌ Approve failed: ${brief}`);
-    } catch {
-      await ctx.reply(`❌ Approve failed: ${brief}`);
-    }
-  }
-
-  return renderSellMenu(ctx);
 });
 
 /* ---------- SELL EXEC (single wallet) ---------- */
