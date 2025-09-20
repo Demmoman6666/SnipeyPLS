@@ -3202,7 +3202,7 @@ async function renderSellMenu(ctx: any) {
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSellMenu(ctx); });
 
-/* Sell ▸ Approve (ALL wallets) */
+/* Sell ▸ Approve (ALL wallets, with "transaction sent" + success messages) */
 bot.action('sell_approve', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
@@ -3214,24 +3214,57 @@ bot.action('sell_approve', async (ctx) => {
     return showMenu(ctx, 'WPLS doesn’t require approval.', sellMenu());
 
   const token = u.token_address!;
+  const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
+
   try {
     const gas = await computeGas(ctx.from.id);
 
-    const results = await Promise.allSettled(
-      wallets.map(async (w) => {
-        const hashesOrLinks = await approveAllRouters(getPrivateKey(w), token, gas);
-        return `• ${short(w.address)}: ${Array.isArray(hashesOrLinks) ? hashesOrLinks.join(', ') : String(hashesOrLinks)}`;
-      })
-    );
+    // Process wallets sequentially so the user sees per-wallet progress
+    for (const w of wallets) {
+      const pendingMsg = await ctx.reply(`⏳ Approving routers for ${short(w.address)}…`);
+      try {
+        const res = await approveAllRouters(getPrivateKey(w), token, gas);
+        const hashes: string[] = Array.isArray(res)
+          ? res.filter(Boolean) as string[]
+          : (res ? [res as unknown as string] : []);
 
-    const lines = results.map((r, i) => {
-      const wa = wallets[i];
-      if (r.status === 'fulfilled') return r.value;
-      const msg = (r.reason?.message ?? String(r.reason));
-      return `• ${short(wa.address)}: FAILED — ${msg}`;
-    });
+        if (!hashes.length) {
+          try {
+            await bot.telegram.editMessageText(
+              chatId, pendingMsg.message_id, undefined,
+              `Nothing to approve for ${short(w.address)} (already approved).`
+            );
+          } catch {/* ignore */}
+          continue;
+        }
 
-    await ctx.reply(`Approve sent for all wallets:\n${lines.join('\n')}`);
+        // Announce first tx like Buy/Sell: "transaction sent <link>"
+        const first = hashes[0];
+        const link = otter(first);
+        try {
+          await bot.telegram.editMessageText(chatId, pendingMsg.message_id, undefined, `transaction sent ${link}`);
+        } catch {
+          await ctx.reply(`transaction sent ${link}`);
+        }
+
+        // Wait for all approval txs for this wallet
+        await Promise.all(hashes.map(h => provider.waitForTransaction(h).catch(() => null)));
+
+        // Replace pending line with success note
+        try { await bot.telegram.deleteMessage(chatId, pendingMsg.message_id); } catch {/* ignore */}
+        await ctx.reply(`✅ Approval successful for ${short(w.address)} (${hashes.length} tx)`);
+      } catch (e: any) {
+        const brief = conciseError(e);
+        try {
+          await bot.telegram.editMessageText(
+            chatId, pendingMsg.message_id, undefined,
+            `❌ Approve failed for ${short(w.address)}: ${brief}`
+          );
+        } catch {
+          await ctx.reply(`❌ Approve failed for ${short(w.address)}: ${brief}`);
+        }
+      }
+    }
   } catch (e: any) {
     await ctx.reply('Approve failed: ' + (e?.message ?? String(e)));
   }
