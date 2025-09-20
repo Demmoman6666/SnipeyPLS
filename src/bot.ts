@@ -3202,28 +3202,40 @@ async function renderSellMenu(ctx: any) {
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSellMenu(ctx); });
 
-/* Sell ▸ Approve */
+/* Sell ▸ Approve (ALL wallets) */
 bot.action('sell_approve', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
 
-  // Use selected wallet if present, else active or first wallet
-  const selectedId = sellWalletSel.get(ctx.from.id);
-  const w = selectedId
-    ? getWalletById(ctx.from.id, selectedId)
-    : (getActiveWallet(ctx.from.id) || listWallets(ctx.from.id)[0]);
-
-  if (!w || !u?.token_address) return showMenu(ctx, 'Need a wallet and token set first.', sellMenu());
+  const wallets = listWallets(ctx.from.id);
+  if (!wallets.length) return showMenu(ctx, 'No wallets.', sellMenu());
+  if (!u?.token_address) return showMenu(ctx, 'Need a token set first.', sellMenu());
   if (u.token_address.toLowerCase() === WPLS)
     return showMenu(ctx, 'WPLS doesn’t require approval.', sellMenu());
+
+  const token = u.token_address!;
   try {
     const gas = await computeGas(ctx.from.id);
-    const token = u.token_address!;
-    const results = await approveAllRouters(getPrivateKey(w), token, gas);
-    await ctx.reply(`Approve sent:\n${results.join('\n')}`);
+
+    const results = await Promise.allSettled(
+      wallets.map(async (w) => {
+        const hashesOrLinks = await approveAllRouters(getPrivateKey(w), token, gas);
+        return `• ${short(w.address)}: ${Array.isArray(hashesOrLinks) ? hashesOrLinks.join(', ') : String(hashesOrLinks)}`;
+      })
+    );
+
+    const lines = results.map((r, i) => {
+      const wa = wallets[i];
+      if (r.status === 'fulfilled') return r.value;
+      const msg = (r.reason?.message ?? String(r.reason));
+      return `• ${short(wa.address)}: FAILED — ${msg}`;
+    });
+
+    await ctx.reply(`Approve sent for all wallets:\n${lines.join('\n')}`);
   } catch (e: any) {
     await ctx.reply('Approve failed: ' + (e?.message ?? String(e)));
   }
+
   return renderSellMenu(ctx);
 });
 
