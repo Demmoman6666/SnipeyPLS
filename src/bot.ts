@@ -3222,17 +3222,21 @@ bot.action('sell_approve', async (ctx) => {
     // Fire all wallet approvals in parallel
     const tasks = wallets.map(async (w) => {
       try {
-        const res = await approveAllRouters(
+        const res: any = await approveAllRouters(
           getPrivateKey(w),
           token,
           gas,
           ethers.MaxUint256 // approve max
         );
 
-        // Normalize to an array of hashes
+        // Normalize to an array of tx hashes
         const hashes: string[] = Array.isArray(res)
-          ? res.map((t: any) => t?.hash ?? t).filter(Boolean)
-          : (res?.hash ? [res.hash] : (typeof res === 'string' ? [res] : []));
+          ? res
+              .map((t: any) => (typeof t === 'string' ? t : t?.hash))
+              .filter((h: any): h is string => typeof h === 'string')
+          : (typeof res === 'string'
+              ? [res]
+              : (res && (res as any).hash ? [(res as any).hash] : []));
 
         if (!hashes.length) {
           await ctx.reply(`✅ Already approved — ${short(w.address)}`);
