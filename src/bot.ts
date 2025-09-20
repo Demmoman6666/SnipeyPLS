@@ -3202,7 +3202,7 @@ async function renderSellMenu(ctx: any) {
 
 bot.action('menu_sell', async (ctx) => { await ctx.answerCbQuery(); pending.delete(ctx.from.id); return renderSellMenu(ctx); });
 
-/* Sell ▸ Approve (ALL wallets simultaneously; one “transaction sent” message per wallet, auto-updated on confirm) */
+/* Sell ▸ Approve (ALL wallets simultaneously; 1 "transaction sent <link>" per wallet, updated on confirm) */
 bot.action('sell_approve', async (ctx) => {
   await ctx.answerCbQuery();
   const u = getUserSettings(ctx.from.id);
@@ -3215,6 +3215,13 @@ bot.action('sell_approve', async (ctx) => {
 
   const token = u.token_address!;
   const chatId = (ctx.chat?.id ?? ctx.from?.id) as (number | string);
+
+  // Build a clean otter link from any return shape ("PULSEX_V1: 0x...", Tx object, or plain hash)
+  const txLink = (x: any): string | null => {
+    const raw = typeof x === 'string' ? x : (x && (x as any).hash ? (x as any).hash : '');
+    const m = String(raw).match(/0x[0-9a-fA-F]{64}/);
+    return m ? `https://otter.pulsechain.com/tx/${m[0]}` : null;
+  };
 
   try {
     const gas = await computeGas(ctx.from.id);
@@ -3229,38 +3236,40 @@ bot.action('sell_approve', async (ctx) => {
           ethers.MaxUint256 // approve max
         );
 
-        // Normalize to an array of tx hashes
-        const hashes: string[] = Array.isArray(res)
-          ? res
-              .map((t: any) => (typeof t === 'string' ? t : t?.hash))
-              .filter((h: any): h is string => typeof h === 'string')
-          : (typeof res === 'string'
-              ? [res]
-              : (res && (res as any).hash ? [(res as any).hash] : []));
+        // Normalize into array of tx hashes/objects → then extract links
+        const items: any[] = Array.isArray(res) ? res : (res ? [res] : []);
+        const links: string[] = items
+          .map(txLink)
+          .filter((s: string | null): s is string => !!s);
 
-        if (!hashes.length) {
+        if (!links.length) {
           await ctx.reply(`✅ Already approved — ${short(w.address)}`);
           return;
         }
 
-        // One "transaction sent" message per wallet (use the first hash as the link)
-        const first = hashes[0];
-        const link = otter(first);
-        const sentMsg = await ctx.reply(`transaction sent ${link} — ${short(w.address)}`);
+        // Immediately show "transaction sent <link>" for this wallet using the first tx
+        const firstLink = links[0];
+        const sentMsg = await ctx.reply(`transaction sent ${firstLink} — ${short(w.address)}`);
 
-        // Wait for all approval txs for this wallet to confirm
-        await Promise.all(hashes.map(h => provider.waitForTransaction(h).catch(() => null)));
+        // Wait for all approval txs for this wallet to confirm (in parallel)
+        await Promise.all(
+          items.map((it) => {
+            const h = typeof it === 'string' ? it : (it && (it as any).hash ? (it as any).hash : null);
+            const m = h ? String(h).match(/0x[0-9a-fA-F]{64}/) : null;
+            return m ? provider.waitForTransaction(m[0]).catch(() => null) : Promise.resolve(null);
+          })
+        );
 
-        // Update the same message to success
+        // Update the same message to success with the first link preserved
         try {
           await bot.telegram.editMessageText(
             chatId,
             sentMsg.message_id,
             undefined,
-            `✅ Approval successful — ${short(w.address)}\n${link}`
+            `✅ Approval successful — ${short(w.address)}\n${firstLink}`
           );
         } catch {
-          await ctx.reply(`✅ Approval successful — ${short(w.address)}\n${link}`);
+          await ctx.reply(`✅ Approval successful — ${short(w.address)}\n${firstLink}`);
         }
       } catch (e: any) {
         const brief = conciseError(e);
