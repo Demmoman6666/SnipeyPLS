@@ -559,27 +559,9 @@ bot.action('pos_sort_toggle', async (ctx) => {
   await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
 });
 
-// Expand/collapse row
-bot.action(/^pos_toggle:(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  const id = ctx.match[1];
-  const s = getPosState(ctx.from.id);
-  s.expanded[id] = !s.expanded[id];
-  const view = await buildPositionsViewState(ctx);
-  const text = renderPositionsMessage(view);
-  const kb = positionsMenu(view);
-  await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
-});
-
 // Rename wallet (stub)
 bot.action('pos_wallet_edit', async (ctx) => {
   await ctx.answerCbQuery('Rename from Wallets screen for now', { show_alert: false });
-});
-
-// PnL card (stub)
-bot.action(/^pos_pnl_card:(.+)$/, async (ctx) => {
-  const id = ctx.match[1];
-  await ctx.answerCbQuery(`PNL card for ${id} coming soon 👀`, { show_alert: false });
 });
 
 /* ---- Per-token actions (screen 2) ---- */
