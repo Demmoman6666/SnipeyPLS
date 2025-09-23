@@ -55,20 +55,12 @@ const STABLE = (process.env.USDC_ADDRESS || process.env.USDCe_ADDRESS || process
 const WPLS = (process.env.WPLS_ADDRESS || '0xA1077a294dDE1B09bB078844df40758a5D0f9a27').toLowerCase(); // Pulse WPLS
 
 /* ---------- Step 1: Avg Entry overlay (instant PnL after buy) ---------- */
-/**
- * We keep a lightweight, in-memory overlay of average entry for (user, token)
- * so the Sell menu can show Entry + PnL immediately after a buy — even before
- * any async DB readers catch up.
- */
 type AvgOverlayRec = {
-  tokens: number;          // cumulative tokens bought (since process start)
-  plsSpent: number;        // cumulative PLS spent for those tokens
-  avgPlsPerToken: number;  // derived = plsSpent / tokens
+  tokens: number;
+  plsSpent: number;
+  avgPlsPerToken: number;
 };
-
-// uid -> (tokenLower -> rec)
 const _avgEntryOverlay = new Map<number, Map<string, AvgOverlayRec>>();
-
 function _overlayMap(uid: number) {
   let m = _avgEntryOverlay.get(uid);
   if (!m) { m = new Map<string, AvgOverlayRec>(); _avgEntryOverlay.set(uid, m); }
@@ -80,42 +72,21 @@ function _overlayGet(uid: number, token: string) {
 function _overlaySet(uid: number, token: string, rec: AvgOverlayRec) {
   _overlayMap(uid).set(token.toLowerCase(), rec);
 }
-
-/* --- Avg entry cache helper (wraps getAvgEntry) ---
-   (Adds a tiny Map cache behind the overlay to avoid repeated DB work.) */
 const _avgEntryCache = new Map<string, { avgPlsPerToken: number }>();
 function _avgKey(uid: number, token: string, dec?: number) {
   return `${uid}:${token.toLowerCase()}:${dec ?? 'd'}`;
 }
-
-/**
- * Bump the overlay immediately after a BUY.
- * Also invalidates the small cache for this (uid, token, dec).
- * @param uid        Telegram user id
- * @param token      token address
- * @param plsInWei   PLS spent (wei)
- * @param outTokWei  tokens received (token units, wei with token decimals)
- * @param dec        token decimals
- */
 function bumpAvgAfterBuy(uid: number, token: string, plsInWei: bigint, outTokWei: bigint, dec: number) {
   const addPls = Number(ethers.formatEther(plsInWei));
   const addTok = Number(ethers.formatUnits(outTokWei, dec));
   if (!(addPls > 0) || !(addTok > 0)) return;
-
   const prev = _overlayGet(uid, token);
   const tokens = (prev?.tokens ?? 0) + addTok;
   const plsSpent = (prev?.plsSpent ?? 0) + addPls;
   const avgPlsPerToken = tokens > 0 ? (plsSpent / tokens) : 0;
-
   _overlaySet(uid, token, { tokens, plsSpent, avgPlsPerToken });
   _avgEntryCache.delete(_avgKey(uid, token, dec));
 }
-
-/**
- * Wrapper you can use instead of raw recordTrade in BUY flows.
- * - Writes the trade to DB
- * - Updates the in-memory avg-entry overlay so PnL shows instantly
- */
 async function recordBuyAndCache(
   telegramId: number,
   walletAddress: string,
@@ -125,27 +96,15 @@ async function recordBuyAndCache(
   routeKey: string,
   tokenDecimals: number
 ) {
-  try {
-    recordTrade(telegramId, walletAddress, token, 'BUY', amountInPlsWei, amountOutTokenWei, routeKey);
-  } finally {
-    bumpAvgAfterBuy(telegramId, token, amountInPlsWei, amountOutTokenWei, tokenDecimals);
-  }
+  try { recordTrade(telegramId, walletAddress, token, 'BUY', amountInPlsWei, amountOutTokenWei, routeKey); }
+  finally { bumpAvgAfterBuy(telegramId, token, amountInPlsWei, amountOutTokenWei, tokenDecimals); }
 }
-
-/**
- * Preferred getter for Avg Entry.
- * 1) Return the live overlay if present (instant after-buy view)
- * 2) Else return a cached DB aggregate if present
- * 3) Else compute via getAvgEntry(...) and cache it
- */
 function getAvgEntryCached(uid: number, token: string, decimals?: number) {
   const overlay = _overlayGet(uid, token);
   if (overlay) return { avgPlsPerToken: overlay.avgPlsPerToken };
-
   const key = _avgKey(uid, token, decimals);
   const hit = _avgEntryCache.get(key);
   if (hit) return hit;
-
   const v = getAvgEntry(uid, token, decimals ?? 18);
   if (v) _avgEntryCache.set(key, v);
   return v;
@@ -199,7 +158,6 @@ async function sendRefNudgeTo(telegramId: number) {
 
 /* ---- HTML escape + reply helper ---- */
 const esc = (s: string) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
 function replyHTML(ctx: any, html: string, extra: any = {}) {
   return ctx.reply(html, {
     parse_mode: 'HTML',
@@ -291,7 +249,139 @@ function walletDisplay(w: any, idx: number): { label: string; address: string } 
   return { label, address };
 }
 
-// Simple UI state per user for Positions
+// ——— Prices & token discovery helpers ———
+
+// cache PLS→USD for 45s
+let _plsUsdCache: { v: number | null, t: number } = { v: null, t: 0 };
+async function getPlsUsd(): Promise<number | null> {
+  const now = Date.now();
+  if (now - _plsUsdCache.t < 45_000) return _plsUsdCache.v;
+  if (!STABLE) { _plsUsdCache = { v: null, t: now }; return null; }
+  try {
+    const onePls = ethers.parseUnits('1', 18);
+    const q = await bestQuoteSell(WPLS, STABLE, onePls);
+    // assume stable has 6 decimals typical for USDC
+    const usd = Number(ethers.formatUnits(q?.amountOut ?? 0n, 6));
+    _plsUsdCache = { v: Number.isFinite(usd) ? usd : null, t: now };
+  } catch {
+    _plsUsdCache = { v: null, t: now };
+  }
+  return _plsUsdCache.v;
+}
+
+const isAddr = (s: any) => typeof s === 'string' && /^0x[0-9a-fA-F]{40}$/.test(s);
+
+/** Collect likely token addresses to check:
+ *  - overlay tokens from this process (recent buys)
+ *  - currently selected token in user settings
+ *  - tokens in open limit orders (if your DB returns them)
+ */
+async function discoverCandidateTokens(uid: number): Promise<string[]> {
+  const set = new Set<string>();
+  // overlay
+  const m = _avgEntryOverlay.get(uid);
+  if (m) for (const k of m.keys()) set.add(k.toLowerCase());
+  // user settings
+  const u = await getUserSettings(uid).catch(() => null as any);
+  for (const key of ['token', 'token_address', 'current_token', 'tokenAddress']) {
+    const v = u?.[key];
+    if (isAddr(v)) set.add(String(v).toLowerCase());
+  }
+  // open limit orders
+  try {
+    const opens = await getOpenLimitOrders(uid as any);
+    if (Array.isArray(opens)) {
+      for (const row of opens) {
+        const cand = row?.token || row?.token_address || row?.ca;
+        if (isAddr(cand)) set.add(String(cand).toLowerCase());
+      }
+    }
+  } catch { /* ignore */ }
+  return [...set];
+}
+
+// Build one PositionItemView from chain + quotes
+async function buildPositionItem(uid: number, tokenAddr: string, walletAddr: string): Promise<PositionItemView | null> {
+  try {
+    const token = tokenAddr.toLowerCase();
+    const c = erc20(token, provider);
+    const [decimals, symbol, bal] = await Promise.all([
+      c.decimals(),
+      c.symbol().catch(() => 'TOKEN'),
+      c.balanceOf(walletAddr),
+    ]);
+
+    // skip empty balances
+    if (bal === 0n) return null;
+
+    // price in PLS: 1 token -> WPLS
+    let pricePlsPerToken = 0;
+    if (token === WPLS) {
+      pricePlsPerToken = 1;
+    } else {
+      try {
+        const q = await bestQuoteSell(token, WPLS, ethers.parseUnits('1', decimals));
+        pricePlsPerToken = Number(ethers.formatUnits(q?.amountOut ?? 0n, 18));
+      } catch { pricePlsPerToken = 0; }
+    }
+
+    const qtyTokens = Number(ethers.formatUnits(bal, decimals));
+    const valuePls = qtyTokens * pricePlsPerToken;
+    const plsUsd = await getPlsUsd();
+    const valueUsd = plsUsd ? valuePls * plsUsd : null;
+
+    // Avg entry & PNL
+    const avg = getAvgEntryCached(uid, token, decimals);
+    const avgPls = avg?.avgPlsPerToken ?? null;
+    let pnlPctStr = '—', pnlAbsUsdStr = '', pnlUp: boolean | undefined = undefined, pnlPlsStr = '—', pnlPlsAbsStr = '';
+    if (avgPls && avgPls > 0 && pricePlsPerToken > 0) {
+      const pct = ((pricePlsPerToken - avgPls) / avgPls) * 100;
+      pnlPctStr = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+      const absPls = (pricePlsPerToken - avgPls) * qtyTokens;
+      pnlPlsStr = `${pct >= 0 ? '+' : ''}${(absPls / (qtyTokens || 1)).toFixed(2)}%`; // keep same style
+      pnlPlsAbsStr = `(${absPls.toFixed(6)} PLS)`;
+      pnlUp = pct >= 0;
+      if (plsUsd) {
+        const absUsd = absPls * plsUsd;
+        const sign = absUsd >= 0 ? '+' : '';
+        pnlAbsUsdStr = `(${sign}${fmtUsdCompact(absUsd)})`;
+      }
+    }
+
+    // Price & MC display (MC unknown without supply/oracle; show price only)
+    const priceUsdStr = plsUsd && pricePlsPerToken > 0 ? fmtUsdPrice(pricePlsPerToken * plsUsd) : '—';
+    const priceMcapStr = `${priceUsdStr} — —`;
+
+    const item: PositionItemView = {
+      id: token,
+      symbol: symbol || token.slice(0, 6).toUpperCase(),
+      trend: pnlUp === false ? '📉' : '📈',
+      positionValue: `${valuePls.toFixed(6)} PLS${valueUsd != null ? ` (${fmtUsdCompact(valueUsd)})` : ''}`,
+      expanded: false,
+      contract: token,
+      priceUsd: priceUsdStr,
+      mcapUsd: '—',
+      avgEntryUsd: avgPls && plsUsd ? fmtUsdPrice(avgPls * plsUsd) : '—',
+      avgEntryMcapUsd: '—',
+      balance: qtyTokens.toLocaleString('en-GB'),
+      buysValue: 'N/A',
+      buysCount: 0,
+      sellsValue: 'N/A',
+      sellsCount: 0,
+      pnlUsdPct: pnlPctStr,
+      pnlUsdAbs: pnlAbsUsdStr,
+      pnlUsdUp: pnlUp,
+      pnlPlsPct: pnlPlsStr,
+      pnlPlsAbs: pnlPlsAbsStr,
+      pnlPlsUp: pnlUp,
+    };
+    return item;
+  } catch {
+    return null;
+  }
+}
+
+/* ---- Simple UI state per user ---- */
 type PosUiState = { walletIndex: number; expanded: Record<string, boolean>; sort: 'value'|'pnl' };
 const posUi = new Map<string | number, PosUiState>();
 function getPosState(userId: string | number): PosUiState {
@@ -300,12 +390,12 @@ function getPosState(userId: string | number): PosUiState {
   return s;
 }
 
-// Build the Positions view-model (populate items with your data later)
+// Build the Positions view-model (now with real balances & quotes where possible)
 async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
   const uid = ctx.from.id;
   const state = getPosState(uid);
 
-  const wallets = await listWallets(uid); // your existing fn
+  const wallets = await listWallets(uid);
   const count = Math.max(1, (wallets?.length || 1));
   if (state.walletIndex >= count) state.walletIndex = 0;
   if (state.walletIndex < 0) state.walletIndex = count - 1;
@@ -313,24 +403,64 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
   const active = wallets?.[state.walletIndex] || (await getActiveWallet(uid));
   const { label: walletLabel, address: walletAddress } = walletDisplay(active, state.walletIndex);
 
-  // TODO: Map your real open positions into PositionItemView[]
-  const items: PositionItemView[] = []; // keep empty until wired
+  // discover tokens to check
+  const candidates = await discoverCandidateTokens(uid);
+
+  // build items
+  const rawItems = (await Promise.all(candidates.map(ca => buildPositionItem(uid, ca, walletAddress))))
+    .filter(Boolean) as PositionItemView[];
+
+  // sort
+  if (state.sort === 'value') {
+    rawItems.sort((a, b) => {
+      const av = Number(a.positionValue.split(' ')[0]) || 0;
+      const bv = Number(b.positionValue.split(' ')[0]) || 0;
+      return bv - av;
+    });
+  } else {
+    // by PnL %
+    rawItems.sort((a, b) => {
+      const ap = parseFloat((a.pnlUsdPct || '0').replace('%','')) || -9999;
+      const bp = parseFloat((b.pnlUsdPct || '0').replace('%','')) || -9999;
+      return bp - ap;
+    });
+  }
+
+  // apply expanded state; expand first row if none
+  const hasAnyExpanded = rawItems.some(it => state.expanded[it.id]);
+  const items = rawItems.map((it, idx) => ({
+    ...it,
+    expanded: hasAnyExpanded ? !!state.expanded[it.id] : idx === 0, // open first by default
+  }));
+
+  // wallet PLS balance (native)
+  let walletPlsStr = '—';
+  try {
+    const bal = await provider.getBalance(walletAddress);
+    walletPlsStr = `${fmtPls(bal)} PLS`;
+  } catch {}
+
+  // positions total in PLS (sum)
+  const totalPls = items.reduce((acc, it) => {
+    const n = Number(it.positionValue.split(' ')[0]) || 0;
+    return acc + n;
+  }, 0);
+  const plsUsd = await getPlsUsd();
+  const positionsTotal = `${totalPls.toFixed(6)} PLS${plsUsd != null ? ` (${fmtUsdCompact(totalPls * plsUsd)})` : ''}`;
 
   return {
     walletIndex: state.walletIndex + 1,
     walletCount: count,
     walletLabel,
     walletAddress,
-    walletBalance: '—',
-    positionsTotal: '—',
-    items: items.map(it => ({ ...it, expanded: !!state.expanded[it.id] })),
+    walletBalance: walletPlsStr,
+    positionsTotal,
+    items: items.map(it => ({ ...it, expanded: !!it.expanded })), // already expanded applied
     sortLabel: state.sort === 'value' ? 'By: Value' : 'By: PnL',
   };
 }
 
 /* ---- Positions list (screen 1) ---- */
-
-// Open Positions from main menu
 bot.action('positions', async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const view = await buildPositionsViewState(ctx);
@@ -342,8 +472,6 @@ bot.action('positions', async (ctx) => {
     reply_markup: kb.reply_markup,
   });
 });
-
-// Refresh list
 bot.action('pos_refresh', async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const view = await buildPositionsViewState(ctx);
@@ -355,8 +483,6 @@ bot.action('pos_refresh', async (ctx) => {
     reply_markup: kb.reply_markup,
   });
 });
-
-// Wallet prev/next
 bot.action('pos_wallet_prev', async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const s = getPosState(ctx.from.id); s.walletIndex--;
@@ -373,8 +499,6 @@ bot.action('pos_wallet_next', async (ctx) => {
   const kb = positionsMenu(view);
   await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
 });
-
-// Sort toggle
 bot.action('pos_sort_toggle', async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const s = getPosState(ctx.from.id);
@@ -384,8 +508,6 @@ bot.action('pos_sort_toggle', async (ctx) => {
   const kb = positionsMenu(view);
   await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
 });
-
-// Expand/collapse row
 bot.action(/^pos_toggle:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const id = ctx.match[1];
@@ -396,23 +518,18 @@ bot.action(/^pos_toggle:(.+)$/, async (ctx) => {
   const kb = positionsMenu(view);
   await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
 });
-
-// Rename wallet (stub)
 bot.action('pos_wallet_edit', async (ctx) => {
   await ctx.answerCbQuery('Rename from Wallets screen for now', { show_alert: false });
 });
-
-// PnL card (stub)
 bot.action(/^pos_pnl_card:(.+)$/, async (ctx) => {
   const id = ctx.match[1];
   await ctx.answerCbQuery(`PNL card for ${id} coming soon 👀`, { show_alert: false });
 });
 
 /* ---- Per-token actions (screen 2) ---- */
-
 bot.action(/^pos_token:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
-  const id = ctx.match[1]; // contract or internal id
+  const id = ctx.match[1];
   const v: TokenActionsView = {
     id,
     symbol: id.slice(0, 6).toUpperCase(),
@@ -426,7 +543,6 @@ bot.action(/^pos_token:(.+)$/, async (ctx) => {
     reply_markup: kb.reply_markup,
   });
 });
-
 bot.action(/^pos_buy_amt:(.+?):([\d.]+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const id = ctx.match[1];
@@ -439,7 +555,6 @@ bot.action(/^pos_buy_amt:(.+?):([\d.]+)$/, async (ctx) => {
     await ctx.reply(`❌ Could not set quick buy: ${e?.message || e}`, { parse_mode: 'HTML' });
   }
 });
-
 bot.action(/^pos_sell_pct:(.+?):(\d{1,3})$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const id = ctx.match[1];
@@ -452,7 +567,6 @@ bot.action(/^pos_sell_pct:(.+?):(\d{1,3})$/, async (ctx) => {
     await ctx.reply(`❌ Could not set quick sell: ${e?.message || e}`, { parse_mode: 'HTML' });
   }
 });
-
 bot.action(/^pos_token_refresh:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const id = ctx.match[1];
@@ -464,16 +578,12 @@ bot.action(/^pos_token_refresh:(.+)$/, async (ctx) => {
     reply_markup: kb.reply_markup,
   });
 });
-
 bot.action(/^pos_approve:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const id = ctx.match[1];
-  try {
-    await setToken(ctx.from.id, id); // no .catch on possibly-void fn
-  } catch { /* ignore */ }
+  try { await setToken(ctx.from.id, id); } catch {}
   await ctx.reply(`🛡 Approve requested for <code>${id}</code>.\nOpen the Sell menu to run approval if required.`, { parse_mode: 'HTML' });
 });
-
 bot.action(/^pos_more:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const id = ctx.match[1];
