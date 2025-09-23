@@ -205,7 +205,6 @@ export function renderPositionsMessage(v: PositionsViewState): string {
       `• Sells: ${esc(sellsValue)} • (${it.sellsCount ?? 0} sells)`,
       `• PNL USD: ${esc(it.pnlUsdPct || '—')} ${esc(it.pnlUsdAbs || '')} ${pnlUsdBadge}`,
       `• PNL PLS: ${esc(it.pnlPlsPct || '—')} ${esc(it.pnlPlsAbs || '')} ${pnlPlsBadge}`,
-      'PNL Card 🖼️',
     ].join('\n');
   });
 
@@ -219,7 +218,7 @@ export function renderPositionsMessage(v: PositionsViewState): string {
  * - Prev / Rename / Next wallet
  * - Sort toggle
  * - Token rows: [SYMBOL — trend — value] ➜ opens per-token actions
- * - Each token also has [Show/Hide] + [PNL Card]
+ * - Each token also has [Show/Hide]
  */
 export function positionsMenu(v: PositionsViewState) {
   const rows: any[][] = [];
@@ -241,7 +240,6 @@ export function positionsMenu(v: PositionsViewState) {
     rows.push([Markup.button.callback(title.trim(), `pos_token:${it.id}`)]);
     rows.push([
       Markup.button.callback(it.expanded ? 'Hide' : 'Show', `pos_toggle:${it.id}`),
-      Markup.button.callback('PNL Card 🖼️', `pos_pnl_card:${it.id}`),
     ]);
   }
 
