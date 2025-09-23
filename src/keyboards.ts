@@ -214,31 +214,68 @@ export function renderPositionsMessage(v: PositionsViewState): string {
 
 /**
  * POSITIONS LIST keyboard (screen 1)
- * Structure requested:
- * 1) Previous Wallet — Next Wallet
- * 2) [Token rows] (tap to select token actions)
- * 3) Sort By
- * 4) Back — Refresh
+ * Desired layout:
+ *  Prev — Next
+ *  Buy 250k PLS — Buy 1M PLS — Buy X PLS
+ *  [tokens row]
+ *  Sell 50% — Sell 100%
+ *  Sell Initial — Sell X %
+ *  Sort By
+ *  Back — Refresh
+ *
+ * NOTE: callbacks are placeholders to wire in bot.ts:
+ *  - pos_list_buy_amt:<number> | pos_list_buy_custom
+ *  - pos_sell_active_pct:<pct> | pos_sell_active_initial | pos_sell_active_custom
+ *  - pos_token:<id> opens per-token actions (existing)
  */
 export function positionsMenu(v: PositionsViewState) {
   const rows: any[][] = [];
 
-  // 1) Previous / Next wallet
+  // Row 1: Prev / Next (no rename, per request)
   rows.push([
-    Markup.button.callback('◀️ Previous Wallet', 'pos_wallet_prev'),
-    Markup.button.callback('Next Wallet ▶️', 'pos_wallet_next'),
+    Markup.button.callback('◀️ Prev', 'pos_wallet_prev'),
+    Markup.button.callback('Next ▶️', 'pos_wallet_next'),
   ]);
 
-  // 2) Token selection rows
-  for (const it of v.items) {
-    const title = `${it.symbol} — ${it.trend || ''} — ${it.positionValue}`;
-    rows.push([Markup.button.callback(title.trim(), `pos_token:${it.id}`)]);
+  // Row 2: Quick Buys (global – acts on the currently selected token in your handlers)
+  rows.push([
+    Markup.button.callback('Buy 250k PLS', 'pos_list_buy_amt:250000'),
+    Markup.button.callback('Buy 1M PLS',   'pos_list_buy_amt:1000000'),
+    Markup.button.callback('Buy X PLS',    'pos_list_buy_custom'),
+  ]);
+
+  // Row 3: Token strip (click to open per-token actions)
+  if (v.items && v.items.length) {
+    // compact label: SYMBOL — value (trend optional)
+    const tokenButtons = v.items.map(it =>
+      Markup.button.callback(
+        `${it.symbol} — ${it.positionValue}`,
+        `pos_token:${it.id}`
+      )
+    );
+    // try to keep on one row; if too many, Telegram will wrap visually or we chunk 3 per row
+    const MAX_PER_ROW = 3;
+    for (let i = 0; i < tokenButtons.length; i += MAX_PER_ROW) {
+      rows.push(tokenButtons.slice(i, i + MAX_PER_ROW));
+    }
   }
 
-  // 3) Sort by
-  rows.push([Markup.button.callback(`↕️ Sort By (${v.sortLabel || 'By: Value'})`, 'pos_sort_toggle')]);
+  // Row 4: Sell 50% / 100%
+  rows.push([
+    Markup.button.callback('Sell 50 %',  'pos_sell_active_pct:50'),
+    Markup.button.callback('Sell 100 %', 'pos_sell_active_pct:100'),
+  ]);
 
-  // 4) Back / Refresh
+  // Row 5: Sell Initial / Sell X %
+  rows.push([
+    Markup.button.callback('Sell Initial', 'pos_sell_active_initial'),
+    Markup.button.callback('Sell X %',     'pos_sell_active_custom'),
+  ]);
+
+  // Row 6: Sort toggle
+  rows.push([Markup.button.callback(`↕️ Sort: ${v.sortLabel || 'By: Value'}`, 'pos_sort_toggle')]);
+
+  // Row 7: Back / Refresh (bottom)
   rows.push([
     Markup.button.callback('⬅️ Back', 'main_back'),
     Markup.button.callback('🔄 Refresh', 'pos_refresh'),
@@ -254,50 +291,42 @@ export interface TokenActionsView {
   symbol: string;             // e.g. "TOM"
   nativeSymbol?: 'PLS' | 'WPLS' | string; // label for native
   // Quick native buy amounts (strings to display & use in callbacks)
-  quickBuyAmts?: string[];    // (unused in new layout, kept for compat)
+  quickBuyAmts?: string[];    // e.g. ['0.5','1','5']
 }
 
 /**
  * Actions keyboard for a single token selected from Positions.
- * Requested structure:
- *  - Buy 250k PLS — Buy 1M PLS — Buy X PLS
- *  - Sell 50% — Sell 100%
- *  - Sell Initial — Sell X %
- *  - Back — Refresh
- *
- * NOTE: Handlers expected in bot.ts:
- *   pos_buy_pls:<ca>:<amtPLS>
- *   pos_buy_pls_custom:<ca>
- *   pos_sell_pct:<ca>:<pct>
- *   pos_sell_initial:<ca>
- *   pos_sell_pct_custom:<ca>
+ * Includes: quick buys in native, % sells, approve, back/refresh.
+ * You can wire callbacks in bot.ts to your existing buy/sell flows.
  */
 export function positionsTokenMenu(v: TokenActionsView) {
   const native = v.nativeSymbol || 'PLS';
+  const amts = v.quickBuyAmts && v.quickBuyAmts.length ? v.quickBuyAmts : ['0.5', '1', '5'];
+
   const rows: any[][] = [];
 
-  // Buy amounts row (absolute PLS)
+  // Quick Buys (native)
+  rows.push(amts.map(a =>
+    Markup.button.callback(`Buy ${a} ${native}`, `pos_buy_amt:${v.id}:${a}`)
+  ));
+
+  // Quick % Sells
   rows.push([
-    Markup.button.callback(`Buy 250k ${native}`, `pos_buy_pls:${v.id}:250000`),
-    Markup.button.callback(`Buy 1M ${native}`, `pos_buy_pls:${v.id}:1000000`),
-    Markup.button.callback(`Buy X ${native}`, `pos_buy_pls_custom:${v.id}`),
+    Markup.button.callback('Sell 25 %', `pos_sell_pct:${v.id}:25`),
+    Markup.button.callback('Sell 50 %', `pos_sell_pct:${v.id}:50`),
+    Markup.button.callback('Sell 75 %', `pos_sell_pct:${v.id}:75`),
+    Markup.button.callback('Sell 100 %', `pos_sell_pct:${v.id}:100`),
   ]);
 
-  // Sell 50% / 100%
+  // Extra actions row (customize as needed)
   rows.push([
-    Markup.button.callback('Sell 50%', `pos_sell_pct:${v.id}:50`),
-    Markup.button.callback('Sell 100%', `pos_sell_pct:${v.id}:100`),
+    Markup.button.callback('🛡 Approve', `pos_approve:${v.id}`),
+    Markup.button.callback('⚙️ More…', `pos_more:${v.id}`),
   ]);
 
-  // Sell Initial / Sell X %
+  // Nav
   rows.push([
-    Markup.button.callback('Sell Initial', `pos_sell_initial:${v.id}`),
-    Markup.button.callback('Sell X %', `pos_sell_pct_custom:${v.id}`),
-  ]);
-
-  // Back / Refresh
-  rows.push([
-    Markup.button.callback('⬅️ Back', 'positions'),
+    Markup.button.callback('⬅️ Back', 'positions'),   // back to list
     Markup.button.callback('🔄 Refresh', `pos_token_refresh:${v.id}`),
   ]);
 
