@@ -504,7 +504,7 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
 
 /* ---- Positions list (screen 1) ---- */
 
-// local keyboard builder: tokens laid out 4 per row, no Hide buttons
+// local keyboard builder: tokens laid out 4 per row, no Hide buttons, no Rename button
 function _buildPositionsKeyboard(v: PositionsViewState) {
   const rows: any[][] = [];
 
@@ -514,10 +514,9 @@ function _buildPositionsKeyboard(v: PositionsViewState) {
     Markup.button.callback('🔄 Refresh', 'pos_refresh'),
   ]);
 
-  // Wallet nav
+  // Wallet nav (Prev / Next only)
   rows.push([
     Markup.button.callback('◀️ Prev', 'pos_wallet_prev'),
-    Markup.button.callback(`✏️ Rename ${v.walletLabel}`, 'pos_wallet_edit'),
     Markup.button.callback('Next ▶️', 'pos_wallet_next'),
   ]);
 
