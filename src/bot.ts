@@ -640,25 +640,37 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
 
 /* ---- Positions list (screen 1) ---- */
 
-// local keyboard builder: wallet nav ➜ SELL rows ➜ BUY row ➜ token buttons (max 4/row) ➜ sort bottom
+// local keyboard builder: Prev/Next ➜ Buy row ➜ token select rows ➜ Sell rows ➜ Sort ➜ Back/Refresh
 function _buildPositionsKeyboard(ctx: any, v: PositionsViewState) {
   const rows: any[][] = [];
   const s: any = getPosState(ctx.from.id); // using `any` so we can store selectedToken/flags
   const selected: string | undefined = s.selectedToken;
 
-  // Top controls
-  rows.push([
-    Markup.button.callback('⬅️ Back', 'main_back'),
-    Markup.button.callback('🔄 Refresh', 'pos_refresh'),
-  ]);
-
-  // Wallet nav (Prev / Next only)
+  // Wallet nav (Prev / Next) — TOP
   rows.push([
     Markup.button.callback('◀️ Prev', 'pos_wallet_prev'),
     Markup.button.callback('Next ▶️', 'pos_wallet_next'),
   ]);
 
-  // SELL rows (require a selected token)
+  // BUY row — shown near token selection
+  rows.push([
+    Markup.button.callback('Buy 250k PLS', 'pos_quick_buy:250000'),
+    Markup.button.callback('Buy 1M PLS', 'pos_quick_buy:1000000'),
+    Markup.button.callback('Buy X PLS', 'pos_quick_buy:X'),
+  ]);
+
+  // Token selection buttons (max 2 per row). Clicking selects; it does not navigate.
+  const tokenButtons = v.items.map(it => {
+    const label =
+      `${selected === it.id ? '✅ ' : ''}` +
+      `${it.symbol} — ${it.trend || ''} — ${it.positionValue}`.trim();
+    return Markup.button.callback(label, `pos_select:${it.id}`);
+  });
+  for (let i = 0; i < tokenButtons.length; i += 2) {
+    rows.push(tokenButtons.slice(i, i + 2));
+  }
+
+  // SELL rows (operate on selected token)
   rows.push([
     Markup.button.callback('Sell 50 %', 'pos_sell_pct_sel:50'),
     Markup.button.callback('Sell 100 %', 'pos_sell_pct_sel:100'),
@@ -668,26 +680,16 @@ function _buildPositionsKeyboard(ctx: any, v: PositionsViewState) {
     Markup.button.callback('Sell X %', 'pos_sell_x'),
   ]);
 
-  // BUY row (requires a selected token)
+  // Sort row
   rows.push([
-    Markup.button.callback('Buy 250k PLS', 'pos_quick_buy:250000'),
-    Markup.button.callback('Buy 1M PLS', 'pos_quick_buy:1000000'),
-    Markup.button.callback('Buy X PLS', 'pos_quick_buy:X'),
+    Markup.button.callback(`↕️ Sort: ${v.sortLabel || 'By: Value'}`, 'pos_sort_toggle'),
   ]);
 
-  // Token selection buttons (max 4 per row). Clicking selects; it does not navigate.
-  const tokenButtons = v.items.map(it => {
-    const label =
-      `${selected === it.id ? '✅ ' : ''}` +
-      `${it.symbol} — ${it.trend || ''} — ${it.positionValue}`.trim();
-    return Markup.button.callback(label, `pos_select:${it.id}`);
-  });
-  for (let i = 0; i < tokenButtons.length; i += 4) {
-    rows.push(tokenButtons.slice(i, i + 4));
-  }
-
-  // Sort row at the bottom
-  rows.push([Markup.button.callback(`↕️ Sort: ${v.sortLabel || 'By: Value'}`, 'pos_sort_toggle')]);
+  // Bottom controls — BACK / REFRESH
+  rows.push([
+    Markup.button.callback('⬅️ Back', 'main_back'),
+    Markup.button.callback('🔄 Refresh', 'pos_refresh'),
+  ]);
 
   return Markup.inlineKeyboard(rows);
 }
