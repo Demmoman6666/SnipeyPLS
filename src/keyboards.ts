@@ -208,8 +208,8 @@ export function renderPositionsMessage(v: PositionsViewState): string {
     ].join('\n');
   });
 
-  const tip = '\n💡 Click a token symbol to open quick actions.';
-  return [header, ...blocks, tip].join('\n\n').trim();
+  // Removed the bottom “💡 Click a token…” tip
+  return [header, ...blocks].join('\n\n').trim();
 }
 
 /**
