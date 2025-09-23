@@ -439,7 +439,7 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
     walletAddress,
     walletBalance: '—',          // unchanged (you can wire if you want)
     positionsTotal: '—',         // unchanged (you can wire if you want)
-    items: items.map(it => ({ ...it, expanded: !!state.expanded[it.id] })),
+items: items.map(it => ({ ...it, expanded: (state.expanded[it.id] ?? true) })),
     sortLabel: state.sort === 'value' ? 'By: Value' : 'By: PnL',
   };
 }
