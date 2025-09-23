@@ -11,6 +11,13 @@ import {
   limitTriggerMenu,
   // ✅ added this:
   snipeMenu,
+  // ✅ Positions UI (renderers + types)
+  renderPositionsMessage,
+  positionsMenu,
+  positionsTokenMenu,
+  type PositionsViewState,
+  type PositionItemView,
+  type TokenActionsView,
 } from './keyboards.js';
 import {
   listWallets, createWallet, importWallet, getActiveWallet, setToken, setGasBase, setGasPercent,
@@ -173,6 +180,7 @@ bot.action(/^copy:(0x[a-fA-F0-9]{40})$/, async (ctx: any) => {
     link_preview_options: { is_disabled: true }
   } as any);
 });
+
 /* ---------- Referral: config + helpers ---------- */
 const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@/, '');
 const REF_PREFIX = 'ref_';
@@ -273,6 +281,209 @@ function bigDivToDecimal(n: bigint, d: bigint, precision = 20): string {
   let frac = (q % scale).toString().padStart(precision, '0').replace(/0+$/, '');
   return frac ? `${intPart.toString()}.${frac}` : intPart.toString();
 }
+
+/* =========================
+   POSITIONS: glue + handlers
+   ========================= */
+
+// Friendly "coming soon" handler used elsewhere (Pump.Tires + pills)
+bot.action('noop', (ctx) => ctx.answerCbQuery('Coming soon 👀', { show_alert: false }));
+
+// Edit if possible, otherwise reply (prevents "message is not modified")
+async function sendOrEdit(ctx: any, text: string, extra: any) {
+  if (ctx.callbackQuery?.message) {
+    try { return await ctx.editMessageText(text, extra); } catch { /* fall through */ }
+  }
+  return ctx.reply(text, extra);
+}
+
+// Simple UI state per user for Positions
+type PosUiState = { walletIndex: number; expanded: Record<string, boolean>; sort: 'value'|'pnl' };
+const posUi = new Map<string | number, PosUiState>();
+function getPosState(userId: string | number): PosUiState {
+  const s = posUi.get(userId) || { walletIndex: 0, expanded: {}, sort: 'value' as const };
+  posUi.set(userId, s);
+  return s;
+}
+
+// Build the Positions view-model (populate items with your data later)
+async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
+  const uid = ctx.from.id;
+  const state = getPosState(uid);
+
+  const wallets = await listWallets(uid); // your existing fn
+  const count = Math.max(1, (wallets?.length || 1));
+  if (state.walletIndex >= count) state.walletIndex = 0;
+  if (state.walletIndex < 0) state.walletIndex = count - 1;
+
+  const active = wallets?.[state.walletIndex] || (await getActiveWallet(uid));
+  const walletLabel = active?.label || `W${state.walletIndex + 1}`;
+  const walletAddress = active?.address || '—';
+
+  // TODO: Map your real open positions into PositionItemView[]
+  const items: PositionItemView[] = []; // keep empty until wired
+
+  return {
+    walletIndex: state.walletIndex + 1,
+    walletCount: count,
+    walletLabel,
+    walletAddress,
+    walletBalance: '—',
+    positionsTotal: '—',
+    items: items.map(it => ({ ...it, expanded: !!state.expanded[it.id] })),
+    sortLabel: state.sort === 'value' ? 'By: Value' : 'By: PnL',
+  };
+}
+
+/* ---- Positions list (screen 1) ---- */
+
+// Open Positions from main menu
+bot.action('positions', async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const view = await buildPositionsViewState(ctx);
+  const text = renderPositionsMessage(view);
+  const kb = positionsMenu(view);
+  await sendOrEdit(ctx, text, {
+    parse_mode: 'HTML',
+    link_preview_options: { is_disabled: true },
+    reply_markup: kb.reply_markup,
+  });
+});
+
+// Refresh list
+bot.action('pos_refresh', async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const view = await buildPositionsViewState(ctx);
+  const text = renderPositionsMessage(view);
+  const kb = positionsMenu(view);
+  await sendOrEdit(ctx, text, {
+    parse_mode: 'HTML',
+    link_preview_options: { is_disabled: true },
+    reply_markup: kb.reply_markup,
+  });
+});
+
+// Wallet prev/next
+bot.action('pos_wallet_prev', async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const s = getPosState(ctx.from.id); s.walletIndex--;
+  const view = await buildPositionsViewState(ctx);
+  const text = renderPositionsMessage(view);
+  const kb = positionsMenu(view);
+  await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
+});
+bot.action('pos_wallet_next', async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const s = getPosState(ctx.from.id); s.walletIndex++;
+  const view = await buildPositionsViewState(ctx);
+  const text = renderPositionsMessage(view);
+  const kb = positionsMenu(view);
+  await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
+});
+
+// Sort toggle
+bot.action('pos_sort_toggle', async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const s = getPosState(ctx.from.id);
+  s.sort = (s.sort === 'value') ? 'pnl' : 'value';
+  const view = await buildPositionsViewState(ctx);
+  const text = renderPositionsMessage(view);
+  const kb = positionsMenu(view);
+  await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
+});
+
+// Expand/collapse row
+bot.action(/^pos_toggle:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const id = ctx.match[1];
+  const s = getPosState(ctx.from.id);
+  s.expanded[id] = !s.expanded[id];
+  const view = await buildPositionsViewState(ctx);
+  const text = renderPositionsMessage(view);
+  const kb = positionsMenu(view);
+  await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
+});
+
+// Rename wallet (stub)
+bot.action('pos_wallet_edit', async (ctx) => {
+  await ctx.answerCbQuery('Rename from Wallets screen for now', { show_alert: false });
+});
+
+// PnL card (stub)
+bot.action(/^pos_pnl_card:(.+)$/, async (ctx) => {
+  const id = ctx.match[1];
+  await ctx.answerCbQuery(`PNL card for ${id} coming soon 👀`, { show_alert: false });
+});
+
+/* ---- Per-token actions (screen 2) ---- */
+
+bot.action(/^pos_token:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const id = ctx.match[1]; // contract or internal id
+  const v: TokenActionsView = {
+    id,
+    symbol: id.slice(0, 6).toUpperCase(),
+    nativeSymbol: 'PLS',
+    quickBuyAmts: ['0.5', '1', '5'],
+  };
+  const kb = positionsTokenMenu(v);
+  await sendOrEdit(ctx, `Actions — <b>${v.symbol}</b>\nChoose a quick action below:`, {
+    parse_mode: 'HTML',
+    link_preview_options: { is_disabled: true },
+    reply_markup: kb.reply_markup,
+  });
+});
+
+bot.action(/^pos_buy_amt:(.+?):([\d.]+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const id = ctx.match[1];
+  const amt = ctx.match[2];
+  try {
+    await setToken(ctx.from.id, id);
+    await setBuyAmount(ctx.from.id, Number(amt));
+    await ctx.reply(`✅ Set token to <code>${id}</code> and amount to ${amt} PLS.\nOpen the Buy menu to execute.`, { parse_mode: 'HTML' });
+  } catch (e: any) {
+    await ctx.reply(`❌ Could not set quick buy: ${e?.message || e}`, { parse_mode: 'HTML' });
+  }
+});
+
+bot.action(/^pos_sell_pct:(.+?):(\d{1,3})$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const id = ctx.match[1];
+  const pct = Number(ctx.match[2]);
+  try {
+    await setToken(ctx.from.id, id);
+    await setSellPct(ctx.from.id, pct);
+    await ctx.reply(`✅ Set token to <code>${id}</code> and sell ${pct}%.\nOpen the Sell menu to execute.`, { parse_mode: 'HTML' });
+  } catch (e: any) {
+    await ctx.reply(`❌ Could not set quick sell: ${e?.message || e}`, { parse_mode: 'HTML' });
+  }
+});
+
+bot.action(/^pos_token_refresh:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const id = ctx.match[1];
+  const v: TokenActionsView = { id, symbol: id.slice(0, 6).toUpperCase(), nativeSymbol: 'PLS', quickBuyAmts: ['0.5','1','5'] };
+  const kb = positionsTokenMenu(v);
+  await sendOrEdit(ctx, `Actions — <b>${v.symbol}</b>\n(Refreshed)`, {
+    parse_mode: 'HTML',
+    link_preview_options: { is_disabled: true },
+    reply_markup: kb.reply_markup,
+  });
+});
+
+bot.action(/^pos_approve:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const id = ctx.match[1];
+  await setToken(ctx.from.id, id).catch(() => {});
+  await ctx.reply(`🛡 Approve requested for <code>${id}</code>.\nOpen the Sell menu to run approval if required.`, { parse_mode: 'HTML' });
+});
+
+bot.action(/^pos_more:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const id = ctx.match[1];
+  await ctx.reply(`More actions for <code>${id}</code> coming soon 👀`, { parse_mode: 'HTML' });
+});
 
 /* ---------- DexScreener helpers (price + liquidity + marketCap) ---------- */
 const _fetchAny: any = (globalThis as any).fetch?.bind(globalThis);
