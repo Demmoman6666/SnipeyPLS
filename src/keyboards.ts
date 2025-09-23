@@ -4,13 +4,18 @@ import { Markup } from 'telegraf';
 /** Main menu */
 export function mainMenu() {
   return Markup.inlineKeyboard([
+    // Row 1
     [Markup.button.callback('🟢 Buy', 'menu_buy'),
      Markup.button.callback('🔴 Sell', 'menu_sell')],
 
-    [Markup.button.callback('👛 Wallets', 'wallets'),
-     Markup.button.callback('🎯 Snipey', 'menu_snipe')],
+    // Row 2 (Pump.Tires, Snipey, Positions)
+    [Markup.button.callback('Pump.Tires (Coming soon)', 'noop'),
+     Markup.button.callback('🎯 Snipey', 'menu_snipe'),
+     Markup.button.callback('📊 Positions', 'positions')],
 
-    [Markup.button.callback('🤝 Referrals', 'referrals'),
+    // Row 3 (Wallets, Rewards, Settings)
+    [Markup.button.callback('👛 Wallets', 'wallets'),
+     Markup.button.callback('🤝 Rewards', 'referrals'),
      Markup.button.callback('⚙️ Settings', 'settings')],
   ]);
 }
