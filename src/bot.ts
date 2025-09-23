@@ -155,6 +155,13 @@ function getAvgEntryCached(uid: number, token: string, decimals?: number) {
   return v;
 }
 
+/** Invalidate avg-entry overlay + cache for a (user, token). Place near avg-entry helpers. */
+function invalidateAvgEntry(uid: number, token: string, decimals?: number) {
+  const t = token.toLowerCase();
+  _avgEntryOverlay.get(uid)?.delete(t);
+  _avgEntryCache.delete(_avgKey(uid, t, decimals));
+}
+
 // 🔗 Address helpers
 const addrExplorer = (addr: string) => `https://otter.pulsechain.com/address/${addr}`;
 
