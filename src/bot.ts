@@ -672,8 +672,9 @@ bot.action('pos_sell_initial', async (ctx) => {
   try {
     // active wallet + token data
     const wallets = await listWallets(uid);
-    const w = wallets?.[Math.max(0, Math.min((s.walletIndex ?? 0), (wallets?.length || 1) - 1))] || (await getActiveWallet(uid));
-    const walletAddr = (w?.address || w?.addr || w?.wallet) as string;
+    const idx = Math.max(0, Math.min((s.walletIndex ?? 0), (wallets?.length || 1) - 1));
+    const w = wallets?.[idx] || (await getActiveWallet(uid));
+    const { address: walletAddr } = walletDisplay(w, idx);
 
     const c = erc20(selected);
     const [dec, bal] = await Promise.all([c.decimals(), c.balanceOf(walletAddr)]);
