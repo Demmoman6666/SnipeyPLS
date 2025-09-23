@@ -315,8 +315,8 @@ async function getPlsUsd(): Promise<number | null> {
     const meta = await tokenMeta(STABLE);
     const dec = (meta as any)?.decimals ?? 6;
     const one = ethers.parseUnits('1', dec);
-// was: const q = await bestQuoteSell(token, one);
-const q = await bestQuoteSell(one, token);
+    // correct order: (amountIn: bigint, tokenIn: string)
+    const q = await bestQuoteSell(one, STABLE);
     const out = typeof q === 'bigint' ? q : (q && (q as any).amountOut) ? (q as any).amountOut as bigint : 0n;
     const plsPerUsd = Number(ethers.formatUnits(out, 18));
     const usdPerPls = plsPerUsd > 0 ? (1 / plsPerUsd) : null;
@@ -331,7 +331,8 @@ async function tokenPriceInPls(token: string, decimals: number): Promise<number>
   if (token.toLowerCase() === WPLS) return 1;
   try {
     const one = ethers.parseUnits('1', decimals);
-    const q = await bestQuoteSell(token, one);
+    // correct order: (amountIn: bigint, tokenIn: string)
+    const q = await bestQuoteSell(one, token);
     const out = typeof q === 'bigint' ? q : (q && (q as any).amountOut) ? (q as any).amountOut as bigint : 0n;
     return Number(ethers.formatUnits(out, 18));
   } catch {
