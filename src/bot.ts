@@ -133,6 +133,8 @@ async function recordBuyAndCache(
   } finally {
     // Always bump overlay so UI reflects the new average immediately
     bumpAvgAfterBuy(telegramId, token, amountInPlsWei, amountOutTokenWei, tokenDecimals);
+    /* ---------- NEW: also bump TradeStats overlay for BUYS ---------- */
+    bumpTradeStatsBuy(telegramId, walletAddress, token, amountInPlsWei);
   }
 }
 
@@ -160,6 +162,47 @@ function invalidateAvgEntry(uid: number, token: string, decimals?: number) {
   const t = token.toLowerCase();
   _avgEntryOverlay.get(uid)?.delete(t);
   _avgEntryCache.delete(_avgKey(uid, t, decimals));
+}
+
+/* ---------- NEW: Step 2 — In-memory TradeStats overlay ---------- */
+type TradeStats = { buysCount: number; sellsCount: number; buysPls: number; sellsPls: number };
+
+const _tradeStatsOverlay = new Map<string, TradeStats>();
+const _tsKey = (telegramId: number, walletAddress: string, token: string) =>
+  `${telegramId}:${walletAddress.toLowerCase()}:${token.toLowerCase()}`;
+
+function bumpTradeStatsBuy(
+  telegramId: number,
+  walletAddress: string,
+  token: string,
+  plsInWei: bigint
+) {
+  const k = _tsKey(telegramId, walletAddress, token);
+  const cur = _tradeStatsOverlay.get(k) || { buysCount: 0, sellsCount: 0, buysPls: 0, sellsPls: 0 };
+  const add = Number(ethers.formatEther(plsInWei));
+  _tradeStatsOverlay.set(k, {
+    buysCount: cur.buysCount + 1,
+    sellsCount: cur.sellsCount,
+    buysPls: cur.buysPls + (add > 0 ? add : 0),
+    sellsPls: cur.sellsPls,
+  });
+}
+
+function bumpTradeStatsSell(
+  telegramId: number,
+  walletAddress: string,
+  token: string,
+  plsOutWei: bigint
+) {
+  const k = _tsKey(telegramId, walletAddress, token);
+  const cur = _tradeStatsOverlay.get(k) || { buysCount: 0, sellsCount: 0, buysPls: 0, sellsPls: 0 };
+  const add = Number(ethers.formatEther(plsOutWei));
+  _tradeStatsOverlay.set(k, {
+    buysCount: cur.buysCount,
+    sellsCount: cur.sellsCount + 1,
+    buysPls: cur.buysPls,
+    sellsPls: cur.sellsPls + (add > 0 ? add : 0),
+  });
 }
 
 // 🔗 Address helpers
@@ -357,18 +400,31 @@ function getPosState(userId: string | number): PosUiState {
 }
 
 /* ---------- Safe DB accessor for trade stats (persistent across restarts) ---------- */
-type TradeStats = { buysCount: number; sellsCount: number; buysPls: number; sellsPls: number };
 async function getTradeStatsSafe(
   telegramId: number,
   walletAddress: string,
   token: string
 ): Promise<TradeStats | null> {
+  let dbStats: TradeStats | null = null;
   try {
     const mod: any = await import('./db.js');
     if (typeof mod.getTradeStats === 'function') {
-      return await mod.getTradeStats(telegramId, walletAddress, token);
+      dbStats = await mod.getTradeStats(telegramId, walletAddress, token);
     }
-  } catch {}
+  } catch { /* ignore DB read errors */ }
+
+  // Merge DB with overlay (so UI reflects buys/sells immediately)
+  const ov = _tradeStatsOverlay.get(_tsKey(telegramId, walletAddress, token)) || null;
+  if (dbStats && ov) {
+    return {
+      buysCount: (dbStats.buysCount || 0) + (ov.buysCount || 0),
+      sellsCount: (dbStats.sellsCount || 0) + (ov.sellsCount || 0),
+      buysPls: (dbStats.buysPls || 0) + (ov.buysPls || 0),
+      sellsPls: (dbStats.sellsPls || 0) + (ov.sellsPls || 0),
+    };
+  }
+  if (dbStats) return dbStats;
+  if (ov) return ov;
   return null;
 }
 
@@ -449,13 +505,17 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
 
       // Market cap: DexScreener if present; else try totalSupply * priceUSD
       let mcapUsdStr = '—';
+      let supplyApprox: number | null = null;        // <-- NEW: keep supply estimate to use for Avg Entry MC
       if (ds.marketCapUSD != null) {
         mcapUsdStr = fmtUsdCompact(ds.marketCapUSD);
+        if (ds.priceUSD != null && ds.priceUSD > 0) {
+          supplyApprox = ds.marketCapUSD / ds.priceUSD;
+        }
       } else if (usdPerPls != null) {
-        const ts = await c.totalSupply().catch(() => null);
-        if (ts) {
-          const supply = Number(ethers.formatUnits(ts, dec));
-          const mcap = supply * (pricePls * usdPerPls);
+        const totalSupply = await c.totalSupply().catch(() => null);
+        if (totalSupply) {
+          supplyApprox = Number(ethers.formatUnits(totalSupply, dec));
+          const mcap = supplyApprox * (pricePls * usdPerPls);
           mcapUsdStr = fmtUsdCompact(mcap);
         }
       }
@@ -466,6 +526,10 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
       // Avg entry & PNL (uses your existing cached getter)
       const avg = getAvgEntryCached(uid, ca, dec);
       let pnlPctStr = '—', pnlUsdAbsStr = '', pnlPlsPctStr = '—', pnlPlsAbsStr = '', pnlUp: boolean | undefined = undefined;
+
+      // NEW: pre-compute avg entry USD price for step 4
+      const avgEntryUsdNum = (avg?.avgPlsPerToken && usdPerPls != null) ? (avg.avgPlsPerToken * usdPerPls) : null;
+
       if (avg?.avgPlsPerToken && pricePls > 0 && qty > 0) {
         const diff = pricePls - avg.avgPlsPerToken;
         const pct = (diff / avg.avgPlsPerToken) * 100;
@@ -481,7 +545,7 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
         }
       }
 
-      // Buys/Sells counts & totals (persistent if db.getTradeStats exists)
+      // Buys/Sells counts & totals (persistent if db.getTradeStats exists; merged with overlay)
       let buysValueStr = 'N/A', buysCount = 0, sellsValueStr: string | null = 'N/A', sellsCount = 0;
       try {
         const ts = await getTradeStatsSafe(uid, walletAddress, ca);
@@ -495,6 +559,21 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
         }
       } catch { /* keep defaults */ }
 
+      // ---------- NEW: Step 4 — Avg Entry Market Cap ----------
+      let avgEntryMcapUsdStr: string = '—';
+      if (avgEntryUsdNum != null && avgEntryUsdNum > 0) {
+        // Prefer supply from DS; else on-chain totalSupply (already computed into supplyApprox above)
+        if (supplyApprox == null) {
+          try {
+            const ts = await c.totalSupply().catch(() => null);
+            if (ts) supplyApprox = Number(ethers.formatUnits(ts, dec));
+          } catch { /* ignore */ }
+        }
+        if (supplyApprox != null && supplyApprox > 0) {
+          avgEntryMcapUsdStr = fmtUsdCompact(avgEntryUsdNum * supplyApprox);
+        }
+      }
+
       items.push({
         id: ca,
         symbol: sym || ca.slice(0, 6).toUpperCase(),
@@ -504,8 +583,8 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
         contract: ca,
         priceUsd: priceUsdStr,
         mcapUsd: mcapUsdStr,
-        avgEntryUsd: (avg?.avgPlsPerToken && usdPerPls != null) ? fmtUsdPrice(avg.avgPlsPerToken * usdPerPls) : '—',
-        avgEntryMcapUsd: '—',
+        avgEntryUsd: (avgEntryUsdNum != null) ? fmtUsdPrice(avgEntryUsdNum) : '—',
+        avgEntryMcapUsd: avgEntryMcapUsdStr,               // <-- NEW
         balance: qty.toLocaleString('en-GB'),
         buysValue: buysValueStr,
         buysCount,
