@@ -4040,6 +4040,11 @@ bot.action('sell_exec', async (ctx) => {
       tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
       if (q?.amountOut) {
         recordTrade(ctx.from.id, w.address, token, 'SELL', q.amountOut, amount, q.route?.key ?? 'AUTO');
+        // 🔄 Invalidate avg-entry overlay + cache so PnL refreshes immediately
+        try {
+          _avgEntryOverlay.get(ctx.from.id)?.delete(token.toLowerCase());
+          _avgEntryCache.delete(_avgKey(ctx.from.id, token, tokDec));
+        } catch {}
       }
     } catch {}
 
@@ -4126,6 +4131,11 @@ bot.action('sell_exec_all', async (ctx) => {
         tokSym = (meta.symbol || meta.name || 'TOKEN').toUpperCase();
         if (q?.amountOut) {
           recordTrade(ctx.from.id, w.address, token, 'SELL', q.amountOut, amount, q.route?.key ?? 'AUTO');
+          // 🔄 Invalidate avg-entry overlay + cache so PnL refreshes immediately
+          try {
+            _avgEntryOverlay.get(ctx.from.id)?.delete(token.toLowerCase());
+            _avgEntryCache.delete(_avgKey(ctx.from.id, token, tokDec));
+          } catch {}
         }
       } catch {}
 
