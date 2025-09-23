@@ -408,7 +408,7 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
           symbol: sym || ca.slice(0, 6).toUpperCase(),
           trend: pnlUp === false ? '📉' : '📈',
           positionValue: `${valuePls.toFixed(6)} PLS${valueUsdStr}`,
-          expanded: false,
+          // expanded is applied below via state; keep item clean here
           contract: ca,
           priceUsd: plsUsd != null ? fmtUsdPrice(pricePls * plsUsd) : '—',
           mcapUsd: '—',
@@ -437,9 +437,10 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
     walletCount: count,
     walletLabel,
     walletAddress,
-    walletBalance: '—',          // unchanged (you can wire if you want)
-    positionsTotal: '—',         // unchanged (you can wire if you want)
-items: items.map(it => ({ ...it, expanded: (state.expanded[it.id] ?? true) })),
+    walletBalance: '—',          // unchanged (wire later if you wish)
+    positionsTotal: '—',         // unchanged (wire later if you wish)
+    // Default SHOW active: expanded true unless user toggled it off
+    items: items.map(it => ({ ...it, expanded: (state.expanded[it.id] ?? true) })),
     sortLabel: state.sort === 'value' ? 'By: Value' : 'By: PnL',
   };
 }
