@@ -108,6 +108,8 @@ function bumpAvgAfterBuy(uid: number, token: string, plsInWei: bigint, outTokWei
   const avgPlsPerToken = tokens > 0 ? (plsSpent / tokens) : 0;
 
   _overlaySet(uid, token, { tokens, plsSpent, avgPlsPerToken });
+
+  // Invalidate cached DB aggregate for this key so future reads stay fresh
   _avgEntryCache.delete(_avgKey(uid, token, dec));
 }
 
@@ -126,8 +128,10 @@ async function recordBuyAndCache(
   tokenDecimals: number
 ) {
   try {
+    // Persist (same shape as before)
     recordTrade(telegramId, walletAddress, token, 'BUY', amountInPlsWei, amountOutTokenWei, routeKey);
   } finally {
+    // Always bump overlay so UI reflects the new average immediately
     bumpAvgAfterBuy(telegramId, token, amountInPlsWei, amountOutTokenWei, tokenDecimals);
   }
 }
@@ -153,12 +157,20 @@ function getAvgEntryCached(uid: number, token: string, decimals?: number) {
 
 // 🔗 Address helpers
 const addrExplorer = (addr: string) => `https://otter.pulsechain.com/address/${addr}`;
+
+// Primary: paste address into the input field (tap = ready to copy/send)
 const copyAddrBtn = (addr: string, label = '📋 Copy') =>
   Markup.button.switchToCurrentChat(label, addr);
+
+// Explorer button (open address on the block explorer)
 const explorerAddrBtn = (addr: string, label = '🔍 Explorer') =>
   Markup.button.url(label, addrExplorer(addr));
+
+// Fallback copy (used automatically if you keep it in keyboards or want both)
 const copyAddrFallbackBtn = (addr: string, label = '📋 Copy') =>
   Markup.button.callback(label, `copy:${addr.toLowerCase()}`);
+
+// Fallback handler: sends a copyable code block (no link previews)
 bot.action(/^copy:(0x[a-fA-F0-9]{40})$/, async (ctx: any) => {
   await ctx.answerCbQuery('Address sent below');
   const addr = ctx.match[1];
@@ -167,7 +179,6 @@ bot.action(/^copy:(0x[a-fA-F0-9]{40})$/, async (ctx: any) => {
     link_preview_options: { is_disabled: true }
   } as any);
 });
-
 /* ---------- Referral: config + helpers ---------- */
 const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@/, '');
 const REF_PREFIX = 'ref_';
@@ -179,7 +190,7 @@ function parseRefPayload(payload?: string | null): number | null {
   if (!payload) return null;
   const p = payload.trim();
   let m = p.match(new RegExp(`^${REF_PREFIX}(\\d{4,15})$`, 'i'));
-  if (!m) m = p.match(/^(\d{4,15})$/);
+  if (!m) m = p.match(/^(\d{4,15})$/); // allow bare number too
   if (!m) return null;
   const id = Number(m[1]);
   return Number.isFinite(id) ? id : null;
@@ -291,6 +302,43 @@ function walletDisplay(w: any, idx: number): { label: string; address: string } 
   return { label, address };
 }
 
+/* ---- Minimal price helpers (PLS↔USD + token→PLS) ---- */
+
+const isAddr = (s: any) => typeof s === 'string' && /^0x[0-9a-fA-F]{40}$/.test(s);
+
+let _plsUsdCache: { v: number | null, t: number } = { v: null, t: 0 };
+async function getPlsUsd(): Promise<number | null> {
+  const now = Date.now();
+  if (now - _plsUsdCache.t < 45_000) return _plsUsdCache.v;
+  if (!STABLE) { _plsUsdCache = { v: null, t: now }; return null; }
+  try {
+    const meta = await tokenMeta(STABLE);
+    const dec = (meta as any)?.decimals ?? 6;
+    const one = ethers.parseUnits('1', dec);
+    // Your bestQuoteSell(tokenIn, amountIn) -> amountOut in WPLS
+    const q = await bestQuoteSell(STABLE, one);
+    const out = typeof q === 'bigint' ? q : (q && (q as any).amountOut) ? (q as any).amountOut as bigint : 0n;
+    const plsPerUsd = Number(ethers.formatUnits(out, 18));
+    const usdPerPls = plsPerUsd > 0 ? (1 / plsPerUsd) : null;
+    _plsUsdCache = { v: usdPerPls, t: now };
+  } catch {
+    _plsUsdCache = { v: null, t: Date.now() };
+  }
+  return _plsUsdCache.v;
+}
+
+async function tokenPriceInPls(token: string, decimals: number): Promise<number> {
+  if (token.toLowerCase() === WPLS) return 1;
+  try {
+    const one = ethers.parseUnits('1', decimals);
+    const q = await bestQuoteSell(token, one);
+    const out = typeof q === 'bigint' ? q : (q && (q as any).amountOut) ? (q as any).amountOut as bigint : 0n;
+    return Number(ethers.formatUnits(out, 18));
+  } catch {
+    return 0;
+  }
+}
+
 // Simple UI state per user for Positions
 type PosUiState = { walletIndex: number; expanded: Record<string, boolean>; sort: 'value'|'pnl' };
 const posUi = new Map<string | number, PosUiState>();
@@ -300,7 +348,7 @@ function getPosState(userId: string | number): PosUiState {
   return s;
 }
 
-// Build the Positions view-model (populate items with your data later)
+// Build the Positions view-model (now fetch price for current token if present)
 async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
   const uid = ctx.from.id;
   const state = getPosState(uid);
@@ -313,16 +361,83 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
   const active = wallets?.[state.walletIndex] || (await getActiveWallet(uid));
   const { label: walletLabel, address: walletAddress } = walletDisplay(active, state.walletIndex);
 
-  // TODO: Map your real open positions into PositionItemView[]
-  const items: PositionItemView[] = []; // keep empty until wired
+  const items: PositionItemView[] = [];
+
+  // 👉 Minimal: show the currently-selected token (if any) with live price
+  try {
+    const u: any = await getUserSettings(uid);
+    const current = u?.token_address || u?.token || u?.current_token || null;
+    if (isAddr(current)) {
+      const ca = String(current).toLowerCase();
+      const c = erc20(ca); // your helper: no provider arg
+      const [dec, sym, bal] = await Promise.all([
+        c.decimals(),
+        c.symbol().catch(() => 'TOKEN'),
+        c.balanceOf(walletAddress),
+      ]);
+
+      if (bal > 0n) {
+        const qty = Number(ethers.formatUnits(bal, dec));
+        const pricePls = await tokenPriceInPls(ca, dec);
+        const valuePls = qty * pricePls;
+
+        const plsUsd = await getPlsUsd();
+        const valueUsdStr = plsUsd != null ? ` (${fmtUsdCompact(valuePls * plsUsd)})` : '';
+
+        // Avg entry & PnL
+        const avg = getAvgEntryCached(uid, ca, dec);
+        let pnlPctStr = '—', pnlUsdAbsStr = '', pnlPlsPctStr = '—', pnlPlsAbsStr = '', pnlUp: boolean | undefined = undefined;
+        if (avg?.avgPlsPerToken && pricePls > 0) {
+          const diff = pricePls - avg.avgPlsPerToken;
+          const pct = (diff / avg.avgPlsPerToken) * 100;
+          pnlPctStr = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+          const absPls = diff * qty;
+          pnlPlsAbsStr = `(${absPls.toFixed(6)} PLS)`;
+          pnlPlsPctStr = pnlPctStr;
+          pnlUp = pct >= 0;
+          if (plsUsd != null) {
+            const absUsd = absPls * plsUsd;
+            const sign = absUsd >= 0 ? '+' : '';
+            pnlUsdAbsStr = `(${sign}${fmtUsdCompact(absUsd)})`;
+          }
+        }
+
+        items.push({
+          id: ca,
+          symbol: sym || ca.slice(0, 6).toUpperCase(),
+          trend: pnlUp === false ? '📉' : '📈',
+          positionValue: `${valuePls.toFixed(6)} PLS${valueUsdStr}`,
+          expanded: false,
+          contract: ca,
+          priceUsd: plsUsd != null ? fmtUsdPrice(pricePls * plsUsd) : '—',
+          mcapUsd: '—',
+          avgEntryUsd: avg?.avgPlsPerToken && plsUsd != null ? fmtUsdPrice(avg.avgPlsPerToken * plsUsd) : '—',
+          avgEntryMcapUsd: '—',
+          balance: qty.toLocaleString('en-GB'),
+          buysValue: 'N/A',
+          buysCount: 0,
+          sellsValue: 'N/A',
+          sellsCount: 0,
+          pnlUsdPct: pnlPctStr,
+          pnlUsdAbs: pnlUsdAbsStr,
+          pnlUsdUp: pnlUp,
+          pnlPlsPct: pnlPlsPctStr,
+          pnlPlsAbs: pnlPlsAbsStr,
+          pnlPlsUp: pnlUp,
+        });
+      }
+    }
+  } catch {
+    // ignore – positions can still render empty
+  }
 
   return {
     walletIndex: state.walletIndex + 1,
     walletCount: count,
     walletLabel,
     walletAddress,
-    walletBalance: '—',
-    positionsTotal: '—',
+    walletBalance: '—',          // unchanged (you can wire if you want)
+    positionsTotal: '—',         // unchanged (you can wire if you want)
     items: items.map(it => ({ ...it, expanded: !!state.expanded[it.id] })),
     sortLabel: state.sort === 'value' ? 'By: Value' : 'By: PnL',
   };
