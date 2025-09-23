@@ -315,8 +315,8 @@ async function getPlsUsd(): Promise<number | null> {
     const meta = await tokenMeta(STABLE);
     const dec = (meta as any)?.decimals ?? 6;
     const one = ethers.parseUnits('1', dec);
-    // Your bestQuoteSell(tokenIn, amountIn) -> amountOut in WPLS
-    const q = await bestQuoteSell(STABLE, one);
+// was: const q = await bestQuoteSell(token, one);
+const q = await bestQuoteSell(one, token);
     const out = typeof q === 'bigint' ? q : (q && (q as any).amountOut) ? (q as any).amountOut as bigint : 0n;
     const plsPerUsd = Number(ethers.formatUnits(out, 18));
     const usdPerPls = plsPerUsd > 0 ? (1 / plsPerUsd) : null;
