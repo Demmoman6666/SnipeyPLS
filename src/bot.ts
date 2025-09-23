@@ -504,12 +504,48 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
 
 /* ---- Positions list (screen 1) ---- */
 
+// local keyboard builder: tokens laid out 4 per row, no Hide buttons
+function _buildPositionsKeyboard(v: PositionsViewState) {
+  const rows: any[][] = [];
+
+  // Top controls
+  rows.push([
+    Markup.button.callback('⬅️ Back', 'main_back'),
+    Markup.button.callback('🔄 Refresh', 'pos_refresh'),
+  ]);
+
+  // Wallet nav
+  rows.push([
+    Markup.button.callback('◀️ Prev', 'pos_wallet_prev'),
+    Markup.button.callback(`✏️ Rename ${v.walletLabel}`, 'pos_wallet_edit'),
+    Markup.button.callback('Next ▶️', 'pos_wallet_next'),
+  ]);
+
+  // Sort
+  rows.push([
+    Markup.button.callback(`↕️ Sort: ${v.sortLabel || 'By: Value'}`, 'pos_sort_toggle'),
+  ]);
+
+  // Token selection buttons (max 4 per row)
+  const tokenButtons = v.items.map(it =>
+    Markup.button.callback(
+      `${it.symbol} — ${it.trend || ''} — ${it.positionValue}`.trim(),
+      `pos_token:${it.id}`
+    )
+  );
+  for (let i = 0; i < tokenButtons.length; i += 4) {
+    rows.push(tokenButtons.slice(i, i + 4));
+  }
+
+  return Markup.inlineKeyboard(rows);
+}
+
 // Open Positions from main menu
 bot.action('positions', async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const view = await buildPositionsViewState(ctx);
   const text = renderPositionsMessage(view);
-  const kb = positionsMenu(view);
+  const kb = _buildPositionsKeyboard(view);
   await sendOrEdit(ctx, text, {
     parse_mode: 'HTML',
     link_preview_options: { is_disabled: true },
@@ -522,7 +558,7 @@ bot.action('pos_refresh', async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const view = await buildPositionsViewState(ctx);
   const text = renderPositionsMessage(view);
-  const kb = positionsMenu(view);
+  const kb = _buildPositionsKeyboard(view);
   await sendOrEdit(ctx, text, {
     parse_mode: 'HTML',
     link_preview_options: { is_disabled: true },
@@ -536,7 +572,7 @@ bot.action('pos_wallet_prev', async (ctx) => {
   const s = getPosState(ctx.from.id); s.walletIndex--;
   const view = await buildPositionsViewState(ctx);
   const text = renderPositionsMessage(view);
-  const kb = positionsMenu(view);
+  const kb = _buildPositionsKeyboard(view);
   await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
 });
 bot.action('pos_wallet_next', async (ctx) => {
@@ -544,7 +580,7 @@ bot.action('pos_wallet_next', async (ctx) => {
   const s = getPosState(ctx.from.id); s.walletIndex++;
   const view = await buildPositionsViewState(ctx);
   const text = renderPositionsMessage(view);
-  const kb = positionsMenu(view);
+  const kb = _buildPositionsKeyboard(view);
   await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
 });
 
@@ -555,7 +591,7 @@ bot.action('pos_sort_toggle', async (ctx) => {
   s.sort = (s.sort === 'value') ? 'pnl' : 'value';
   const view = await buildPositionsViewState(ctx);
   const text = renderPositionsMessage(view);
-  const kb = positionsMenu(view);
+  const kb = _buildPositionsKeyboard(view);
   await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
 });
 
