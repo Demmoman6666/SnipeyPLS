@@ -18,7 +18,7 @@ import {
   type PositionsViewState,
   type PositionItemView,
   type TokenActionsView,
-} from './keyboards.js';
+} from './keyboards.ts';
 import {
   listWallets, createWallet, importWallet, getActiveWallet, setToken, setGasBase, setGasPercent,
   setDefaultGasPercent, getUserSettings, getPrivateKey, setBuyAmount, getWalletById, removeWallet, setSellPct,
