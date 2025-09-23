@@ -225,6 +225,42 @@ export function getPosition(telegramId: number, tokenAddress: string): bigint {
   return net;
 }
 
+/** Aggregate counts and total PLS for buys/sells — used by Positions view.
+ * Returns stable numbers that survive restarts (DB-backed).
+ */
+export function getTradeStats(
+  telegramId: number,
+  walletAddress: string,
+  tokenAddress: string
+): { buysCount: number; sellsCount: number; buysPls: number; sellsPls: number } {
+  const rows = getDb().prepare(`
+    SELECT side, pls_in_wei
+    FROM trades
+    WHERE telegram_id = ?
+      AND LOWER(wallet_address) = LOWER(?)
+      AND LOWER(token_address) = LOWER(?)
+  `).all(telegramId, walletAddress, tokenAddress) as any[];
+
+  let buysCount = 0, sellsCount = 0;
+  let buyWei = 0n, sellWei = 0n;
+
+  for (const r of rows) {
+    const side = String(r.side || '').toUpperCase();
+    const wei = BigInt(String(r.pls_in_wei || '0'));
+    if (side === 'BUY') {
+      buysCount++;
+      buyWei += wei;
+    } else if (side === 'SELL') {
+      sellsCount++;
+      sellWei += wei;
+    }
+  }
+
+  const buysPls = Number(ethers.formatEther(buyWei));
+  const sellsPls = Number(ethers.formatEther(sellWei));
+  return { buysCount, sellsCount, buysPls, sellsPls };
+}
+
 /* =================== limit orders =================== */
 
 export function addLimitOrder(o: {
