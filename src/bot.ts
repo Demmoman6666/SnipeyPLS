@@ -349,6 +349,22 @@ function getPosState(userId: string | number): PosUiState {
   return s;
 }
 
+/* ---------- Safe DB accessor for trade stats (persistent across restarts) ---------- */
+type TradeStats = { buysCount: number; sellsCount: number; buysPls: number; sellsPls: number };
+async function getTradeStatsSafe(
+  telegramId: number,
+  walletAddress: string,
+  token: string
+): Promise<TradeStats | null> {
+  try {
+    const mod: any = await import('./db.js');
+    if (typeof mod.getTradeStats === 'function') {
+      return await mod.getTradeStats(telegramId, walletAddress, token);
+    }
+  } catch {}
+  return null;
+}
+
 // Build the Positions view-model (show ALL positions you’ve bought via the bot)
 async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
   const uid = ctx.from.id;
@@ -415,15 +431,35 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
 
       const qty = Number(ethers.formatUnits(bal, dec));
       const pricePls = await tokenPriceInPls(ca, dec);
-      const valuePls = qty * pricePls;
 
-      const plsUsd = await getPlsUsd();
-      const valueUsdStr = plsUsd != null ? ` (${fmtUsdCompact(valuePls * plsUsd)})` : '';
+      // USD per PLS (with DexScreener fallback via plsUSD)
+      const usdPerPls = (await getPlsUsd()) ?? (await plsUSD());
+
+      // DexScreener for direct USD price + market cap (best pair)
+      const ds = await fetchDexScreener(ca);
+      const priceUsdStr = ds.priceUSD != null ? fmtUsdPrice(ds.priceUSD) :
+                          (usdPerPls != null && pricePls > 0) ? fmtUsdPrice(pricePls * usdPerPls) : '—';
+
+      // Market cap: DexScreener if present; else try totalSupply * priceUSD
+      let mcapUsdStr = '—';
+      if (ds.marketCapUSD != null) {
+        mcapUsdStr = fmtUsdCompact(ds.marketCapUSD);
+      } else if (usdPerPls != null) {
+        const ts = await c.totalSupply().catch(() => null);
+        if (ts) {
+          const supply = Number(ethers.formatUnits(ts, dec));
+          const mcap = supply * (pricePls * usdPerPls);
+          mcapUsdStr = fmtUsdCompact(mcap);
+        }
+      }
+
+      const valuePls = qty * pricePls;
+      const valueUsdStr = (usdPerPls != null) ? ` (${fmtUsdCompact(valuePls * usdPerPls)})` : '';
 
       // Avg entry & PNL (uses your existing cached getter)
       const avg = getAvgEntryCached(uid, ca, dec);
       let pnlPctStr = '—', pnlUsdAbsStr = '', pnlPlsPctStr = '—', pnlPlsAbsStr = '', pnlUp: boolean | undefined = undefined;
-      if (avg?.avgPlsPerToken && pricePls > 0) {
+      if (avg?.avgPlsPerToken && pricePls > 0 && qty > 0) {
         const diff = pricePls - avg.avgPlsPerToken;
         const pct = (diff / avg.avgPlsPerToken) * 100;
         pnlPctStr = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
@@ -431,12 +467,26 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
         pnlPlsAbsStr = `(${absPls.toFixed(6)} PLS)`;
         pnlPlsPctStr = pnlPctStr;
         pnlUp = pct >= 0;
-        if (plsUsd != null) {
-          const absUsd = absPls * plsUsd;
+        if (usdPerPls != null) {
+          const absUsd = absPls * usdPerPls;
           const sign = absUsd >= 0 ? '+' : '';
           pnlUsdAbsStr = `(${sign}${fmtUsdCompact(absUsd)})`;
         }
       }
+
+      // Buys/Sells counts & totals (persistent if db.getTradeStats exists)
+      let buysValueStr = 'N/A', buysCount = 0, sellsValueStr: string | null = 'N/A', sellsCount = 0;
+      try {
+        const ts = await getTradeStatsSafe(uid, walletAddress, ca);
+        if (ts) {
+          buysCount = ts.buysCount || 0;
+          sellsCount = ts.sellsCount || 0;
+          const bPls = ts.buysPls || 0;
+          const sPls = ts.sellsPls || 0;
+          buysValueStr = `${bPls.toLocaleString('en-GB')} PLS${usdPerPls != null ? ` (${fmtUsdCompact(bPls * usdPerPls)})` : ''}`;
+          sellsValueStr = sPls > 0 ? `${sPls.toLocaleString('en-GB')} PLS${usdPerPls != null ? ` (${fmtUsdCompact(sPls * usdPerPls)})` : ''}` : 'N/A';
+        }
+      } catch { /* keep defaults */ }
 
       items.push({
         id: ca,
@@ -445,15 +495,15 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
         positionValue: `${valuePls.toFixed(6)} PLS${valueUsdStr}`,
         expanded: (state.expanded[ca] ?? true), // Show active by default
         contract: ca,
-        priceUsd: plsUsd != null ? fmtUsdPrice(pricePls * plsUsd) : '—',
-        mcapUsd: '—',
-        avgEntryUsd: avg?.avgPlsPerToken && plsUsd != null ? fmtUsdPrice(avg.avgPlsPerToken * plsUsd) : '—',
+        priceUsd: priceUsdStr,
+        mcapUsd: mcapUsdStr,
+        avgEntryUsd: (avg?.avgPlsPerToken && usdPerPls != null) ? fmtUsdPrice(avg.avgPlsPerToken * usdPerPls) : '—',
         avgEntryMcapUsd: '—',
         balance: qty.toLocaleString('en-GB'),
-        buysValue: 'N/A',
-        buysCount: 0,
-        sellsValue: 'N/A',
-        sellsCount: 0,
+        buysValue: buysValueStr,
+        buysCount,
+        sellsValue: sellsValueStr,
+        sellsCount,
         pnlUsdPct: pnlPctStr,
         pnlUsdAbs: pnlUsdAbsStr,
         pnlUsdUp: pnlUp,
@@ -487,8 +537,8 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
   } catch {}
 
   const totalPls = items.reduce((acc, it) => acc + (Number(it.positionValue.split(' ')[0]) || 0), 0);
-  const plsUsd = await getPlsUsd();
-  const positionsTotal = `${totalPls.toFixed(6)} PLS${plsUsd != null ? ` (${fmtUsdCompact(totalPls * plsUsd)})` : ''}`;
+  const usdPerPls2 = (await getPlsUsd()) ?? (await plsUSD());
+  const positionsTotal = `${totalPls.toFixed(6)} PLS${usdPerPls2 != null ? ` (${fmtUsdCompact(totalPls * usdPerPls2)})` : ''}`;
 
   return {
     walletIndex: state.walletIndex + 1,
