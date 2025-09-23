@@ -349,12 +349,12 @@ function getPosState(userId: string | number): PosUiState {
   return s;
 }
 
-// Build the Positions view-model (now fetch price for current token if present)
+// Build the Positions view-model (show ALL positions you’ve bought via the bot)
 async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
   const uid = ctx.from.id;
   const state = getPosState(uid);
 
-  const wallets = await listWallets(uid); // your existing fn
+  const wallets = await listWallets(uid);
   const count = Math.max(1, (wallets?.length || 1));
   if (state.walletIndex >= count) state.walletIndex = 0;
   if (state.walletIndex < 0) state.walletIndex = count - 1;
@@ -362,85 +362,142 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
   const active = wallets?.[state.walletIndex] || (await getActiveWallet(uid));
   const { label: walletLabel, address: walletAddress } = walletDisplay(active, state.walletIndex);
 
-  const items: PositionItemView[] = [];
+  // ---- collect candidate token addresses
+  const candidates = new Set<string>();
 
-  // 👉 Minimal: show the currently-selected token (if any) with live price
+  // A) every token you bought since this process started (overlay)
+  const overlay = _avgEntryOverlay.get(uid);
+  if (overlay) for (const k of overlay.keys()) candidates.add(k.toLowerCase());
+
+  // B) current selected token from settings
   try {
     const u: any = await getUserSettings(uid);
     const current = u?.token_address || u?.token || u?.current_token || null;
-    if (isAddr(current)) {
-      const ca = String(current).toLowerCase();
-      const c = erc20(ca); // your helper: no provider arg
+    if (isAddr(current)) candidates.add(String(current).toLowerCase());
+  } catch { /* ignore */ }
+
+  // C) tokens from your limit orders (both all + open), if any
+  try {
+    const anyListLimitOrders = (listLimitOrders as any);
+    let allOrders: any[] | null = null;
+    try { allOrders = await anyListLimitOrders(uid); } catch { try { allOrders = await anyListLimitOrders(); } catch {} }
+    if (Array.isArray(allOrders)) {
+      for (const row of allOrders) {
+        const ca = (row?.token_address || row?.token || row?.ca || row?.contract || '').toString();
+        if (isAddr(ca)) candidates.add(ca.toLowerCase());
+      }
+    }
+  } catch { /* ignore */ }
+
+  try {
+    const anyGetOpen = (getOpenLimitOrders as any);
+    let opens: any[] | null = null;
+    try { opens = await anyGetOpen(uid); } catch { try { opens = await anyGetOpen(); } catch {} }
+    if (Array.isArray(opens)) {
+      for (const row of opens) {
+        const ca = (row?.token_address || row?.token || row?.ca || row?.contract || '').toString();
+        if (isAddr(ca)) candidates.add(ca.toLowerCase());
+      }
+    }
+  } catch { /* ignore */ }
+
+  // ---- build PositionItemView[] for tokens with non-zero balances
+  const items: PositionItemView[] = [];
+  for (const ca of candidates) {
+    try {
+      const c = erc20(ca);
       const [dec, sym, bal] = await Promise.all([
         c.decimals(),
         c.symbol().catch(() => 'TOKEN'),
         c.balanceOf(walletAddress),
       ]);
+      if (bal === 0n) continue;
 
-      if (bal > 0n) {
-        const qty = Number(ethers.formatUnits(bal, dec));
-        const pricePls = await tokenPriceInPls(ca, dec);
-        const valuePls = qty * pricePls;
+      const qty = Number(ethers.formatUnits(bal, dec));
+      const pricePls = await tokenPriceInPls(ca, dec);
+      const valuePls = qty * pricePls;
 
-        const plsUsd = await getPlsUsd();
-        const valueUsdStr = plsUsd != null ? ` (${fmtUsdCompact(valuePls * plsUsd)})` : '';
+      const plsUsd = await getPlsUsd();
+      const valueUsdStr = plsUsd != null ? ` (${fmtUsdCompact(valuePls * plsUsd)})` : '';
 
-        // Avg entry & PnL
-        const avg = getAvgEntryCached(uid, ca, dec);
-        let pnlPctStr = '—', pnlUsdAbsStr = '', pnlPlsPctStr = '—', pnlPlsAbsStr = '', pnlUp: boolean | undefined = undefined;
-        if (avg?.avgPlsPerToken && pricePls > 0) {
-          const diff = pricePls - avg.avgPlsPerToken;
-          const pct = (diff / avg.avgPlsPerToken) * 100;
-          pnlPctStr = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
-          const absPls = diff * qty;
-          pnlPlsAbsStr = `(${absPls.toFixed(6)} PLS)`;
-          pnlPlsPctStr = pnlPctStr;
-          pnlUp = pct >= 0;
-          if (plsUsd != null) {
-            const absUsd = absPls * plsUsd;
-            const sign = absUsd >= 0 ? '+' : '';
-            pnlUsdAbsStr = `(${sign}${fmtUsdCompact(absUsd)})`;
-          }
+      // Avg entry & PNL (uses your existing cached getter)
+      const avg = getAvgEntryCached(uid, ca, dec);
+      let pnlPctStr = '—', pnlUsdAbsStr = '', pnlPlsPctStr = '—', pnlPlsAbsStr = '', pnlUp: boolean | undefined = undefined;
+      if (avg?.avgPlsPerToken && pricePls > 0) {
+        const diff = pricePls - avg.avgPlsPerToken;
+        const pct = (diff / avg.avgPlsPerToken) * 100;
+        pnlPctStr = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+        const absPls = diff * qty;
+        pnlPlsAbsStr = `(${absPls.toFixed(6)} PLS)`;
+        pnlPlsPctStr = pnlPctStr;
+        pnlUp = pct >= 0;
+        if (plsUsd != null) {
+          const absUsd = absPls * plsUsd;
+          const sign = absUsd >= 0 ? '+' : '';
+          pnlUsdAbsStr = `(${sign}${fmtUsdCompact(absUsd)})`;
         }
-
-        items.push({
-          id: ca,
-          symbol: sym || ca.slice(0, 6).toUpperCase(),
-          trend: pnlUp === false ? '📉' : '📈',
-          positionValue: `${valuePls.toFixed(6)} PLS${valueUsdStr}`,
-          // expanded is applied below via state; keep item clean here
-          contract: ca,
-          priceUsd: plsUsd != null ? fmtUsdPrice(pricePls * plsUsd) : '—',
-          mcapUsd: '—',
-          avgEntryUsd: avg?.avgPlsPerToken && plsUsd != null ? fmtUsdPrice(avg.avgPlsPerToken * plsUsd) : '—',
-          avgEntryMcapUsd: '—',
-          balance: qty.toLocaleString('en-GB'),
-          buysValue: 'N/A',
-          buysCount: 0,
-          sellsValue: 'N/A',
-          sellsCount: 0,
-          pnlUsdPct: pnlPctStr,
-          pnlUsdAbs: pnlUsdAbsStr,
-          pnlUsdUp: pnlUp,
-          pnlPlsPct: pnlPlsPctStr,
-          pnlPlsAbs: pnlPlsAbsStr,
-          pnlPlsUp: pnlUp,
-        });
       }
-    }
-  } catch {
-    // ignore – positions can still render empty
+
+      items.push({
+        id: ca,
+        symbol: sym || ca.slice(0, 6).toUpperCase(),
+        trend: pnlUp === false ? '📉' : '📈',
+        positionValue: `${valuePls.toFixed(6)} PLS${valueUsdStr}`,
+        expanded: (state.expanded[ca] ?? true), // Show active by default
+        contract: ca,
+        priceUsd: plsUsd != null ? fmtUsdPrice(pricePls * plsUsd) : '—',
+        mcapUsd: '—',
+        avgEntryUsd: avg?.avgPlsPerToken && plsUsd != null ? fmtUsdPrice(avg.avgPlsPerToken * plsUsd) : '—',
+        avgEntryMcapUsd: '—',
+        balance: qty.toLocaleString('en-GB'),
+        buysValue: 'N/A',
+        buysCount: 0,
+        sellsValue: 'N/A',
+        sellsCount: 0,
+        pnlUsdPct: pnlPctStr,
+        pnlUsdAbs: pnlUsdAbsStr,
+        pnlUsdUp: pnlUp,
+        pnlPlsPct: pnlPlsPctStr,
+        pnlPlsAbs: pnlPlsAbsStr,
+        pnlPlsUp: pnlUp,
+      });
+    } catch { /* skip token on any error */ }
   }
+
+  // sort by value or PnL
+  if (state.sort === 'value') {
+    items.sort((a, b) => {
+      const av = Number(a.positionValue.split(' ')[0]) || 0;
+      const bv = Number(b.positionValue.split(' ')[0]) || 0;
+      return bv - av;
+    });
+  } else {
+    items.sort((a, b) => {
+      const ap = parseFloat((a.pnlUsdPct || '0').replace('%','')) || -1e9;
+      const bp = parseFloat((b.pnlUsdPct || '0').replace('%','')) || -1e9;
+      return bp - ap;
+    });
+  }
+
+  // wallet balance + total
+  let walletPlsStr = '—';
+  try {
+    const bal = await provider.getBalance(walletAddress);
+    walletPlsStr = `${fmtPls(bal)} PLS`;
+  } catch {}
+
+  const totalPls = items.reduce((acc, it) => acc + (Number(it.positionValue.split(' ')[0]) || 0), 0);
+  const plsUsd = await getPlsUsd();
+  const positionsTotal = `${totalPls.toFixed(6)} PLS${plsUsd != null ? ` (${fmtUsdCompact(totalPls * plsUsd)})` : ''}`;
 
   return {
     walletIndex: state.walletIndex + 1,
     walletCount: count,
     walletLabel,
     walletAddress,
-    walletBalance: '—',          // unchanged (wire later if you wish)
-    positionsTotal: '—',         // unchanged (wire later if you wish)
-    // Default SHOW active: expanded true unless user toggled it off
-    items: items.map(it => ({ ...it, expanded: (state.expanded[it.id] ?? true) })),
+    walletBalance: walletPlsStr,
+    positionsTotal,
+    items,
     sortLabel: state.sort === 'value' ? 'By: Value' : 'By: PnL',
   };
 }
