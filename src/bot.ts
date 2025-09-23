@@ -504,10 +504,10 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
 
 /* ---- Positions list (screen 1) ---- */
 
-// local keyboard builder: quick-buy row, token buttons (max 4 per row), sort at bottom
+// local keyboard builder: wallet nav ➜ SELL rows ➜ BUY row ➜ token buttons (max 4/row) ➜ sort bottom
 function _buildPositionsKeyboard(ctx: any, v: PositionsViewState) {
   const rows: any[][] = [];
-  const s: any = getPosState(ctx.from.id); // we use `any` to read selectedToken without changing the type
+  const s: any = getPosState(ctx.from.id); // using `any` so we can store selectedToken/flags
   const selected: string | undefined = s.selectedToken;
 
   // Top controls
@@ -522,14 +522,24 @@ function _buildPositionsKeyboard(ctx: any, v: PositionsViewState) {
     Markup.button.callback('Next ▶️', 'pos_wallet_next'),
   ]);
 
-  // Quick buy row (requires a selected token)
+  // SELL rows (require a selected token)
+  rows.push([
+    Markup.button.callback('Sell 50 %', 'pos_sell_pct_sel:50'),
+    Markup.button.callback('Sell 100 %', 'pos_sell_pct_sel:100'),
+  ]);
+  rows.push([
+    Markup.button.callback('Sell Initial', 'pos_sell_initial'),
+    Markup.button.callback('Sell X %', 'pos_sell_x'),
+  ]);
+
+  // BUY row (requires a selected token)
   rows.push([
     Markup.button.callback('Buy 250k PLS', 'pos_quick_buy:250000'),
     Markup.button.callback('Buy 1M PLS', 'pos_quick_buy:1000000'),
     Markup.button.callback('Buy X PLS', 'pos_quick_buy:X'),
   ]);
 
-  // Token selection buttons ABOVE sort (max 4 per row). Clicking selects; it does not navigate.
+  // Token selection buttons (max 4 per row). Clicking selects; it does not navigate.
   const tokenButtons = v.items.map(it => {
     const label =
       `${selected === it.id ? '✅ ' : ''}` +
@@ -619,6 +629,104 @@ bot.action(/^pos_select:(0x[a-fA-F0-9]{40})$/, async (ctx) => {
   });
 });
 
+/* ---------- SELL handlers (operate on selected token) ---------- */
+
+// Fixed % sell (50 / 100)
+bot.action(/^pos_sell_pct_sel:(\d{1,3})$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const s: any = getPosState(ctx.from.id);
+  const selected: string | undefined = s.selectedToken;
+  if (!selected) {
+    return ctx.answerCbQuery('Select a token first', { show_alert: true }).catch(() => {});
+  }
+  const pct = Math.max(1, Math.min(100, Number(ctx.match[1])));
+  try {
+    await setToken(ctx.from.id, selected);
+    await setSellPct(ctx.from.id, pct);
+    await ctx.reply(
+      `Ready to sell <b>${pct}%</b> of <code>${selected}</code>.\nTap <b>Sell Now</b> to execute.`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback('🔴 Sell Now', 'sell_exec')],
+          [Markup.button.callback('⬅️ Back to Positions', 'pos_refresh')],
+        ]).reply_markup,
+        link_preview_options: { is_disabled: true },
+      } as any
+    );
+  } catch (e: any) {
+    await ctx.reply(`❌ Could not prepare sell: ${e?.message || e}`, { parse_mode: 'HTML' });
+  }
+});
+
+// Sell Initial — compute % to approximately recoup initial PLS
+bot.action('pos_sell_initial', async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const uid = ctx.from.id;
+  const s: any = getPosState(uid);
+  const selected: string | undefined = s.selectedToken;
+  if (!selected) {
+    return ctx.answerCbQuery('Select a token first', { show_alert: true }).catch(() => {});
+  }
+
+  try {
+    // active wallet + token data
+    const wallets = await listWallets(uid);
+    const w = wallets?.[Math.max(0, Math.min((s.walletIndex ?? 0), (wallets?.length || 1) - 1))] || (await getActiveWallet(uid));
+    const walletAddr = (w?.address || w?.addr || w?.wallet) as string;
+
+    const c = erc20(selected);
+    const [dec, bal] = await Promise.all([c.decimals(), c.balanceOf(walletAddr)]);
+    if (bal === 0n) return ctx.answerCbQuery('No balance to sell', { show_alert: true }).catch(() => {});
+
+    const qty = Number(ethers.formatUnits(bal, dec));
+    const pxPls = await tokenPriceInPls(selected, dec);
+    if (!(pxPls > 0)) return ctx.answerCbQuery('Price unavailable', { show_alert: true }).catch(() => {});
+
+    // Use overlay if present, else fall back to avg entry × current qty
+    const overlay = _overlayGet(uid, selected);
+    const avg = getAvgEntryCached(uid, selected, dec);
+    const targetPls = overlay?.plsSpent ?? ((avg?.avgPlsPerToken || 0) * qty);
+
+    // percent to sell = targetPls / (qty * pxPls)
+    let pct = (qty > 0 && pxPls > 0) ? (targetPls / (qty * pxPls)) * 100 : 0;
+    pct = Math.max(1, Math.min(100, Math.round(pct)));
+
+    await setToken(uid, selected);
+    await setSellPct(uid, pct);
+
+    await ctx.reply(
+      `Ready to sell about <b>${pct}%</b> of <code>${selected}</code> to recoup initial.\nTap <b>Sell Now</b> to execute.`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback('🔴 Sell Now', 'sell_exec')],
+          [Markup.button.callback('⬅️ Back to Positions', 'pos_refresh')],
+        ]).reply_markup,
+        link_preview_options: { is_disabled: true },
+      } as any
+    );
+  } catch (e: any) {
+    await ctx.reply(`❌ Could not prepare "Sell Initial": ${e?.message || e}`, { parse_mode: 'HTML' });
+  }
+});
+
+// Sell X % — prompt for percent
+bot.action('pos_sell_x', async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const s: any = getPosState(ctx.from.id);
+  if (!s.selectedToken) {
+    return ctx.answerCbQuery('Select a token first', { show_alert: true }).catch(() => {});
+  }
+  s.awaitSellX = true;
+  await ctx.reply('Enter % to sell (1–100):', {
+    reply_markup: { force_reply: true, selective: true } as any,
+    parse_mode: 'HTML',
+  });
+});
+
+/* ---------- BUY handlers (already present) ---------- */
+
 // Quick-buy buttons (requires a selected token). We prep a Buy Now button that triggers the bot's existing 'buy_exec'.
 bot.action(/^pos_quick_buy:(\d+|X)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
@@ -661,46 +769,79 @@ bot.action(/^pos_quick_buy:(\d+|X)$/, async (ctx) => {
   });
 });
 
-// Handle the user's numeric reply for "Buy X PLS"
+// Handle the user's numeric reply for "Buy X PLS" and "Sell X %"
 bot.on('text', async (ctx, next) => {
   const s: any = getPosState(ctx.from.id);
-  if (!s.awaitBuyX) return next && next();
-
   const raw = (ctx.message as any)?.text?.trim() || '';
-  const amt = Number(raw.replace(/,/g, ''));
-  if (!Number.isFinite(amt) || amt <= 0) {
-    s.awaitBuyX = false;
-    await ctx.reply('❌ Invalid amount. Please try again from Positions ➜ Buy X PLS.', { parse_mode: 'HTML' });
+
+  // Handle Sell X %
+  if (s.awaitSellX) {
+    s.awaitSellX = false;
+    const pct = Number(raw.replace('%', '').trim());
+    if (!Number.isFinite(pct) || pct <= 0 || pct > 100) {
+      await ctx.reply('❌ Invalid percent. Please try again from Positions ➜ Sell X %.', { parse_mode: 'HTML' });
+      return;
+    }
+    const selected: string | undefined = s.selectedToken;
+    if (!selected) {
+      await ctx.reply('❌ No token selected. Select a token first in Positions.', { parse_mode: 'HTML' });
+      return;
+    }
+    try {
+      await setToken(ctx.from.id, selected);
+      await setSellPct(ctx.from.id, Math.round(pct));
+      await ctx.reply(
+        `Ready to sell <b>${Math.round(pct)}%</b> of <code>${selected}</code>.\nTap <b>Sell Now</b> to execute.`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: Markup.inlineKeyboard([
+            [Markup.button.callback('🔴 Sell Now', 'sell_exec')],
+            [Markup.button.callback('⬅️ Back to Positions', 'pos_refresh')],
+          ]).reply_markup,
+          link_preview_options: { is_disabled: true },
+        } as any
+      );
+    } catch (e: any) {
+      await ctx.reply(`❌ Could not prepare sell: ${e?.message || e}`, { parse_mode: 'HTML' });
+    }
     return;
   }
 
-  const selected: string | undefined = s.selectedToken;
-  if (!selected) {
+  // Handle Buy X PLS
+  if (s.awaitBuyX) {
+    const amt = Number(raw.replace(/,/g, ''));
     s.awaitBuyX = false;
-    await ctx.reply('❌ No token selected. Select a token first in Positions.', { parse_mode: 'HTML' });
+    if (!Number.isFinite(amt) || amt <= 0) {
+      await ctx.reply('❌ Invalid amount. Please try again from Positions ➜ Buy X PLS.', { parse_mode: 'HTML' });
+      return;
+    }
+    const selected: string | undefined = s.selectedToken;
+    if (!selected) {
+      await ctx.reply('❌ No token selected. Select a token first in Positions.', { parse_mode: 'HTML' });
+      return;
+    }
+    try {
+      await setToken(ctx.from.id, selected);
+      await setBuyAmount(ctx.from.id, amt);
+      await ctx.reply(
+        `Ready to buy <code>${amt.toLocaleString('en-GB')}</code> PLS of <code>${selected}</code>.\nTap <b>Buy Now</b> to execute.`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: Markup.inlineKeyboard([
+            [Markup.button.callback('✅ Buy Now', 'buy_exec')],
+            [Markup.button.callback('⬅️ Back to Positions', 'pos_refresh')],
+          ]).reply_markup,
+          link_preview_options: { is_disabled: true },
+        } as any
+      );
+    } catch (e: any) {
+      await ctx.reply(`❌ Could not prepare quick buy: ${e?.message || e}`, { parse_mode: 'HTML' });
+    }
     return;
   }
 
-  try {
-    await setToken(ctx.from.id, selected);
-    await setBuyAmount(ctx.from.id, amt);
-    s.awaitBuyX = false;
-
-    await ctx.reply(
-      `Ready to buy <code>${amt.toLocaleString('en-GB')}</code> PLS of <code>${selected}</code>.\nTap <b>Buy Now</b> to execute.`,
-      {
-        parse_mode: 'HTML',
-        reply_markup: Markup.inlineKeyboard([
-          [Markup.button.callback('✅ Buy Now', 'buy_exec')],
-          [Markup.button.callback('⬅️ Back to Positions', 'pos_refresh')],
-        ]).reply_markup,
-        link_preview_options: { is_disabled: true },
-      } as any
-    );
-  } catch (e: any) {
-    s.awaitBuyX = false;
-    await ctx.reply(`❌ Could not prepare quick buy: ${e?.message || e}`, { parse_mode: 'HTML' });
-  }
+  // Fall-through to other text handlers (if any)
+  if (next) return next();
 });
 
 // Rename wallet (stub)
