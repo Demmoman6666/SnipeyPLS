@@ -98,7 +98,6 @@ function _avgKey(uid: number, token: string, dec?: number) {
  * @param dec        token decimals
  */
 function bumpAvgAfterBuy(uid: number, token: string, plsInWei: bigint, outTokWei: bigint, dec: number) {
-  // convert to JS numbers for quick math (display precision use-case)
   const addPls = Number(ethers.formatEther(plsInWei));
   const addTok = Number(ethers.formatUnits(outTokWei, dec));
   if (!(addPls > 0) || !(addTok > 0)) return;
@@ -109,8 +108,6 @@ function bumpAvgAfterBuy(uid: number, token: string, plsInWei: bigint, outTokWei
   const avgPlsPerToken = tokens > 0 ? (plsSpent / tokens) : 0;
 
   _overlaySet(uid, token, { tokens, plsSpent, avgPlsPerToken });
-
-  // Invalidate cached DB aggregate for this key so future reads stay fresh
   _avgEntryCache.delete(_avgKey(uid, token, dec));
 }
 
@@ -129,10 +126,8 @@ async function recordBuyAndCache(
   tokenDecimals: number
 ) {
   try {
-    // Persist (same shape as before)
     recordTrade(telegramId, walletAddress, token, 'BUY', amountInPlsWei, amountOutTokenWei, routeKey);
   } finally {
-    // Always bump overlay so UI reflects the new average immediately
     bumpAvgAfterBuy(telegramId, token, amountInPlsWei, amountOutTokenWei, tokenDecimals);
   }
 }
@@ -158,20 +153,12 @@ function getAvgEntryCached(uid: number, token: string, decimals?: number) {
 
 // 🔗 Address helpers
 const addrExplorer = (addr: string) => `https://otter.pulsechain.com/address/${addr}`;
-
-// Primary: paste address into the input field (tap = ready to copy/send)
 const copyAddrBtn = (addr: string, label = '📋 Copy') =>
   Markup.button.switchToCurrentChat(label, addr);
-
-// Explorer button (open address on the block explorer)
 const explorerAddrBtn = (addr: string, label = '🔍 Explorer') =>
   Markup.button.url(label, addrExplorer(addr));
-
-// Fallback copy (used automatically if you keep it in keyboards or want both)
 const copyAddrFallbackBtn = (addr: string, label = '📋 Copy') =>
   Markup.button.callback(label, `copy:${addr.toLowerCase()}`);
-
-// Fallback handler: sends a copyable code block (no link previews)
 bot.action(/^copy:(0x[a-fA-F0-9]{40})$/, async (ctx: any) => {
   await ctx.answerCbQuery('Address sent below');
   const addr = ctx.match[1];
@@ -192,7 +179,7 @@ function parseRefPayload(payload?: string | null): number | null {
   if (!payload) return null;
   const p = payload.trim();
   let m = p.match(new RegExp(`^${REF_PREFIX}(\\d{4,15})$`, 'i'));
-  if (!m) m = p.match(/^(\d{4,15})$/); // allow bare number too
+  if (!m) m = p.match(/^(\d{4,15})$/);
   if (!m) return null;
   const id = Number(m[1]);
   return Number.isFinite(id) ? id : null;
@@ -297,6 +284,13 @@ async function sendOrEdit(ctx: any, text: string, extra: any) {
   return ctx.reply(text, extra);
 }
 
+// 🔧 Wallet display helper to avoid type errors on WalletRow
+function walletDisplay(w: any, idx: number): { label: string; address: string } {
+  const label = w?.label ?? w?.name ?? w?.title ?? `W${idx + 1}`;
+  const address = w?.address ?? w?.addr ?? w?.wallet ?? '—';
+  return { label, address };
+}
+
 // Simple UI state per user for Positions
 type PosUiState = { walletIndex: number; expanded: Record<string, boolean>; sort: 'value'|'pnl' };
 const posUi = new Map<string | number, PosUiState>();
@@ -317,8 +311,7 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
   if (state.walletIndex < 0) state.walletIndex = count - 1;
 
   const active = wallets?.[state.walletIndex] || (await getActiveWallet(uid));
-  const walletLabel = active?.label || `W${state.walletIndex + 1}`;
-  const walletAddress = active?.address || '—';
+  const { label: walletLabel, address: walletAddress } = walletDisplay(active, state.walletIndex);
 
   // TODO: Map your real open positions into PositionItemView[]
   const items: PositionItemView[] = []; // keep empty until wired
@@ -475,7 +468,9 @@ bot.action(/^pos_token_refresh:(.+)$/, async (ctx) => {
 bot.action(/^pos_approve:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const id = ctx.match[1];
-  await setToken(ctx.from.id, id).catch(() => {});
+  try {
+    await setToken(ctx.from.id, id); // no .catch on possibly-void fn
+  } catch { /* ignore */ }
   await ctx.reply(`🛡 Approve requested for <code>${id}</code>.\nOpen the Sell menu to run approval if required.`, { parse_mode: 'HTML' });
 });
 
