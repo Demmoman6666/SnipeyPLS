@@ -9,7 +9,7 @@ export function mainMenu() {
      Markup.button.callback('🔴 Sell', 'menu_sell')],
 
     // Row 2 (Pump.Tires, Snipey, Positions)
-    [Markup.button.callback('Pump.Tires (Coming soon)', 'noop'),
+    [Markup.button.callback('Pump.Tires (Soon)', 'noop'),
      Markup.button.callback('🎯 Snipey', 'menu_snipe'),
      Markup.button.callback('📊 Positions', 'positions')],
 
