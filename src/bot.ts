@@ -504,9 +504,11 @@ async function buildPositionsViewState(ctx: any): Promise<PositionsViewState> {
 
 /* ---- Positions list (screen 1) ---- */
 
-// local keyboard builder: tokens laid out 4 per row, no Hide buttons, no Rename button
-function _buildPositionsKeyboard(v: PositionsViewState) {
+// local keyboard builder: quick-buy row, token buttons (max 4 per row), sort at bottom
+function _buildPositionsKeyboard(ctx: any, v: PositionsViewState) {
   const rows: any[][] = [];
+  const s: any = getPosState(ctx.from.id); // we use `any` to read selectedToken without changing the type
+  const selected: string | undefined = s.selectedToken;
 
   // Top controls
   rows.push([
@@ -520,21 +522,26 @@ function _buildPositionsKeyboard(v: PositionsViewState) {
     Markup.button.callback('Next ▶️', 'pos_wallet_next'),
   ]);
 
-  // Sort
+  // Quick buy row (requires a selected token)
   rows.push([
-    Markup.button.callback(`↕️ Sort: ${v.sortLabel || 'By: Value'}`, 'pos_sort_toggle'),
+    Markup.button.callback('Buy 250k PLS', 'pos_quick_buy:250000'),
+    Markup.button.callback('Buy 1M PLS', 'pos_quick_buy:1000000'),
+    Markup.button.callback('Buy X PLS', 'pos_quick_buy:X'),
   ]);
 
-  // Token selection buttons (max 4 per row)
-  const tokenButtons = v.items.map(it =>
-    Markup.button.callback(
-      `${it.symbol} — ${it.trend || ''} — ${it.positionValue}`.trim(),
-      `pos_token:${it.id}`
-    )
-  );
+  // Token selection buttons ABOVE sort (max 4 per row). Clicking selects; it does not navigate.
+  const tokenButtons = v.items.map(it => {
+    const label =
+      `${selected === it.id ? '✅ ' : ''}` +
+      `${it.symbol} — ${it.trend || ''} — ${it.positionValue}`.trim();
+    return Markup.button.callback(label, `pos_select:${it.id}`);
+  });
   for (let i = 0; i < tokenButtons.length; i += 4) {
     rows.push(tokenButtons.slice(i, i + 4));
   }
+
+  // Sort row at the bottom
+  rows.push([Markup.button.callback(`↕️ Sort: ${v.sortLabel || 'By: Value'}`, 'pos_sort_toggle')]);
 
   return Markup.inlineKeyboard(rows);
 }
@@ -544,7 +551,7 @@ bot.action('positions', async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const view = await buildPositionsViewState(ctx);
   const text = renderPositionsMessage(view);
-  const kb = _buildPositionsKeyboard(view);
+  const kb = _buildPositionsKeyboard(ctx, view);
   await sendOrEdit(ctx, text, {
     parse_mode: 'HTML',
     link_preview_options: { is_disabled: true },
@@ -557,7 +564,7 @@ bot.action('pos_refresh', async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   const view = await buildPositionsViewState(ctx);
   const text = renderPositionsMessage(view);
-  const kb = _buildPositionsKeyboard(view);
+  const kb = _buildPositionsKeyboard(ctx, view);
   await sendOrEdit(ctx, text, {
     parse_mode: 'HTML',
     link_preview_options: { is_disabled: true },
@@ -571,7 +578,7 @@ bot.action('pos_wallet_prev', async (ctx) => {
   const s = getPosState(ctx.from.id); s.walletIndex--;
   const view = await buildPositionsViewState(ctx);
   const text = renderPositionsMessage(view);
-  const kb = _buildPositionsKeyboard(view);
+  const kb = _buildPositionsKeyboard(ctx, view);
   await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
 });
 bot.action('pos_wallet_next', async (ctx) => {
@@ -579,7 +586,7 @@ bot.action('pos_wallet_next', async (ctx) => {
   const s = getPosState(ctx.from.id); s.walletIndex++;
   const view = await buildPositionsViewState(ctx);
   const text = renderPositionsMessage(view);
-  const kb = _buildPositionsKeyboard(view);
+  const kb = _buildPositionsKeyboard(ctx, view);
   await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
 });
 
@@ -590,15 +597,116 @@ bot.action('pos_sort_toggle', async (ctx) => {
   s.sort = (s.sort === 'value') ? 'pnl' : 'value';
   const view = await buildPositionsViewState(ctx);
   const text = renderPositionsMessage(view);
-  const kb = _buildPositionsKeyboard(view);
+  const kb = _buildPositionsKeyboard(ctx, view);
   await sendOrEdit(ctx, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: kb.reply_markup });
+});
+
+// Select a token (no navigation, just remember selection and refresh keyboard)
+bot.action(/^pos_select:(0x[a-fA-F0-9]{40})$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const id = ctx.match[1].toLowerCase();
+  const s: any = getPosState(ctx.from.id);
+  s.selectedToken = id;
+
+  // Re-render with checkmark on the selected token
+  const view = await buildPositionsViewState(ctx);
+  const text = renderPositionsMessage(view);
+  const kb = _buildPositionsKeyboard(ctx, view);
+  await sendOrEdit(ctx, text, {
+    parse_mode: 'HTML',
+    link_preview_options: { is_disabled: true },
+    reply_markup: kb.reply_markup,
+  });
+});
+
+// Quick-buy buttons (requires a selected token). We prep a Buy Now button that triggers the bot's existing 'buy_exec'.
+bot.action(/^pos_quick_buy:(\d+|X)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  const s: any = getPosState(ctx.from.id);
+  const selected: string | undefined = s.selectedToken;
+  const code = ctx.match[1];
+
+  if (!selected) {
+    return ctx.answerCbQuery('Select a token first', { show_alert: true }).catch(() => {});
+  }
+
+  // Fixed amounts
+  if (code !== 'X') {
+    const amt = Number(code);
+    try {
+      await setToken(ctx.from.id, selected);
+      await setBuyAmount(ctx.from.id, amt);
+      await ctx.reply(
+        `Ready to buy <code>${amt.toLocaleString('en-GB')}</code> PLS of <code>${selected}</code>.\nTap <b>Buy Now</b> to execute.`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: Markup.inlineKeyboard([
+            [Markup.button.callback('✅ Buy Now', 'buy_exec')],
+            [Markup.button.callback('⬅️ Back to Positions', 'pos_refresh')],
+          ]).reply_markup,
+          link_preview_options: { is_disabled: true },
+        } as any
+      );
+    } catch (e: any) {
+      await ctx.reply(`❌ Could not prepare quick buy: ${e?.message || e}`, { parse_mode: 'HTML' });
+    }
+    return;
+  }
+
+  // "X PLS" — ask the user for an amount (ForceReply). We'll handle the reply below.
+  s.awaitBuyX = true;
+  await ctx.reply('Enter PLS amount to buy (e.g., 123.45):', {
+    reply_markup: { force_reply: true, selective: true } as any,
+    parse_mode: 'HTML',
+  });
+});
+
+// Handle the user's numeric reply for "Buy X PLS"
+bot.on('text', async (ctx, next) => {
+  const s: any = getPosState(ctx.from.id);
+  if (!s.awaitBuyX) return next && next();
+
+  const raw = (ctx.message as any)?.text?.trim() || '';
+  const amt = Number(raw.replace(/,/g, ''));
+  if (!Number.isFinite(amt) || amt <= 0) {
+    s.awaitBuyX = false;
+    await ctx.reply('❌ Invalid amount. Please try again from Positions ➜ Buy X PLS.', { parse_mode: 'HTML' });
+    return;
+  }
+
+  const selected: string | undefined = s.selectedToken;
+  if (!selected) {
+    s.awaitBuyX = false;
+    await ctx.reply('❌ No token selected. Select a token first in Positions.', { parse_mode: 'HTML' });
+    return;
+  }
+
+  try {
+    await setToken(ctx.from.id, selected);
+    await setBuyAmount(ctx.from.id, amt);
+    s.awaitBuyX = false;
+
+    await ctx.reply(
+      `Ready to buy <code>${amt.toLocaleString('en-GB')}</code> PLS of <code>${selected}</code>.\nTap <b>Buy Now</b> to execute.`,
+      {
+        parse_mode: 'HTML',
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback('✅ Buy Now', 'buy_exec')],
+          [Markup.button.callback('⬅️ Back to Positions', 'pos_refresh')],
+        ]).reply_markup,
+        link_preview_options: { is_disabled: true },
+      } as any
+    );
+  } catch (e: any) {
+    s.awaitBuyX = false;
+    await ctx.reply(`❌ Could not prepare quick buy: ${e?.message || e}`, { parse_mode: 'HTML' });
+  }
 });
 
 // Rename wallet (stub)
 bot.action('pos_wallet_edit', async (ctx) => {
   await ctx.answerCbQuery('Rename from Wallets screen for now', { show_alert: false });
 });
-
 /* ---- Per-token actions (screen 2) ---- */
 
 bot.action(/^pos_token:(.+)$/, async (ctx) => {
